@@ -1,0 +1,310 @@
+"""The voice manager.
+
+Owns the whole spoken interface:
+
+* the wake-word loop ("Jarvis" → "Yes, sir?")
+* utterance capture and transcription
+* the conversation window, so a follow-up doesn't need the wake word again
+* the speech queue, with interruption and barge-in
+
+Everything degrades: no microphone library, no wake model, no Whisper — each
+missing piece disables its own feature and reports why, while text interaction
+and the browser microphone fallback keep working.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import time
+from collections.abc import Callable
+from typing import Any
+
+from ..core.config import Config
+from ..core.events import AssistantState, EventBus, EventType
+from ..core.logging import get_logger
+from ..core.telemetry import Telemetry
+from .audio import Microphone, record_utterance
+from .stt import build_stt
+from .tts import build_tts
+from .wakeword import WhisperWakeDetector, build_wake_detector
+
+log = get_logger("jarvis.voice")
+
+
+class VoiceState:
+    OFF = "off"
+    WAITING_FOR_WAKE = "waiting_for_wake"
+    LISTENING = "listening"
+    TRANSCRIBING = "transcribing"
+    SPEAKING = "speaking"
+
+
+class VoiceManager:
+    def __init__(self, config: Config, bus: EventBus, telemetry: Telemetry,
+                 on_utterance: Callable[[str, str], Any] | None = None):
+        self._config = config
+        self._bus = bus
+        self._telemetry = telemetry
+        self._on_utterance = on_utterance
+
+        self.tts = build_tts(config, bus)
+        self.stt = build_stt(config)
+        self.wake = build_wake_detector(config, self.stt)
+        self.microphone = Microphone(config.voice.input_device or None)
+
+        self.state = VoiceState.OFF
+        self._listen_task: asyncio.Task | None = None
+        self._speech_task: asyncio.Task | None = None
+        self._speech_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._conversation_until = 0.0
+        self._status: dict[str, Any] = {}
+        self._speaking = False
+
+    # ------------------------------------------------------------------
+    # status
+    # ------------------------------------------------------------------
+    async def probe(self) -> dict[str, Any]:
+        """Check every voice component and report what's usable and why."""
+        mic_ok, mic_note = Microphone.available()
+        tts_ok, tts_note = await self.tts.available()
+        stt_ok, stt_note = await self.stt.available()
+        wake_ok, wake_note = await self.wake.available()
+        self._status = {
+            "enabled": self._config.voice.enabled,
+            "microphone": {"ok": mic_ok, "note": mic_note},
+            "tts": {"ok": tts_ok, "note": tts_note, "engine": self.tts.name},
+            "stt": {"ok": stt_ok, "note": stt_note, "engine": self.stt.name},
+            "wake": {"ok": wake_ok, "note": wake_note, "engine": self.wake.name,
+                     "word": self._config.voice.wake_word},
+            "state": self.state,
+            #: When local capture isn't possible the UI can still push audio or
+            #: use the browser's own recogniser.
+            "browser_fallback": not (mic_ok and stt_ok),
+        }
+        return self._status
+
+    @property
+    def status(self) -> dict[str, Any]:
+        return self._status or {"state": self.state, "enabled": self._config.voice.enabled}
+
+    def reconfigure(self, config: Config) -> None:
+        was_listening = self._listen_task is not None and not self._listen_task.done()
+        self._config = config
+        self.tts = build_tts(config, self._bus)
+        self.stt = build_stt(config)
+        self.wake = build_wake_detector(config, self.stt)
+        self.microphone = Microphone(config.voice.input_device or None)
+        if was_listening:
+            asyncio.create_task(self.restart())
+
+    # ------------------------------------------------------------------
+    # listening
+    # ------------------------------------------------------------------
+    async def start(self) -> bool:
+        if not self._config.voice.enabled:
+            return False
+        status = await self.probe()
+        if not status["microphone"]["ok"]:
+            self._emit_state(VoiceState.OFF, note=status["microphone"]["note"])
+            log.info("voice input unavailable: %s", status["microphone"]["note"])
+            return False
+        if not status["stt"]["ok"]:
+            self._emit_state(VoiceState.OFF, note=status["stt"]["note"])
+            log.info("speech recognition unavailable: %s", status["stt"]["note"])
+            return False
+        if self._listen_task and not self._listen_task.done():
+            return True
+        self._listen_task = asyncio.create_task(self._listen_loop(), name="jarvis-voice")
+        asyncio.create_task(self.stt.warmup())
+        return True
+
+    async def stop(self) -> None:
+        if self._listen_task:
+            self._listen_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._listen_task
+            self._listen_task = None
+        self.microphone.stop()
+        self._emit_state(VoiceState.OFF)
+
+    async def restart(self) -> bool:
+        await self.stop()
+        return await self.start()
+
+    async def _listen_loop(self) -> None:
+        wake_available, note = await self.wake.available()
+        try:
+            self.microphone.start()
+        except Exception as exc:
+            log.warning("microphone couldn't be opened: %s", exc)
+            self._bus.publish(EventType.ERROR,
+                              message="Microphone access is unavailable. "
+                                      "Check System Settings → Privacy & Security → Microphone.",
+                              detail=str(exc))
+            self._emit_state(VoiceState.OFF, note=str(exc))
+            return
+
+        if not wake_available:
+            log.info("wake word disabled: %s", note)
+        self._emit_state(VoiceState.WAITING_FOR_WAKE if wake_available else VoiceState.LISTENING,
+                         note=note if not wake_available else "")
+
+        try:
+            while True:
+                if self._speaking:
+                    await asyncio.sleep(0.05)
+                    continue
+                if wake_available and time.time() > self._conversation_until:
+                    if not await self._await_wake():
+                        continue
+                    await self._acknowledge_wake()
+                await self._capture_and_dispatch()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception("voice loop failed")
+            self._bus.publish(EventType.ERROR, message="The voice system stopped unexpectedly.",
+                              detail=str(exc))
+        finally:
+            self.microphone.stop()
+            self._emit_state(VoiceState.OFF)
+
+    async def _await_wake(self) -> bool:
+        self._emit_state(VoiceState.WAITING_FOR_WAKE)
+        watch = self._telemetry.mark("voice.wake")
+        async for frame in self.microphone.frames():
+            if self._speaking:
+                continue
+            score = self.wake.process(frame)
+            if score <= 0:
+                continue
+            if isinstance(self.wake, WhisperWakeDetector):
+                if not await self.wake.check():
+                    continue
+            elif score < self.wake.threshold:
+                continue
+            watch.stop(engine=self.wake.name)
+            self._bus.publish(EventType.WAKE, word=self._config.voice.wake_word,
+                              score=round(float(score), 3))
+            self.wake.reset()
+            return True
+        return False
+
+    async def _acknowledge_wake(self) -> None:
+        """Answer the wake word instantly — no model, no network."""
+        from ..core.personality import Personality
+
+        personality = Personality(self._config)
+        await self.speak(personality.wake_response())
+
+    async def _capture_and_dispatch(self) -> None:
+        self._emit_state(VoiceState.LISTENING)
+        self._bus.emit_state(AssistantState.LISTENING)
+        self.microphone.drain()
+        voice = self._config.voice
+        audio = await record_utterance(
+            self.microphone,
+            silence_threshold=voice.silence_threshold,
+            silence_tail_s=voice.silence_tail_s,
+            max_seconds=voice.max_utterance_s,
+            on_level=lambda level: self._bus.publish(EventType.VOICE_STATE,
+                                                     state=VoiceState.LISTENING,
+                                                     level=round(level, 4)),
+        )
+        if audio is None:
+            self._emit_state(VoiceState.WAITING_FOR_WAKE)
+            self._bus.emit_state(AssistantState.IDLE)
+            return
+
+        self._emit_state(VoiceState.TRANSCRIBING)
+        watch = self._telemetry.mark("voice.stt")
+        text = (await self.stt.transcribe(audio)).strip()
+        watch.stop(chars=len(text))
+        if not text:
+            self._emit_state(VoiceState.WAITING_FOR_WAKE)
+            self._bus.emit_state(AssistantState.IDLE)
+            return
+
+        self._conversation_until = time.time() + voice.conversation_window_s
+        await self._dispatch(text, "voice")
+
+    async def _dispatch(self, text: str, source: str) -> None:
+        if self._on_utterance is None:
+            self._bus.publish(EventType.TRANSCRIPT, text=text, final=True, source=source)
+            return
+        result = self._on_utterance(text, source)
+        if asyncio.iscoroutine(result):
+            await result
+
+    # ------------------------------------------------------------------
+    # push-to-talk / browser audio
+    # ------------------------------------------------------------------
+    async def transcribe_audio(self, data: bytes, sample_rate: int = 16000) -> str:
+        """Transcribe audio captured elsewhere (the browser's microphone)."""
+        watch = self._telemetry.mark("voice.stt", source="browser")
+        text = (await self.stt.transcribe(data, sample_rate)).strip()
+        watch.stop(chars=len(text))
+        return text
+
+    # ------------------------------------------------------------------
+    # speaking
+    # ------------------------------------------------------------------
+    async def speak(self, text: str) -> bool:
+        text = (text or "").strip()
+        if not text or not self._config.voice.enabled:
+            return False
+        self._speaking = True
+        self._emit_state(VoiceState.SPEAKING)
+        self._bus.emit_state(AssistantState.SPEAKING)
+        self._bus.publish(EventType.SPEECH_START, text=text, engine=self.tts.name)
+        watch = self._telemetry.mark("voice.tts", chars=len(text))
+        try:
+            ok = await self.tts.speak(text)
+        finally:
+            watch.stop()
+            self._speaking = False
+            self._bus.publish(EventType.SPEECH_END, engine=self.tts.name)
+            self._emit_state(
+                VoiceState.WAITING_FOR_WAKE if self._listen_task else VoiceState.OFF
+            )
+        return ok
+
+    def enqueue(self, text: str) -> None:
+        """Queue a sentence for speech without awaiting it (streaming replies)."""
+        if not text.strip() or not self._config.voice.enabled:
+            return
+        self._speech_queue.put_nowait(text)
+        if self._speech_task is None or self._speech_task.done():
+            self._speech_task = asyncio.create_task(self._drain_speech())
+
+    async def _drain_speech(self) -> None:
+        while not self._speech_queue.empty():
+            text = await self._speech_queue.get()
+            await self.speak(text)
+
+    async def stop_speaking(self) -> bool:
+        while not self._speech_queue.empty():
+            try:
+                self._speech_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        if self._speech_task and not self._speech_task.done():
+            self._speech_task.cancel()
+        stopped = await self.tts.stop()
+        if stopped:
+            self._bus.publish(EventType.SPEECH_END, engine=self.tts.name, interrupted=True)
+        self._speaking = False
+        return stopped
+
+    @property
+    def speaking(self) -> bool:
+        return self._speaking
+
+    # ------------------------------------------------------------------
+    def _emit_state(self, state: str, **payload: Any) -> None:
+        self.state = state
+        self._bus.publish(EventType.VOICE_STATE, state=state, engine=self.tts.name, **payload)
+
+    def extend_conversation_window(self) -> None:
+        self._conversation_until = time.time() + self._config.voice.conversation_window_s

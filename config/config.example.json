@@ -1,0 +1,214 @@
+{
+  "workspace": "~/JARVIS",
+  "log_level": "INFO",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "open_browser": true
+  },
+  "models": {
+    "providers": {
+      "ollama": {
+        "kind": "ollama",
+        "base_url": "http://127.0.0.1:11434",
+        "api_key": "",
+        "enabled": true
+      },
+      "openai": {
+        "kind": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "",
+        "enabled": false
+      },
+      "anthropic": {
+        "kind": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "api_key": "",
+        "enabled": false
+      }
+    },
+    "fast": {
+      "provider": "ollama",
+      "model": "llama3.2:1b",
+      "temperature": 0.4,
+      "max_tokens": 200,
+      "timeout_s": 20.0
+    },
+    "general": {
+      "provider": "ollama",
+      "model": "llama3.1:8b",
+      "temperature": 0.4,
+      "max_tokens": 900,
+      "timeout_s": 120.0
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "llava:7b",
+      "temperature": 0.4,
+      "max_tokens": 600,
+      "timeout_s": 180.0
+    },
+    "fallbacks": {
+      "fast": [
+        "llama3.2:1b",
+        "qwen2.5:1.5b",
+        "gemma3:1b",
+        "qwen2.5:3b",
+        "phi3:mini",
+        "llama3.2:3b"
+      ],
+      "general": [
+        "llama3.1:8b",
+        "qwen2.5:7b",
+        "gemma3:4b",
+        "mistral:7b",
+        "llama3.2:3b",
+        "qwen2.5:3b"
+      ],
+      "vision": [
+        "llava:7b",
+        "qwen2.5vl:7b",
+        "llama3.2-vision:11b",
+        "moondream",
+        "minicpm-v"
+      ]
+    }
+  },
+  "voice": {
+    "enabled": true,
+    "wake_word": "jarvis",
+    "wake_engine": "openwakeword",
+    "wake_sensitivity": 0.5,
+    "conversation_window_s": 12.0,
+    "stt_engine": "faster-whisper",
+    "stt_model": "base.en",
+    "stt_compute_type": "int8",
+    "stt_language": "en",
+    "whispercpp_binary": "whisper-cli",
+    "whispercpp_model_path": "",
+    "tts_engine": "macos",
+    "tts_voice": "Daniel",
+    "tts_rate": 190,
+    "barge_in": true,
+    "input_device": "",
+    "silence_threshold": 0.012,
+    "max_utterance_s": 20.0,
+    "silence_tail_s": 0.9
+  },
+  "personality": {
+    "name": "JARVIS",
+    "address_user_as": "sir",
+    "warmth": 0.35,
+    "honorific_frequency": 0.35,
+    "style_notes": "British, composed, precise, subtly witty, never theatrical. Prefers one good sentence to three mediocre ones."
+  },
+  "security": {
+    "auto_approve": [
+      "low"
+    ],
+    "always_confirm": [
+      "high"
+    ],
+    "confirmation_timeout_s": 90.0,
+    "readable_roots": [
+      "~/Documents",
+      "~/Downloads",
+      "~/Desktop"
+    ],
+    "allow_shell": true,
+    "shell_allowlist": [
+      "ls",
+      "cat",
+      "head",
+      "tail",
+      "wc",
+      "df",
+      "du",
+      "uptime",
+      "date",
+      "whoami",
+      "sw_vers",
+      "system_profiler",
+      "sysctl",
+      "vm_stat",
+      "pmset",
+      "ioreg",
+      "networksetup",
+      "scutil",
+      "ps",
+      "top",
+      "ifconfig",
+      "ping",
+      "sysdiagnose",
+      "pgrep",
+      "which",
+      "echo",
+      "uname",
+      "hostname",
+      "free",
+      "lscpu"
+    ],
+    "shell_denylist": [
+      "rm",
+      "rmdir",
+      "mkfs",
+      "dd",
+      "shutdown",
+      "reboot",
+      "halt",
+      "kill",
+      "killall",
+      "chown",
+      "chmod",
+      "sudo",
+      "su",
+      "diskutil",
+      "csrutil",
+      "nvram",
+      "launchctl",
+      "curl",
+      "wget",
+      "ssh",
+      "scp",
+      "defaults",
+      "pkill",
+      "installer",
+      "brew"
+    ],
+    "clipboard_remote_guard": true,
+    "allow_screen_capture": true
+  },
+  "capabilities": {
+    "email": true,
+    "calendar": true,
+    "research": true,
+    "screen": true,
+    "diagnostics": true,
+    "files": true,
+    "browser": true,
+    "clipboard": true
+  },
+  "research": {
+    "search_provider": "duckduckgo",
+    "brave_api_key": "",
+    "searxng_url": "",
+    "max_results": 6,
+    "max_pages": 5,
+    "max_page_chars": 12000,
+    "per_request_timeout_s": 20.0,
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+  },
+  "memory": {
+    "enabled": true,
+    "context_turns": 6,
+    "max_facts_in_context": 6,
+    "auto_extract_facts": true
+  },
+  "ui": {
+    "developer_mode": false,
+    "show_telemetry": true,
+    "theme": "obsidian",
+    "reduced_motion": false
+  },
+  "onboarding_complete": false
+}
