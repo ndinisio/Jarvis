@@ -10,16 +10,25 @@ Two offline strategies, chosen by configuration:
 
 Both run entirely on the machine — audio never leaves the Mac to decide whether
 the user said "Jarvis".
+
+**Input contract.** :meth:`WakeWordDetector.process` takes one frame of 16 kHz
+mono audio, either as raw PCM ``bytes`` straight off the microphone or as a
+numpy array. Detectors convert with :func:`jarvis.voice.audio.to_int16_frame`
+rather than assuming a representation: openWakeWord requires a 1-D ``int16``
+array and raises on anything else.
 """
 
 from __future__ import annotations
 
 import abc
+import asyncio
 import contextlib
+import os
 import time
 from typing import Any
 
 from ..core.logging import get_logger
+from .audio import to_float32_frame, to_int16_frame
 
 log = get_logger("jarvis.voice.wake")
 
@@ -34,7 +43,20 @@ class WakeWordDetector(abc.ABC):
 
     @abc.abstractmethod
     def process(self, frame: Any) -> float:
-        """Feed one frame of int16 audio; return a detection score in 0..1."""
+        """Score one frame of 16 kHz mono audio, 0..1.
+
+        *frame* is raw PCM ``bytes`` from the microphone or a numpy array;
+        implementations convert it themselves via
+        :func:`jarvis.voice.audio.to_int16_frame`.
+        """
+
+    async def prepare(self) -> None:
+        """Load models before the listening loop starts.
+
+        Doing this up front means a missing model or an unusable runtime fails
+        at start-up, with a message, instead of raising inside the frame loop.
+        """
+        return None
 
     def reset(self) -> None:
         return None
@@ -75,20 +97,50 @@ class OpenWakeWordDetector(WakeWordDetector):
         return True, "ok"
 
     def _load(self):
+        """Fetch the pretrained model if needed and build the detector.
+
+        openWakeWord resolves a bare name like ``hey_jarvis`` against its
+        bundled ``MODELS`` table by substring, but only *after* the file has
+        been downloaded — a missing file surfaces later as an opaque runtime
+        error, so the download is done first and checked.
+        """
+        import openwakeword
         from openwakeword.model import Model
+        from openwakeword.utils import download_models
 
-        try:  # pragma: no cover - first-run model download
-            import openwakeword
-
-            openwakeword.utils.download_models([self.BUILTIN[self.wake_word]])
+        model_key = self.BUILTIN[self.wake_word]
+        try:  # pragma: no cover - network side effect on first run
+            download_models([model_key])
         except Exception as exc:
-            log.debug("openwakeword model download skipped: %s", exc)
-        return Model(wakeword_models=[self.BUILTIN[self.wake_word]], inference_framework="onnx")
+            log.warning("could not download the %s wake model: %s", model_key, exc)
+
+        expected = [
+            path for path in openwakeword.get_pretrained_model_paths("onnx")
+            if model_key in path
+        ]
+        if expected and not os.path.exists(expected[0]):
+            raise FileNotFoundError(
+                f"the {model_key} wake-word model is missing at {expected[0]}. "
+                "Run `python -c \"from openwakeword.utils import download_models; "
+                f'download_models([\'{model_key}\'])"` to fetch it.'
+            )
+
+        log.info("loading wake-word model %s (onnx)", model_key)
+        return Model(wakeword_models=[model_key], inference_framework="onnx")
+
+    async def prepare(self) -> None:
+        if self._model is None:
+            # Loading touches the network and onnxruntime; keep it off the loop.
+            self._model = await asyncio.to_thread(self._load)
 
     def process(self, frame: Any) -> float:
         if self._model is None:
             self._model = self._load()
-        scores = self._model.predict(frame)
+        # openWakeWord requires a 1-D int16 numpy array. The microphone hands us
+        # raw PCM bytes, so the conversion happens here rather than being left
+        # to the caller (passing the bytes through is what broke V1.0).
+        samples = to_int16_frame(frame)
+        scores = self._model.predict(samples)
         score = max(scores.values()) if scores else 0.0
         if score >= self.threshold:
             now = time.time()
@@ -130,7 +182,7 @@ class WhisperWakeDetector(WakeWordDetector):
             import numpy as np
         except ImportError:
             return 0.0
-        samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
+        samples = to_float32_frame(frame)
         rms = float(np.sqrt(np.mean(np.square(samples))) if samples.size else 0.0)
         if rms > self._energy_threshold:
             self._buffer.append(samples)

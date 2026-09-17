@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .core.app import JarvisApp
 from .core.events import EventType
 from .core.logging import get_logger
@@ -39,7 +40,7 @@ def create_app(jarvis: JarvisApp | None = None) -> FastAPI:
         finally:
             await jarvis.shutdown()
 
-    app = FastAPI(title="JARVIS", version="1.0.0", lifespan=lifespan, docs_url="/api/docs")
+    app = FastAPI(title="JARVIS", version=__version__, lifespan=lifespan, docs_url="/api/docs")
     app.state.jarvis = jarvis
 
     app.add_middleware(

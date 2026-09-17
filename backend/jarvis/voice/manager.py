@@ -24,12 +24,18 @@ from ..core.config import Config
 from ..core.events import AssistantState, EventBus, EventType
 from ..core.logging import get_logger
 from ..core.telemetry import Telemetry
-from .audio import Microphone, record_utterance
+from .audio import Microphone, record_utterance, to_int16_frame
 from .stt import build_stt
 from .tts import build_tts
 from .wakeword import WhisperWakeDetector, build_wake_detector
 
 log = get_logger("jarvis.voice")
+
+
+#: Consecutive per-frame detector failures tolerated before the wake loop gives
+#: up. A transient fault shouldn't kill listening; a permanent one shouldn't be
+#: retried 12 times a second in silence.
+_MAX_WAKE_FAILURES = 5
 
 
 class VoiceState:
@@ -145,6 +151,19 @@ class VoiceManager:
             self._emit_state(VoiceState.OFF, note=str(exc))
             return
 
+        if wake_available:
+            try:
+                await self.wake.prepare()
+            except Exception as exc:
+                log.exception("the wake-word model could not be loaded")
+                wake_available = False
+                note = str(exc)
+                self._bus.publish(
+                    EventType.ERROR,
+                    message="The wake word couldn't be loaded, so I'll keep listening "
+                            "without it. Use the microphone button to talk.",
+                    detail=str(exc),
+                )
         if not wake_available:
             log.info("wake word disabled: %s", note)
         self._emit_state(VoiceState.WAITING_FOR_WAKE if wake_available else VoiceState.LISTENING,
@@ -173,10 +192,39 @@ class VoiceManager:
     async def _await_wake(self) -> bool:
         self._emit_state(VoiceState.WAITING_FOR_WAKE)
         watch = self._telemetry.mark("voice.wake")
+        failures = 0
         async for frame in self.microphone.frames():
             if self._speaking:
                 continue
-            score = self.wake.process(frame)
+            # One conversion at the boundary: every detector gets the 1-D int16
+            # array openWakeWord requires, instead of raw bytes.
+            try:
+                samples = to_int16_frame(frame)
+                score = self.wake.process(samples)
+            except Exception as exc:
+                # Not suppression: a detector fault is logged in full and shown
+                # to the user, and a persistently broken detector stops the wake
+                # loop rather than spinning on the same error forever.
+                failures += 1
+                log.exception("wake-word detection failed on a frame (%d/%d)",
+                              failures, _MAX_WAKE_FAILURES)
+                if failures == 1:
+                    self._bus.publish(
+                        EventType.ERROR,
+                        message="Wake-word detection hit an error. I'm still listening.",
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+                if failures >= _MAX_WAKE_FAILURES:
+                    self._bus.publish(
+                        EventType.ERROR,
+                        message="Wake-word detection failed repeatedly and has been "
+                                "stopped. Use the microphone button to talk.",
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+                    watch.stop(ok=False, engine=self.wake.name)
+                    raise
+                continue
+            failures = 0
             if score <= 0:
                 continue
             if isinstance(self.wake, WhisperWakeDetector):

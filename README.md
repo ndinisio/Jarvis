@@ -1,4 +1,4 @@
-# JARVIS
+# JARVIS V1.1
 
 A local-first AI operating layer for macOS. You speak; it listens, decides the
 cheapest competent way to answer, and either answers instantly or goes away and
@@ -21,8 +21,72 @@ reasoning, memory and speech output. **No paid API is required.**
 
 ---
 
+## What's new in V1.1
+
+A bug-fix release. V1.1 fixes the wake-word loop, which crashed on the first
+audio frame on a real Mac.
+
+**The bug.** The microphone layer produces raw 16-bit PCM as `bytes`, and those
+bytes were handed straight to `openwakeword.Model.predict()`, which requires a
+numpy array:
+
+```
+ValueError: The input audio data (x) must by a Numpy array,
+            instead received an object of type <class 'bytes'>.
+```
+
+The microphone opened correctly (`microphone open at 16000 Hz`) and then the
+listening loop died on the first frame, so the wake word never worked.
+
+**The fix.** PCM conversion now lives at the audio boundary
+(`backend/jarvis/voice/audio.py`) instead of being each detector's business:
+
+| | |
+| --- | --- |
+| `to_int16_frame()` | raw PCM → 1-D, C-contiguous, writable, native-endian **int16** array |
+| `to_float32_frame()` | raw PCM → float32 in [-1, 1], which is what Whisper wants |
+
+`VoiceManager` converts once per frame and hands the array to the detector; both
+detectors also convert defensively, so neither representation can crash the loop.
+
+**Why `int16` specifically.** Making it "a numpy array" is not enough. openWakeWord
+0.6 buffers each frame through a Python list and then `np.array(...).astype(np.int16)`.
+Float samples in [-1, 1] are therefore **truncated to zero rather than rejected**:
+no exception, no detection, a wake word that silently never fires. Converting to
+int16 is what actually makes detection work — verified by inspecting the
+library's internal buffer (see below).
+
+**Also in V1.1**
+
+- The wake-word model is loaded by `prepare()` *before* the listening loop
+  starts, so a missing model or an unusable runtime reports itself at start-up
+  instead of raising inside the hot loop.
+- Model download uses an explicit `from openwakeword.utils import download_models`
+  and verifies the resolved file exists, with an actionable message if it doesn't.
+- A per-frame detector fault no longer kills listening: it is logged in full and
+  surfaced in the interface, and after five consecutive failures the wake loop
+  stops with a clear message rather than spinning on the same error. Errors are
+  reported, never silently swallowed.
+- `scripts/start.sh` exports `PYTHONPATH="$PWD/backend"` so the backend is
+  importable when an editable install doesn't register its path.
+- A partially-captured frame (odd byte count) is trimmed rather than raising.
+- Stereo input is down-mixed to mono correctly — the first version of this fix
+  scaled an already-int16-ranged average as if it were float, clipping every
+  sample to the rails. Caught by a test, fixed before release.
+
+**Verification.** The fix was verified against the real `openwakeword` 0.6.0
+package and the real `hey_jarvis_v0.1.onnx` model on Linux: the V1.0 crash
+reproduces exactly, the fixed path runs 12 s of audio through the real model
+with the loop alive at ~3% of real time, and the audio inside openWakeWord's
+buffer is bit-identical to what the microphone produced. **A true positive —
+a person actually saying "Jarvis" — has not been verified**; that needs a
+microphone and a Mac. See [Known limitations](#known-limitations).
+
+---
+
 ## Contents
 
+- [What's new in V1.1](#whats-new-in-v11)
 - [What it does](#what-it-does)
 - [The idea: latency proportional to complexity](#the-idea-latency-proportional-to-complexity)
 - [Requirements](#requirements)
@@ -40,7 +104,7 @@ reasoning, memory and speech output. **No paid API is required.**
 - [Adding a tool](#adding-a-tool)
 - [Adding a model provider](#adding-a-model-provider)
 - [Troubleshooting](#troubleshooting)
-- [What V1 does not do](#what-v1-does-not-do)
+- [Known limitations](#known-limitations)
 
 ---
 
@@ -256,9 +320,27 @@ jarvis config             # the effective configuration
 
 ## Voice setup
 
-**Wake word.** `openwakeword` ships a pretrained "hey jarvis" model — offline,
-about 200 ms, low CPU. Choose "Whisper keyword spotting" in Settings if you want
-a different wake phrase (it transcribes short bursts instead, costing more CPU).
+**Wake word.** `openwakeword` provides a pretrained "hey jarvis" model — offline
+and inexpensive (measured at roughly 2 ms per 80 ms frame, about 3% of one core).
+Both "Jarvis" and "Hey Jarvis" use that model.
+
+On first use the model files are downloaded from the openWakeWord GitHub
+releases into the package's `resources/models` directory (~5 MB, including the
+shared melspectrogram and embedding models). That download happens once, during
+`prepare()`, before listening starts; the ONNX runtime is used, so
+`onnxruntime` must be installed — it comes with `openwakeword`.
+
+If the model can't be loaded, JARVIS says so at start-up and keeps listening
+*without* the wake word rather than failing: the microphone button still works.
+
+Choose "Whisper keyword spotting" in Settings for a different wake phrase — it
+transcribes short bursts and matches the word, which costs more CPU but works
+with any phrase.
+
+**Audio format.** The microphone produces 16 kHz mono 16-bit PCM in 80 ms frames
+(1280 samples — openWakeWord's native chunk size). Conversion to the array the
+detector needs happens in `backend/jarvis/voice/audio.py`; see
+[What's new in V1.1](#whats-new-in-v11) for why the representation matters.
 
 **Speech recognition.** `faster-whisper` with `base.en` by default. `tiny.en` is
 quicker and less accurate; `small.en` is better and slower. The model downloads
@@ -450,11 +532,18 @@ Useful things to know:
 PYTHONPATH=backend ./.venv/bin/pytest tests/ -v
 ```
 
-194 tests covering routing, tool schemas and validation, permission gating,
+219 tests covering routing, tool schemas and validation, permission gating,
 the file sandbox, the task manager and cancellation, clipboard handling and
 secret detection, system information, the model provider abstraction and
 substitution, configuration and memory, the research pipeline, email/calendar
 parsing, the voice layer, the HTTP and WebSocket API, and error handling.
+
+`tests/test_voice_audio.py` (new in V1.1) pins the audio boundary: PCM
+conversion across every input shape and dtype, the exact V1.0 regression (bytes
+must never reach `predict()`), and the wake loop's behaviour when a detector
+fails. Its stub model reproduces openWakeWord's real contract — including the
+part that *doesn't* raise — so a fix that silently deafens the detector fails
+the suite rather than passing it.
 
 No test requires a paid API, a network connection or a Mac: models, HTTP and
 AppleScript are mocked at their boundaries.
@@ -530,7 +619,8 @@ and UI never learn which provider answered.
 | "The local AI service isn't available." | Ollama isn't running | `ollama serve`, then check `jarvis doctor` |
 | Conversation fails but commands work | no model installed for that slot | `./scripts/pull-models.sh` |
 | "Microphone access is disabled." | macOS permission | System Settings → Privacy & Security → Microphone → allow your terminal |
-| Wake word never fires | `openwakeword` missing, or noise | `pip install -e ".[voice]"`; raise sensitivity in Settings |
+| Wake word never fires | `openwakeword` missing, model not downloaded, or too much background noise | `pip install -e ".[voice]"`, check the log for `loading wake-word model`, raise `wake_sensitivity` in Settings |
+| `must by a Numpy array` in the log | a pre-V1.1 build | update to V1.1 — this is the bug it fixes |
 | "Safari didn't respond to the automation request." | Automation permission | Privacy & Security → Automation → allow Safari for your terminal |
 | Screen capture fails | Screen Recording permission | Privacy & Security → Screen Recording (restart the terminal afterwards) |
 | Mail returns nothing | Mail.app not running or not permitted | open Mail once, accept the automation prompt |
@@ -544,9 +634,22 @@ More: [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 ---
 
-## What V1 does not do
+## Known limitations
 
-Stated plainly, so testing is aimed at the right things:
+Stated plainly, so testing is aimed at the right things.
+
+**Not yet verified with a live microphone.** The V1.1 fix is verified against the
+real `openwakeword` package and model — the old crash reproduces, the new path
+runs continuously, and the audio inside openWakeWord's buffer is bit-identical to
+the captured frames. But no test in this repository has put a *human voice*
+through the pipeline: saying "Jarvis" and getting a response is unverified, as is
+the wake → Whisper → orchestrator → speech → back-to-listening round trip on
+real hardware. If the wake word does not fire on your Mac, that is now a
+detection/tuning question (`wake_sensitivity`, microphone gain, background noise)
+rather than the crash V1.1 fixes — check `~/JARVIS/logs/jarvis.log` for
+`wake-word detection failed`, which would indicate a software fault instead.
+
+**Other current limits**
 
 * No Spotify, HomeKit, Reminders, Messages or Contacts yet — the tool interface
   is ready for them ([`docs/extending.md`](docs/extending.md)).
@@ -555,6 +658,8 @@ Stated plainly, so testing is aimed at the right things:
 * Research reads static HTML; it doesn't run JavaScript-heavy pages.
 * Vision is single-screenshot; no continuous monitoring (by design).
 * The interface is a local web app served by the backend, not a signed `.app`.
+* `openwakeword` only ships pretrained models for a few phrases. "Jarvis" is one
+  of them; a custom wake word needs the Whisper wake engine or a trained model.
 
 ---
 
