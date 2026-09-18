@@ -1,14 +1,22 @@
 """Model routing.
 
-Three logical *slots* exist:
+Logical *slots*, each named for a job rather than a model:
 
-``fast``      tiny model — intent classification, greetings, short rewrites
-``general``   capable model — conversation, reasoning, synthesis
-``vision``    multimodal model — screen understanding
+``fast``        tiny model — intent classification, greetings, short rewrites
+``general``     capable model — conversation and synthesis
+``reasoning``   deliberate model — understanding, planning, verification, repair
+``vision``      multimodal model — screen understanding
+``specialist``  optional domain model — code, maths, a local fine-tune
 
 The router resolves a slot to a concrete (provider, model) pair at call time,
 substituting an installed model when the configured one is missing, so a fresh
 machine with any single Ollama model still works.
+
+``reasoning`` and ``specialist`` are normally left unconfigured, in which case
+they *defer* to another slot (see :data:`SLOT_DEFERS_TO`). That is what lets
+the agentic loop ask for the right kind of thinking without requiring anyone to
+download five models: the roles exist in the code from day one, and upgrading
+one is a single line of configuration rather than a refactor.
 """
 
 from __future__ import annotations
@@ -38,7 +46,17 @@ _SIZE_ORDER = ("0.5b", "1b", "1.5b", "2b", "3b", "4b", "7b", "8b", "9b", "11b", 
 class Slot:
     FAST = "fast"
     GENERAL = "general"
+    REASONING = "reasoning"
     VISION = "vision"
+    SPECIALIST = "specialist"
+
+
+#: Where a slot with no model of its own sends its work. Followed transitively,
+#: so an unconfigured ``specialist`` lands on ``general`` via ``reasoning``.
+SLOT_DEFERS_TO = {
+    Slot.REASONING: Slot.GENERAL,
+    Slot.SPECIALIST: Slot.REASONING,
+}
 
 
 @dataclass(slots=True)
@@ -87,8 +105,22 @@ class ModelRouter:
     def providers(self) -> dict[str, ModelProvider]:
         return dict(self._providers)
 
+    def effective_slot(self, slot: str) -> str:
+        """Follow an unconfigured slot to the one that will actually serve it."""
+        seen: set[str] = set()
+        while slot not in seen:
+            seen.add(slot)
+            conf = getattr(self._config.models, slot, None)
+            if conf is None:
+                log.debug("unknown model slot %r, using %s", slot, Slot.GENERAL)
+                return Slot.GENERAL
+            if conf.model.strip() or slot not in SLOT_DEFERS_TO:
+                return slot
+            slot = SLOT_DEFERS_TO[slot]
+        return Slot.GENERAL  # pragma: no cover - only if SLOT_DEFERS_TO cycles
+
     def slot_config(self, slot: str):
-        return getattr(self._config.models, slot)
+        return getattr(self._config.models, self.effective_slot(slot))
 
     # -- discovery ---------------------------------------------------------
     async def installed_models(self, provider_key: str, max_age: float = 60.0) -> list[str]:
@@ -103,6 +135,7 @@ class ModelRouter:
         return models
 
     async def resolve(self, slot: str, max_age: float = 60.0) -> Resolution:
+        slot = self.effective_slot(slot)
         cached = self._resolved.get(slot)
         if cached and time.time() - cached[0] < max_age:
             return cached[1]
