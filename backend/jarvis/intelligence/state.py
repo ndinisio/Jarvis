@@ -352,6 +352,26 @@ class ConversationState:
                 f"{t.role}: {t.text[:180]}" for t in history))
         return "\n\n".join(blocks)
 
+    def describe_recent_conversation(self, include_turns: int = 4) -> str:
+        """The clock and recent dialogue — nothing about ongoing tasks.
+
+        For judgements that must not be biased by stale work: chat's own
+        persona and intent triage. A prior "research specialised cells"
+        objective, an open browser tab, or a list of recently referenced
+        entities are all genuinely useful context for the machinery that
+        resolves *references* (:meth:`describe_for_model`, used by
+        Understanding, the planner and the decision loop) — but they must
+        never themselves read as evidence that a fresh, unrelated utterance
+        is a continuation of that work. Only the verbatim back-and-forth is
+        included here, which is what a plain "how are you" needs and no more.
+        """
+        blocks: list[str] = [dt.datetime.now().strftime("now: %A %d %B %Y, %H:%M")]
+        if include_turns and self.turns:
+            history = list(self.turns)[-include_turns * 2:]
+            blocks.append("conversation:\n" + "\n".join(
+                f"{t.role}: {t.text[:180]}" for t in history))
+        return "\n\n".join(blocks)
+
     def snapshot(self) -> dict[str, Any]:
         """For the developer panel and tests."""
         return {

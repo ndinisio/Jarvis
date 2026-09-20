@@ -165,7 +165,7 @@ button { cursor: pointer; }
   text-transform: uppercase; color: var(--text-faint);
 }
 
-.voice, .activity, .results, .dev {
+.voice, .activity, .results, .dev, .reason {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-panel);
@@ -317,6 +317,34 @@ button { cursor: pointer; }
 }
 .voice__facts dd.is-missing { color: var(--warn); }
 .voice__note { margin: 10px 0 0; font-size: 11px; color: var(--text-faint); line-height: 1.45; }
+
+/* --- reasoning ------------------------------------------------------------ */
+
+.reason { margin-bottom: 12px; border-color: rgba(95, 211, 243, 0.22); }
+.reason[data-done='true'] { border-color: var(--line); }
+.reason__cost { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); }
+.reason__objective { margin: 0; font-size: 12.5px; line-height: 1.45; }
+.reason__context {
+  margin: 4px 0 0; font-family: var(--mono); font-size: 10px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.reason__steps { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 5px; }
+.reason__steps li {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px;
+  font-size: 11.5px; color: var(--text-faint);
+}
+.reason__branch { font-family: var(--mono); font-size: 10px; opacity: 0.5; }
+.reason__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reason__steps li[data-state='active'] { color: var(--accent); }
+.reason__steps li[data-state='active'] .reason__label { animation: pulse 1.6s ease-in-out infinite; }
+.reason__steps li[data-state='done'] { color: var(--text-dim); }
+.reason__steps li[data-state='done'] .reason__branch { color: var(--ok); }
+.reason__steps li[data-state='failed'] { color: var(--warn); }
+.reason__question {
+  margin: 10px 0 0; font-size: 12px; color: var(--violet); line-height: 1.45;
+}
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
 /* --- activity ------------------------------------------------------------- */
 
@@ -472,6 +500,16 @@ button { cursor: pointer; }
 .dev__path[data-path='quick'] { color: var(--ok); border-color: rgba(87, 217, 163, 0.3); }
 .dev__path[data-path='heuristic'] { color: var(--accent); border-color: rgba(95, 211, 243, 0.3); }
 .dev__path[data-path='model'] { color: var(--warn); border-color: rgba(240, 180, 88, 0.3); }
+.dev__stage {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text-faint); border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 5px; min-width: 62px; text-align: center;
+}
+.dev__stage[data-stage='intent'] { color: var(--accent); border-color: rgba(95, 211, 243, 0.3); }
+.dev__stage[data-stage='plan'] { color: var(--violet); border-color: rgba(176, 140, 255, 0.3); }
+.dev__stage[data-stage='verify'] { color: var(--ok); border-color: rgba(87, 217, 163, 0.3); }
+.dev__stage[data-stage='recover'] { color: var(--warn); border-color: rgba(240, 180, 88, 0.3); }
+.dev__stage[data-stage='clarify'] { color: var(--violet); border-color: rgba(176, 140, 255, 0.3); }
 .dev__route, .dev__metric { flex: 1; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dev__ms { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
 .dev__ms.is-warn { color: var(--warn); }

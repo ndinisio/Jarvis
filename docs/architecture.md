@@ -18,50 +18,66 @@ and moved to the background.
                                         │
                               1. publish transcript
                               2. stop any speech (barge-in)
-                              3. store the user turn
+                              3. store the user turn + begin the state turn
                               4. route  ─────────────────┐
                                         │                │
                     ┌───────────────────┴──────┐         │  telemetry span
                     │                          │         │  per stage
-              deterministic              capability      │
-              (control / tool)          (may use tools   │
-                    │                    and models)     │
-                    └───────────┬──────────────┘         │
-                                │                        │
-                   short?  ─────┴─────  long?  ──────────┘
-                     │                    │
-              answer inline      acknowledge + spawn task
-                     │                    │
-                     │            progress events → UI
-                     │                    │
-                     └────────► respond: event + speech + memory
+              quick match                 everything     │
+             (a certainty)                   else        │
+                    │                          │         │
+             control / tool          intelligence agent   │
+                    │                  understand → plan  │
+                    │                  → decide → act     │
+              wrong tool? ─────────►   → verify → repair   │
+                    │                          │         │
+                   short?  ─────┬──────────────┘  long?  ─┘
+                     │          │                    │
+              answer inline     │      acknowledge + spawn task
+                     │          │                    │
+                     │          │            progress events → UI
+                     │          │                    │
+                     └──────────┴───────► respond: event + speech + memory
 ```
 
-### Stage 1 — quick commands (`router/quick.py`)
+### The fast path (`router/quick.py`)
 
 Roughly 60 regular expressions mapping directly to a control handler or a tool
 call with arguments. No model, no I/O beyond the tool itself. Patterns are
 deliberately tight: anything ambiguous falls through rather than guessing.
 
-Measured at ~0.02–0.1 ms per request.
+Measured at ~0.02–0.1 ms of routing, 3–5 ms end to end.
 
-### Stage 2 — heuristics (`router/router.py::_heuristic`)
+A quick match is taken because it is a *certainty*, not a guess. When the tool
+it chose turns out not to be the right one — `ToolResult.wrong_tool`, as when
+"open the BBC" finds no such application — the turn falls through to the agent
+instead of ending in a dead end. A tool that tried and *failed* does not do
+this: that failure is the honest answer.
 
-Weighted keyword scoring across the capability table. A capability wins only if
-it scores above a threshold *and* beats the runner-up by a margin, so
-"summarise this email about my calendar" doesn't silently pick one at random.
+### The intelligence agent (`intelligence/`, V1.2)
 
-### Stage 3 — fast-model classification
+Everything the fast path declines. One turn is:
 
-A 1B-class model receives a compact list of capabilities and returns
-`{"capability": …, "confidence": …}` in JSON mode with a hard timeout. Small
-local models frequently wrap JSON in prose, so `extract_json` is forgiving, and
-an unrecognised name is fuzzy-matched before the request falls through.
+```
+understand (in context)  →  resolve references  →  [plan, if multi-step]
+  →  decide  →  act  →  observe  →  verify  →  repair / continue / ask
+  →  answer
+```
 
-### Stage 4 — conversation
+Bounded by `intelligence.max_steps` (default 6) and `recovery_budget` (2). Every
+tool call goes through the same registry, with the same risk gate, as every
+other path. See [`intelligence.md`](intelligence.md).
 
-The general model, with layered context (see below). Streams token by token to
-the UI, and to TTS at sentence boundaries so speech never sounds fragmented.
+Behind it, the V1.1 stages are still present and still used:
+
+* **Heuristics** (`router/router.py::_heuristic`) — weighted keyword scoring,
+  which still decides whether a request is *long-running* and therefore gets an
+  immediate acknowledgement.
+* **Fast-model classification** — a 1B-class model returns
+  `{"capability": …, "confidence": …}` in JSON mode with a hard timeout.
+  `extract_json` is forgiving, because small local models wrap JSON in prose.
+* **Capabilities** — the whole V1.1 dispatch, used by the quick path and as the
+  fallback when `intelligence.enabled` is off.
 
 ---
 
@@ -84,6 +100,24 @@ Four capabilities implement their own flow because they genuinely differ:
 There is one orchestrator. Capabilities share the model layer, tools, memory,
 permissions, task manager, telemetry and the event bus. Independent contexts are
 used where they help (vision, research synthesis) — not to look sophisticated.
+
+---
+
+## Two kinds of context
+
+They are different things and they are kept apart:
+
+| | `core/context.py` | `intelligence/state.py` |
+| --- | --- | --- |
+| Question it answers | who is this person, what do they like, what have we discussed | what are we doing *right now* |
+| Lifetime | across sessions (SQLite) | this conversation, bounded |
+| Contents | identity, preferences, facts, recent turns | objective, open page, inbox, sources, screen, entities |
+| Filled by | the memory store | an observer on the tool registry |
+| Used for | the system prompt | reference resolution, tool shortlisting, decisions |
+
+V1.2 deliberately did not turn into a memory project. The short-term state is
+only what understanding *now* requires: a handful of turns, at most 40 entities,
+and a screen description that expires after three minutes.
 
 ---
 

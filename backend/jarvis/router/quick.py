@@ -5,8 +5,18 @@ answer comes from macOS or a phrasebook in a few milliseconds, and no model is
 loaded, prompted or billed. Roughly two thirds of everyday assistant traffic —
 greetings, time, app launching, clipboard, volume, system facts — lands here.
 
-Patterns are intentionally tight. Anything ambiguous falls through to the
-heuristic and model stages rather than guessing.
+Patterns are intentionally tight. Anything ambiguous falls through to
+IntentTriage (see ``intelligence/triage.py``) rather than guessing.
+
+A syntactic match is not the same as a safe one (V1.3 F2/F3): "Open the
+second one." and "Open BBC.co.uk." both satisfy the shape of "open
+<application name>", but neither names a concrete, deterministic
+application — the first depends on conversation state, the second is a
+browser destination wearing an application-launch sentence. ``QuickCommand.safe``
+is the gate for this: a regex match whose argument isn't trustworthy is
+treated as no match at all, and the search continues (for a web destination,
+straight into the browser pattern below; for a bare reference, all the way
+through to Triage and reference resolution).
 """
 
 from __future__ import annotations
@@ -30,6 +40,16 @@ class QuickCommand:
     args: Args = None
     confidence: float = 0.99
     long_running: bool = False
+    #: An extra check on a syntactic match before it is trusted to execute
+    #: deterministically. Returns ``False`` to mean "this matched the shape,
+    #: but the argument is not safe to treat as complete and deterministic" —
+    #: the matcher keeps looking rather than accepting it. A regex match
+    #: alone was letting "the second one" become
+    #: ``open_application(name="the second one")`` and "BBC.co.uk" become
+    #: ``open_application(name="BBC.co.uk")`` before either IntentTriage or
+    #: browse_to's own verification ever saw the request (V1.3 F2/F3).
+    #: Quick routing is allowed to be fast only when it is also safe.
+    safe: Callable[[re.Match], bool] | None = None
 
     def build(self, match: re.Match) -> dict[str, Any]:
         if self.args is None:
@@ -38,14 +58,47 @@ class QuickCommand:
             return self.args(match)
         return dict(self.args)
 
+    def is_safe(self, match: re.Match) -> bool:
+        return self.safe is None or self.safe(match)
+
 
 def _c(pattern: str, kind: str, name: str, args: Args = None, confidence: float = 0.99,
-       long_running: bool = False) -> QuickCommand:
-    return QuickCommand(re.compile(pattern, re.I), kind, name, args, confidence, long_running)
+       long_running: bool = False, safe: Callable[[re.Match], bool] | None = None) -> QuickCommand:
+    return QuickCommand(re.compile(pattern, re.I), kind, name, args, confidence, long_running, safe)
 
 
 _APP = r"(?P<app>[\w .+&'-]{2,40}?)"
 _TRAIL = r"(?:\s+(?:app|application|please|now|for me))?[.!]?$"
+
+#: The exact shape browse_to's own quick pattern accepts as a URL/domain —
+#: kept as one fragment so the application-name safety check below can never
+#: drift out of sync with what the browser pattern would actually take.
+_URL_SHAPE = r"(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?"
+
+#: A domain, URL or "www." prefix is a browser destination, not an
+#: application name — deliberately simple pattern matching, not a general
+#: URL parser, just enough to keep open/close/activate out of browse_to's way.
+_WEB_DESTINATION = re.compile(rf"^(?:{_URL_SHAPE}|www\.\S+)$", re.I)
+
+#: A bare reference to something already in context ("the second one", "that
+#: one", "it") is not a deterministic application name — resolving it needs
+#: conversation state, which only IntentTriage/Understanding/ReferenceResolver
+#: can do. This mirrors, rather than imports, the ordinal/pronoun vocabulary
+#: ReferenceResolver already uses (intelligence/entities.py): the two lists
+#: are allowed to diverge slightly, since this one only has to recognise
+#: "this needs interpretation", not classify what kind of thing is meant.
+_BARE_REFERENCE = re.compile(
+    r"^(?:the\s+)?(?:first|second|third|fourth|fifth|next|last|previous|other|latest|newest)"
+    r"\s+one$"
+    r"|^(?:this|that|these|those|it|them)(?:\s+one)?$",
+    re.I,
+)
+
+
+def _is_concrete_app_name(match: re.Match) -> bool:
+    """The safety gate behind every open/close/activate-application match."""
+    name = (match.group("app") or "").strip()
+    return not _BARE_REFERENCE.match(name) and not _WEB_DESTINATION.match(name)
 
 COMMANDS: list[QuickCommand] = [
     # -- conversational control ------------------------------------------
@@ -81,20 +134,26 @@ COMMANDS: list[QuickCommand] = [
        RouteKind.TOOL, "search_files", lambda m: {"query": m.group("q").strip()}),
 
     # -- applications ------------------------------------------------------
+    # `safe=_is_concrete_app_name` on all three: a launch/close/focus target
+    # that looks like a web destination or a bare reference is not a
+    # deterministic argument, whatever the surrounding verb matched (V1.3 F2/F3).
     _c(rf"^(?:please\s+)?(?:open|launch|start|run|fire up|bring up)\s+{_APP}{_TRAIL}",
-       RouteKind.TOOL, "open_application", lambda m: {"name": m.group("app")}),
+       RouteKind.TOOL, "open_application", lambda m: {"name": m.group("app")},
+       safe=_is_concrete_app_name),
     _c(rf"^(?:please\s+)?(?:close|quit|exit|shut down|kill)\s+{_APP}{_TRAIL}",
-       RouteKind.TOOL, "close_application", lambda m: {"name": m.group("app")}),
+       RouteKind.TOOL, "close_application", lambda m: {"name": m.group("app")},
+       safe=_is_concrete_app_name),
     _c(rf"^(?:switch to|focus|activate|bring)\s+{_APP}(?:\s+to the front)?{_TRAIL}",
-       RouteKind.TOOL, "activate_application", lambda m: {"name": m.group("app")}),
+       RouteKind.TOOL, "activate_application", lambda m: {"name": m.group("app")},
+       safe=_is_concrete_app_name),
     _c(r"^(?:what apps are|which apps are|what'?s) (?:currently )?(?:running|open)\??$",
        RouteKind.TOOL, "list_applications", {"running_only": True}),
     _c(r"^(?:what apps (?:do i have|are) installed|list (?:my )?(?:installed )?apps)\??$",
        RouteKind.TOOL, "list_applications", {}),
 
     # -- browser -----------------------------------------------------------
-    _c(r"^(?:go to|open|visit|take me to|navigate to)\s+(?:the )?(?:website\s+)?"
-       r"(?P<url>(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)[.!]?$",
+    _c(rf"^(?:go to|open|visit|take me to|navigate to)\s+(?:the )?(?:website\s+)?"
+       rf"(?P<url>{_URL_SHAPE})[.!]?$",
        RouteKind.TOOL, "browse_to", lambda m: {"url": m.group("url")}),
     _c(r"^(?:search (?:the web |the internet |online )?for|google|look up on the web|"
        r"web search(?: for)?)\s+(?P<q>.+?)[.!?]?$",
@@ -215,7 +274,7 @@ class QuickCommands:
             return None
         for command in self._commands:
             found = command.pattern.search(cleaned)
-            if not found:
+            if not found or not command.is_safe(found):
                 continue
             decision = RouteDecision(
                 kind=command.kind,

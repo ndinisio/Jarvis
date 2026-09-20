@@ -8,11 +8,30 @@ The rules it enforces are the ones the whole product rests on:
 
 * **Latency is proportional to complexity.** A greeting is answered from the
   phrasebook in microseconds; a system fact comes from macOS in milliseconds; a
-  research request is acknowledged immediately and continues in the background.
-* **Long work never blocks the conversation.** Anything long-running becomes a
-  task, so the user can keep talking while it runs.
+  quick-matched capability (mail, calendar, research, diagnostics) is
+  acknowledged immediately and continues in the background.
+* **Long work never blocks the conversation.** A quick-matched capability that
+  takes seconds becomes a task, so the user can keep talking while it runs.
 * **Speech is a summary, not a recital.** The written answer goes to the UI; the
   spoken one is trimmed to something worth hearing.
+
+**Two paths, on purpose (V1.2, revised V1.3).** A deterministic quick match is
+a certainty, not a guess, so it still runs straight through: "what time is it"
+costs a regular expression and a system call, as it did in V1.1. Everything
+the quick path declines goes to the intelligence agent, whose own
+``IntentTriage`` is now the single semantic authority for chat vs. action
+(V1.3) — the route itself no longer guesses a capability or whether to
+background the work; that guess used to be spoken as a premature
+acknowledgement before the agent had even decided what was being asked. The
+agent understands the request in context, decides what to do, watches what
+happens and repairs or asks when it goes wrong. Turning ``intelligence.enabled``
+off restores V1.1 behaviour exactly — capability classification and a single
+action — which makes the new layer measurable against the old one rather than
+merely asserted to be better.
+
+Conversational state is owned here and fed by *every* tool call through the
+registry observer, so the context behind "reply to the second one" exists
+regardless of which path answered the turn before.
 """
 
 from __future__ import annotations
@@ -24,8 +43,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..capabilities.base import Capability, Request, Response
+from ..intelligence.state import ConversationState, attach
 from ..router.router import Router
-from ..router.schema import RouteDecision, RouteKind
+from ..router.schema import RouteDecision, RouteKind, RoutePath
 from ..tasks.manager import Task
 from .context import ContextBuilder
 from .errors import Cancelled, ConfirmationDeclined, JarvisError
@@ -34,6 +54,13 @@ from .logging import get_logger
 from .personality import Personality, speakable
 
 log = get_logger("jarvis.orchestrator")
+
+#: Quick-matched tools whose destination still needs checking, not just their
+#: execution: a deterministic regex can tell "go to bbc.co.uk" apart from
+#: chat with certainty, but it cannot tell a 404 from the real page. Needing
+#: no model to understand the request is a different property from needing no
+#: verification of the result (V1.3 §7).
+_VERIFIED_QUICK_TOOLS = {"browse_to"}
 
 #: Tools whose own summary is already a good spoken answer.
 _DIRECT_SPEECH_TOOLS = {
@@ -64,8 +91,24 @@ class Orchestrator:
         self.personality = personality
         self.voice = voice
         self.context = ContextBuilder(deps.memory, deps.config)
+        self.state = ConversationState()
         self._last_draft: dict[str, Any] | None = None
         self._turn_lock = asyncio.Lock()
+        self._agent = None
+        self._agent_signature: tuple | None = None
+        self.rebind()
+
+    def rebind(self) -> None:
+        """Bind to the current tool registry.
+
+        Called at start-up and again whenever configuration rebuilds the
+        registry — capabilities can be switched on and off, which replaces the
+        tool set. Without this the state observer, and the agent's shortlist,
+        would go on pointing at tools that no longer exist.
+        """
+        attach(self.state, self.deps.registry)
+        self._agent = None
+        self._agent_signature = None
 
     # ------------------------------------------------------------------
     # public entry point
@@ -85,11 +128,16 @@ class Orchestrator:
             await self.voice.stop_speaking()
 
         await self.deps.memory.add_message("user", text, {"source": source})
+        self.state.begin_turn(text)
         bus.emit_state(AssistantState.THINKING)
 
         try:
             decision = await self.router.route(
-                text, context=self._recent_context(), allow_model=True
+                text, context=self._recent_context(), allow_model=True,
+                # With no agent and no triage downstream (V1.1 mode), the
+                # router itself must still pick a capability — otherwise
+                # everything not quick-matched degrades to plain conversation.
+                capability_routing=not self.deps.config.intelligence.enabled,
             )
         except Exception as exc:
             log.exception("routing failed")
@@ -128,9 +176,30 @@ class Orchestrator:
     async def _dispatch(self, text: str, decision: RouteDecision, source: str) -> TurnResult:
         if decision.kind == RouteKind.CONTROL:
             return await self._handle_control(text, decision)
-        if decision.kind == RouteKind.TOOL:
-            return await self._handle_tool(text, decision)
-        return await self._handle_capability(text, decision)
+        if self._deterministic(decision):
+            # A quick match already knows the answer. Sending it through a model
+            # would cost seconds and learn nothing.
+            if decision.kind == RouteKind.TOOL:
+                return await self._handle_tool(text, decision)
+            return await self._handle_capability(text, decision)
+        return await self._handle_intelligently(text, decision)
+
+    def _deterministic(self, decision: RouteDecision) -> bool:
+        """Should this turn skip the agent?
+
+        Only when the route was a certainty rather than an inference. A quick
+        pattern match maps a sentence onto a specific action — "what time is
+        it", "open Safari", "mute", "remember that…" — and paying for a model
+        there would be latency bought with nothing. Everything else, which is
+        most of what anyone actually says, is the agent's.
+
+        A quick match that turns out to be the wrong action doesn't end the turn
+        there; see :meth:`_rescue`. With the intelligence layer switched off,
+        everything takes V1.1's route.
+        """
+        if not self.deps.config.intelligence.enabled:
+            return True
+        return decision.path == RoutePath.QUICK
 
     # -- control -----------------------------------------------------------
     async def _handle_control(self, text: str, decision: RouteDecision) -> TurnResult:
@@ -160,7 +229,13 @@ class Orchestrator:
             return await self._respond(
                 "Left alone." if resolved else "Understood.", decision
             )
-        return await self._handle_capability(text, decision)
+        return await self._dispatch_non_control(text, decision)
+
+    async def _dispatch_non_control(self, text: str, decision: RouteDecision) -> TurnResult:
+        """A control name this orchestrator doesn't implement is ordinary work."""
+        if not self.deps.config.intelligence.enabled:
+            return await self._handle_capability(text, decision)
+        return await self._handle_intelligently(text, decision)
 
     async def _handle_affirm(self, decision: RouteDecision) -> TurnResult:
         if self._resolve_pending(True):
@@ -208,13 +283,75 @@ class Orchestrator:
         result = await self._execute_tool(decision, None)
         spoken = result.summary
         if not result.ok:
+            rescued = await self._rescue(text, decision, result)
+            if rescued is not None:
+                return rescued
             return await self._respond(result.summary, decision, display=result.display,
                                        error=result.error)
+        if decision.name in _VERIFIED_QUICK_TOOLS:
+            handled = await self._verify_quick_tool(text, decision, result)
+            if handled is not None:
+                return handled
         if decision.name not in _DIRECT_SPEECH_TOOLS and len(result.summary) > 220:
             spoken = speakable(result.summary, 260)
-        self.context.note_tool_result(decision.name, result.summary)
         return await self._respond(result.summary, decision, spoken=spoken,
                                    display=result.display)
+
+    async def _rescue(self, text: str, decision: RouteDecision,
+                      result) -> TurnResult | None:
+        """Hand a failed quick-path guess to the agent.
+
+        The fast path is a shortcut, not a dead end. "Open the BBC" matches the
+        open-an-application pattern, and in V1.1 that was the end of it: no such
+        application, no answer. The tool itself knows the difference between
+        "that isn't mine to do" and "I tried and it failed" — only the first
+        sets :attr:`ToolResult.wrong_tool`, and only the first is reconsidered.
+        A refused launch is still reported plainly, because that is the true
+        answer and guessing again would be noise.
+        """
+        if not result.wrong_tool:
+            return None
+        tool = self.deps.registry.get(decision.name)
+        if tool is None or tool.spec.changes_state:
+            # Defence in depth. A tool that sets ``wrong_tool`` is saying it did
+            # nothing, but the whole safety model rests on honest declarations,
+            # and re-attempting something that *did* have an effect is how you
+            # send an email twice. A state-changing tool is reported instead.
+            return None
+        if self._intelligence() is None:
+            return None
+        log.info("quick match %s failed (%s); reconsidering", decision.name, result.error)
+        retry = RouteDecision(RouteKind.CAPABILITY, decision.name, decision.args,
+                              confidence=0.4, path=RoutePath.FALLBACK,
+                              reason=f"{decision.name} failed: {result.error}")
+        return await self._handle_intelligently(text, retry)
+
+    async def _verify_quick_tool(self, text: str, decision: RouteDecision,
+                                 result) -> TurnResult | None:
+        """A deterministic match is a certainty about *which* tool, not about
+        the outcome — "opened" is not "verified open". Reuses the same
+        :class:`~jarvis.intelligence.verify.Verifier` the agent path uses, so
+        a 404 or a wrong destination is caught here exactly as it would be
+        there, and handed to the agent to recover rather than spoken as
+        success (V1.3 §7).
+        """
+        from ..intelligence.schema import Objective
+        from ..intelligence.verify import Verifier
+
+        target = str(decision.args.get("query") or decision.args.get("url") or "")
+        objective = Objective(goal=target, targets=[target] if target else [])
+        verification = await Verifier(self.deps).verify(decision.name, decision.args, result,
+                                                         objective, self.state)
+        if verification.verified or verification.skipped:
+            return None
+        if self._intelligence() is None:
+            return None
+        log.info("quick match %s did not verify (%s); reconsidering", decision.name,
+                 verification.problem)
+        retry = RouteDecision(RouteKind.CAPABILITY, decision.name, decision.args,
+                              confidence=0.4, path=RoutePath.FALLBACK,
+                              reason=f"{decision.name} did not verify: {verification.problem}")
+        return await self._handle_intelligently(text, retry)
 
     async def _execute_tool(self, decision: RouteDecision, task: Task | None):
         ctx = self._tool_context(task)
@@ -239,11 +376,15 @@ class Orchestrator:
         response = await self._run_capability(capability, text, decision, None)
         return await self._finish_capability(response, decision)
 
-    async def _run_capability(self, capability: Capability, text: str,
-                              decision: RouteDecision, task: Task | None) -> Response:
-        ctx = self._tool_context(task)
-        streamed: list[str] = []
+    def _stream_sink(self, task: Task | None):
+        """Return ``(emit, flush)`` for a streamed answer.
+
+        Deltas go to the UI immediately and to speech at sentence boundaries, so
+        TTS is never handed a fragment. ``flush`` speaks whatever is left over
+        and reports whether anything was streamed at all.
+        """
         spoken_buffer: list[str] = []
+        streamed: list[str] = []
 
         def emit(delta: str) -> None:
             streamed.append(delta)
@@ -252,32 +393,113 @@ class Orchestrator:
             if self.voice is not None and task is None:
                 spoken_buffer.append(delta)
                 buffered = "".join(spoken_buffer)
-                # Speak at sentence boundaries so TTS never gets fragments.
                 if re.search(r"[.!?]\s$|[.!?]$", buffered) and len(buffered) > 40:
                     spoken_buffer.clear()
                     self.voice.enqueue(speakable(buffered))
 
+        def flush() -> bool:
+            if spoken_buffer and self.voice is not None:
+                remainder = "".join(spoken_buffer).strip()
+                if remainder:
+                    self.voice.enqueue(speakable(remainder))
+            return bool(streamed)
+
+        return emit, flush
+
+    async def _run_capability(self, capability: Capability, text: str,
+                              decision: RouteDecision, task: Task | None) -> Response:
+        ctx = self._tool_context(task)
+        emit, flush = self._stream_sink(task)
         request = Request(
             text=text, args=decision.args, decision=decision, ctx=ctx, task=task,
             context=self.context.build(text), emit=emit,
         )
         response = await capability.handle(request)
-        if spoken_buffer and self.voice is not None:
-            remainder = "".join(spoken_buffer).strip()
-            if remainder:
-                self.voice.enqueue(speakable(remainder))
+        if flush():
             response.streamed = True
         return response
 
     async def _finish_capability(self, response: Response, decision: RouteDecision) -> TurnResult:
         for fact in response.remember:
             await self.deps.memory.remember(fact, source=decision.name)
+        self._note_capability_result(response, decision)
         self._capture_draft(response.display)
         spoken = response.spoken if response.spoken is not None else speakable(response.text)
         return await self._respond(
             response.text, decision, spoken=spoken, display=response.display,
             error=response.error, already_streamed=response.streamed,
         )
+
+    # -- intelligence ------------------------------------------------------
+    async def _handle_intelligently(self, text: str, decision: RouteDecision) -> TurnResult:
+        """Run the turn through the agent loop.
+
+        The route no longer decides what to do, or whether to keep the user
+        waiting: that guess came from the same heuristic/keyword scoring V1.3
+        stopped trusting for chat-vs-action, and guessing wrong meant speaking
+        an acknowledgement ("I'll look into it") for work that turned out to
+        be a one-line answer. The agent's own IntentTriage decides chat vs.
+        action first; everything runs to completion, with visibility coming
+        from streaming and activity events rather than a premature guess.
+        Quick-matched capabilities (email, calendar, research, diagnostics)
+        keep their own deterministic backgrounding untouched — see
+        :meth:`_handle_capability`.
+        """
+        agent = self._intelligence()
+        if agent is None:  # configuration turned it off mid-flight
+            return await self._handle_capability(text, decision)
+
+        response = await self._run_agent(agent, text, None)
+        return await self._finish_capability(response, decision)
+
+    async def _run_agent(self, agent, text: str, task: Task | None) -> Response:
+        ctx = self._tool_context(task)
+        stream, flush = self._stream_sink(task)
+
+        def activity(message: str) -> None:
+            self.deps.bus.publish(EventType.ACTIVITY, message=message,
+                                  task_id=task.id if task else None)
+
+        outcome = await agent.run(text, ctx, task=task, emit=activity, stream=stream,
+                                  context=self.context.build(text))
+        flush()
+        # An AgentOutcome and a capability Response say the same things; making
+        # the agent look like a capability here means delivery, speech, memory
+        # and background reporting all stay in one place.
+        return Response(text=outcome.text, spoken=outcome.spoken, display=outcome.display,
+                        error=outcome.error, streamed=outcome.streamed)
+
+    def _intelligence(self):
+        """The agent, rebuilt only when its configuration actually changes."""
+        conf = self.deps.config.intelligence
+        if not conf.enabled:
+            return None
+        signature = (conf.max_steps, conf.recovery_budget, conf.reasoning_slot, conf.trace)
+        if self._agent is None or self._agent_signature != signature:
+            from ..intelligence.agent import IntelligenceAgent
+
+            self._agent = IntelligenceAgent(
+                self.deps, self.deps.models, self.state,
+                max_steps=conf.max_steps, recovery_budget=conf.recovery_budget,
+                reasoning_slot=conf.reasoning_slot, publish_trace=conf.trace,
+            )
+            self._agent_signature = signature
+        return self._agent
+
+    def _note_capability_result(self, response: Response, decision: RouteDecision) -> None:
+        """Absorb a capability's structured result into conversational context.
+
+        Capabilities compose their own work and some of it — research reading
+        pages, for instance — never passes through the tool registry, so the
+        observer wouldn't see it. The payload has the same shape either way, and
+        the point of requirement 19 is that a result is context regardless of
+        which machinery produced it.
+        """
+        if response.data is None or decision.kind == RouteKind.CONTROL:
+            return
+        self.state.note_observation(decision.name, decision.args, not response.error,
+                                    response.spoken or response.text[:200], response.data,
+                                    decision.name)
 
     # -- background --------------------------------------------------------
     async def _run_in_background(self, text: str, decision: RouteDecision, title: str,
@@ -326,7 +548,8 @@ class Orchestrator:
             spoken = speakable(text, 300)
             error = None
 
-        self.context.note_tool_result(decision.name, text[:400])
+        if isinstance(outcome, Response):
+            self._note_capability_result(outcome, decision)
         self._capture_draft(display)
         await self._respond(text, decision, spoken=spoken, display=display, error=error,
                             task_id=task.id)
@@ -357,6 +580,7 @@ class Orchestrator:
         if store and text:
             await self.deps.memory.add_message("assistant", text,
                                                {"route": f"{decision.kind}:{decision.name}"})
+            self.state.note_assistant(text)
 
         if speak and spoken_text and self.voice is not None:
             # Speaking is queued, never awaited: the turn is finished when the

@@ -147,6 +147,73 @@ class FetchManyTool(Tool):
         )
 
 
+class ResearchTopicTool(Tool):
+    """The whole investigation as one tool call.
+
+    ``search_web`` and ``fetch_pages`` are primitives; composing them into a
+    grounded answer takes several steps of judgement that a small local model
+    plans badly. Exposing the research capability as a tool lets the agent ask
+    for the *outcome* — "find out X" — and get sources back, while still being
+    able to drop down to the primitives when it only needs one page.
+    """
+
+    spec = ToolSpec(
+        name="research_topic",
+        description=(
+            "Investigate a topic on the web: plan queries, read several sources "
+            "and return a synthesised answer with citations"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "the question to investigate, as a full sentence"},
+            },
+            "required": ["query"],
+        },
+        risk=RiskLevel.LOW,
+        category="research",
+        requires_network=True,
+        expected_ms=12000,
+        returns="a written answer with numbered sources and their URLs",
+        mutates=False,
+        retryable=True,
+        examples=["research the best espresso machines under 500",
+                  "find out what changed in the new EU AI rules",
+                  "look into why my laptop battery drains overnight"],
+    )
+
+    def __init__(self, deps):
+        self._deps = deps
+        self._capability = None
+
+    def _cap(self):
+        # Built on first use: importing the capability pulls in the model
+        # registry, and the registry is constructed during start-up.
+        if self._capability is None:
+            from ...capabilities.research import ResearchCapability
+
+            self._capability = ResearchCapability(self._deps)
+        return self._capability
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        from ...capabilities.base import Request
+
+        query = str(args["query"]).strip()
+        response = await self._cap().handle(Request(text=query, args={"query": query}, ctx=ctx))
+        sources = (response.data or {}).get("sources", []) if isinstance(response.data, dict) else []
+        if response.error:
+            return ToolResult.failure(response.text or "The research didn't get anywhere.",
+                                      detail=response.error)
+        return ToolResult(
+            # The report itself is the finding; the agent reads it to decide
+            # whether the question is actually answered.
+            data={"query": query, "report": response.text, "sources": sources},
+            summary=response.speech or f"Researched “{query}”.",
+            display=response.display,
+        )
+
+
 def _short(url: str) -> str:
     from urllib.parse import urlparse
 
@@ -154,4 +221,5 @@ def _short(url: str) -> str:
 
 
 def web_tools(deps) -> list[Tool]:
-    return [SearchWebTool(deps), FetchPageTool(deps), FetchManyTool(deps)]
+    return [SearchWebTool(deps), FetchPageTool(deps), FetchManyTool(deps),
+            ResearchTopicTool(deps)]

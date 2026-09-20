@@ -18,7 +18,7 @@ export function StatusBar() {
       <div className="statusbar__identity">
         <span className="statusbar__mark" aria-hidden="true" />
         <span className="statusbar__name">JARVIS</span>
-        <span className="statusbar__version">v{status?.version ?? '1.1'}</span>
+        <span className="statusbar__version">v{status?.version ?? '1.2'}</span>
       </div>
 
       <div className="statusbar__meta">

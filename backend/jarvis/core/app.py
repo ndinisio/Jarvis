@@ -146,6 +146,9 @@ class JarvisApp:
         self.deps.registry = build_registry(self.deps)
         self.capabilities = build_capabilities(self.deps)
         self.orchestrator.capabilities = self.capabilities
+        # The registry is a new object; the orchestrator's context observer and
+        # the agent's tool shortlist have to follow it.
+        self.orchestrator.rebind()
         config.ensure_workspace()
         if self.voice is not None:
             self.voice.reconfigure(config)

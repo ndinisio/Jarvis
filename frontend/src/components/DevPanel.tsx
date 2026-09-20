@@ -10,6 +10,7 @@ import { useStore } from '../state/store'
  */
 export function DevPanel() {
   const traces = useStore((s) => s.traces)
+  const reasoningTrace = useStore((s) => s.reasoningTrace)
   const telemetry = useStore((s) => s.telemetry)
   const status = useStore((s) => s.status)
   const [summary, setSummary] = useState<Record<string, any>>({})
@@ -35,6 +36,7 @@ export function DevPanel() {
 
   const recent = traces.slice(-8).reverse()
   const spans = telemetry.slice(-10).reverse()
+  const thinking = reasoningTrace.slice(-12).reverse()
 
   return (
     <section className="dev">
@@ -50,6 +52,17 @@ export function DevPanel() {
             <span className="dev__path" data-path={trace.path}>{trace.path}</span>
             <span className="dev__route">{trace.kind}:{trace.name}</span>
             <span className="dev__ms">{trace.latency_ms.toFixed(1)} ms</span>
+          </li>
+        ))}
+      </ul>
+
+      <h3 className="dev__heading">Reasoning</h3>
+      <ul className="dev__routes">
+        {thinking.length === 0 && <li className="dev__empty">Nothing yet.</li>}
+        {thinking.map((entry) => (
+          <li key={entry.id}>
+            <span className="dev__stage" data-stage={entry.stage}>{entry.stage}</span>
+            <span className="dev__route">{summariseStage(entry)}</span>
           </li>
         ))}
       </ul>
@@ -95,4 +108,34 @@ export function DevPanel() {
       </ul>
     </section>
   )
+}
+
+/**
+ * One line per stage. Structured state only — what was decided and what came
+ * back — never the model's private reasoning, which the backend does not send.
+ */
+function summariseStage(entry: Record<string, any>): string {
+  switch (entry.stage) {
+    case 'intent':
+      return `${entry.kind}: ${entry.goal} [${entry.confidence}]`
+    case 'plan':
+      return entry.summary ?? ''
+    case 'decision':
+      return `${entry.action} ${entry.tool ?? ''}`.trim()
+    case 'step':
+      return `${entry.tool} ${entry.note ?? ''}`.trim()
+    case 'result':
+      return `${entry.tool} ${entry.ok ? 'ok' : 'failed'} — ${entry.summary ?? ''}`
+    case 'verify':
+      return entry.verified ? `verified ${entry.evidence ?? ''}` : `not verified — ${entry.problem}`
+    case 'recover':
+      return `${entry.strategy}: ${entry.reason ?? ''}`
+    case 'clarify':
+      return entry.question ?? ''
+    case 'complete':
+      return `${entry.steps} step(s), ${entry.tool_calls} tool, ${entry.model_calls} model, ` +
+        `${entry.elapsed_ms} ms`
+    default:
+      return ''
+  }
 }

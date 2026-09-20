@@ -36,7 +36,7 @@ class ServerConfig(BaseModel):
 
 
 class ModelSlotConfig(BaseModel):
-    """One routing slot (fast / general / vision)."""
+    """One routing slot (fast / general / reasoning / vision / specialist)."""
 
     provider: str = "ollama"
     model: str = ""
@@ -68,6 +68,19 @@ class ModelsConfig(BaseModel):
     general: ModelSlotConfig = ModelSlotConfig(model="llama3.1:8b", max_tokens=900, timeout_s=120.0)
     #: Vision model: screen understanding.
     vision: ModelSlotConfig = ModelSlotConfig(model="llava:7b", max_tokens=600, timeout_s=180.0)
+    #: Deliberate model: understanding, planning, tool choice, verification and
+    #: repair. Left empty it defers to ``general``, so JARVIS is intelligent out
+    #: of the box; set a model here to give the agentic loop a stronger brain
+    #: than conversation needs. A longer timeout is deliberate — this slot is
+    #: asked for structured output, which is worth waiting a little longer for.
+    reasoning: ModelSlotConfig = ModelSlotConfig(
+        model="", temperature=0.1, max_tokens=700, timeout_s=90.0
+    )
+    #: Optional domain model (code, maths, a local fine-tune). Empty defers to
+    #: ``reasoning``; nothing has to be installed for this slot to be asked for.
+    specialist: ModelSlotConfig = ModelSlotConfig(
+        model="", temperature=0.2, max_tokens=900, timeout_s=120.0
+    )
     #: Candidate models tried, in order, when a slot's model isn't installed.
     fallbacks: dict[str, list[str]] = Field(
         default_factory=lambda: {
@@ -81,6 +94,16 @@ class ModelsConfig(BaseModel):
                 "qwen2.5:3b",
             ],
             "vision": ["llava:7b", "qwen2.5vl:7b", "llama3.2-vision:11b", "moondream", "minicpm-v"],
+            # Only consulted once reasoning/specialist have a model of their
+            # own; an empty slot defers to another slot instead.
+            "reasoning": [
+                "qwen2.5:14b",
+                "llama3.1:8b",
+                "qwen2.5:7b",
+                "mistral:7b",
+                "llama3.2:3b",
+            ],
+            "specialist": [],
         }
     )
 
@@ -194,6 +217,28 @@ class MemoryConfig(BaseModel):
     auto_extract_facts: bool = True
 
 
+class IntelligenceConfig(BaseModel):
+    """The agentic loop (V1.2).
+
+    Turning this off reverts to V1.1 behaviour — one route, one capability, one
+    answer — which is a useful thing to be able to do when something misbehaves
+    and a useful baseline to measure against.
+    """
+
+    enabled: bool = True
+    #: Hard ceiling on tool calls in a single turn. Six covers every worked
+    #: example; the ceiling exists so a confused model cannot loop forever.
+    max_steps: int = 6
+    #: How many times the loop may try to repair one failing step before it
+    #: reports the failure honestly instead of thrashing.
+    recovery_budget: int = 2
+    #: Slot used for understanding, planning, decisions, verification and
+    #: repair. Empty slots defer (reasoning → general), so this works untouched.
+    reasoning_slot: str = "reasoning"
+    #: Publish the reasoning trace (decisions, not chain of thought) on the bus.
+    trace: bool = True
+
+
 class UIConfig(BaseModel):
     developer_mode: bool = False
     show_telemetry: bool = True
@@ -212,6 +257,7 @@ class Config(BaseModel):
     capabilities: CapabilitiesConfig = CapabilitiesConfig()
     research: ResearchConfig = ResearchConfig()
     memory: MemoryConfig = MemoryConfig()
+    intelligence: IntelligenceConfig = IntelligenceConfig()
     ui: UIConfig = UIConfig()
     #: Set once the first-run walkthrough has been completed.
     onboarding_complete: bool = False

@@ -10,6 +10,7 @@ export const EV = {
   ASSISTANT_MESSAGE: 'assistant.message',
   ROUTE: 'route',
   ACTIVITY: 'activity',
+  INTELLIGENCE_TRACE: 'intelligence.trace',
   TOOL_CALL: 'tool.call',
   TOOL_RESULT: 'tool.result',
   TASK_CREATED: 'task.created',
@@ -91,6 +92,35 @@ export interface Confirmation {
   risk: 'low' | 'medium' | 'high'
   summary: string
   details: Record<string, any>
+}
+
+/** One stage of the agent loop, as the backend publishes it. */
+export interface TraceEntry {
+  id: string
+  stage: 'intent' | 'plan' | 'decision' | 'step' | 'result' | 'verify' | 'recover'
+    | 'clarify' | 'complete'
+  ts: number
+  [key: string]: any
+}
+
+/**
+ * The current turn's thinking, assembled from the trace.
+ *
+ * Deliberately a projection of what actually happened — an objective that was
+ * understood, steps that were really planned, tools that really ran — so the
+ * UI can never show work that isn't happening.
+ */
+export interface Reasoning {
+  objective: string
+  kind: string
+  context: string
+  complexity: string
+  steps: { label: string; state: 'pending' | 'active' | 'done' | 'failed' }[]
+  question: string | null
+  done: boolean
+  toolCalls: number
+  modelCalls: number
+  elapsedMs: number
 }
 
 export interface RouteTrace {

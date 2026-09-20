@@ -61,10 +61,17 @@ async def test_context_builder_stays_small(app):
     assert context.count("Fact number") <= app.config.memory.max_facts_in_context
 
 
-async def test_context_includes_tool_results(app):
+async def test_context_builder_carries_no_tool_results(app):
+    """ContextBuilder used to carry a 'Results just gathered' layer, fed once
+    per tool call and never cleared — a task's results could still be
+    sitting in it, unrelated turns later. That layer is gone: recent actions
+    live in ConversationState (bounded, fed by the registry observer, read
+    only by the machinery that resolves references), not duplicated here
+    with no lifecycle of its own. See the intelligence-context regression
+    tests for the end-to-end version of this (V1.3 F1 fix)."""
     builder = ContextBuilder(app.memory, app.config)
-    builder.note_tool_result("get_storage", "412 GB free")
-    assert "412 GB free" in builder.build("how much space")
+    assert not hasattr(builder, "note_tool_result")
+    assert not hasattr(builder, "tool_results")
 
 
 def test_config_defaults_are_local_first():

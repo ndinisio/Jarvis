@@ -5,13 +5,50 @@ add them cleanly.
 
 ## The shape of a feature
 
-Most features are **a tool plus a capability plus (optionally) a quick command**:
+Since V1.2 a feature is usually **just a tool**. The agent selects tools from
+the registry by description, examples and category, so a well-described tool is
+reachable the moment it is registered — no capability, no classifier entry, no
+prompt to edit.
 
-1. **Tool** — the thing that actually happens, with a schema and a risk level.
-2. **Capability** — maps a sentence to one of a few tools (usually two dozen
-   lines subclassing `ToolPlanCapability`).
-3. **Quick command** — a regular expression so the common phrasing skips the
-   model entirely.
+Add the other two pieces only when they earn their place:
+
+1. **Tool** — the thing that actually happens, with a schema, a risk level and
+   an honest description. *Always.*
+2. **Quick command** — a regular expression, when one phrasing is so common and
+   so unambiguous that paying for a model would be waste. *Often.*
+3. **Capability** — when a sentence needs a multi-step flow of its own that the
+   agent shouldn't have to re-derive each time (research, diagnostics).
+   *Rarely.*
+
+### Writing a tool the agent can actually use
+
+Four `ToolSpec` fields exist for the agent's benefit. They cost a line each and
+they are the difference between a tool being chosen correctly and being chosen
+at random:
+
+```python
+spec = ToolSpec(
+    name="play_music",
+    description="Play music in Spotify, optionally a named playlist or artist",
+    examples=["play something", "put on the Bowie playlist"],  # feeds shortlisting
+    returns="what started playing",     # so the model knows if this answers it
+    mutates=True,                       # default: derived from the risk level
+    retryable=False,                    # default: derived from `mutates`
+    ...
+)
+```
+
+And one on the result, for the fast path:
+
+```python
+# "this request wasn't mine to carry out" — not "I tried and failed".
+# The orchestrator reconsiders the turn instead of ending it.
+return ToolResult.failure(f"There's no playlist called {name}.", wrong_tool=True)
+```
+
+Use `wrong_tool=True` only when the tool could not identify its target at all.
+A refusal, a permission error or a genuine failure is the honest answer and
+should be reported as one.
 
 ## Worked example: Spotify
 
@@ -53,9 +90,16 @@ _c(r"^(?:pause|stop) (?:the )?music$", RouteKind.TOOL, "pause_music", {}),
 _c(r"^what'?s playing\??$", RouteKind.TOOL, "now_playing", {}),
 ```
 
-Then register the tools in `tools/registry.py`, the capability in
-`capabilities/registry.py`, and add `music` to the capability table in
-`router/router.py` so the classifier knows it exists.
+Then register the tools in `tools/registry.py`. That alone makes them reachable
+by the agent. The capability and the `router/router.py` capability-table entry
+are only needed if you also want the quick path and the V1.1 fallback to know
+about them.
+
+**Context for free.** If your tool's category is one `ConversationState._absorb`
+already understands (`browser`, `email`, `research`, `screen`, `files`, `macos`,
+`system`), its results become conversational context with no further work — and
+follow-up questions about them work. A genuinely new kind of context is a small
+addition there, dispatching on payload shape rather than on your tool's name.
 
 ## Where each planned feature belongs
 
@@ -83,3 +127,8 @@ Then register the tools in `tools/registry.py`, the capability in
   detail="the technical bit")` — the detail only ever reaches developer mode.
 * **Test at the boundary.** Mock the AppleScript or the HTTP call, not your own
   code.
+* **Describe it for a stranger.** The agent's only knowledge of your tool is its
+  description, examples and `returns`. If a colleague couldn't tell from those
+  three lines when to use it, neither can an 8B model.
+* **Return structured data, not just prose.** `ToolResult.data` is what becomes
+  context and what the next decision reads. `summary` is for speech.

@@ -7,6 +7,43 @@ import asyncio
 from jarvis.core.events import EventType
 
 
+async def test_v13_f2_f3_route_correctly_at_the_real_runtime_entry_point(app):
+    """V1.3 F2/F3, exercised through the exact entry point a real deployment
+    uses — orchestrator.handle() via app.ask() — checking the *initial*
+    RouteDecision the way the real routing log itself is built
+    (orchestrator.py's own "route %s:%s via %s" line), not the raw
+    QuickCommands.match() unit. Includes the literal phrasing from a real
+    macOS runtime report that showed these routing incorrectly (some
+    without trailing punctuation, one with a lowercase "open") — if the
+    fix in router/quick.py were not actually wired into this entry point,
+    or bypassed by some other path, this test would catch it here.
+    """
+    cases = [
+        ("Go to bbc.co.uk.", "tool", "browse_to", "quick"),
+        ("Open BBC.co.uk.", "tool", "browse_to", "quick"),
+        ("Open https://bbc.co.uk.", "tool", "browse_to", "quick"),
+        ("Open Safari.", "tool", "open_application", "quick"),
+        ("Open Calculator.", "tool", "open_application", "quick"),
+        ("Take a screenshot.", "tool", "capture_screen", "quick"),
+        ("Open the second one", "capability", "conversation", "fallback"),
+        ("Open the second one.", "capability", "conversation", "fallback"),
+        ("Open that one", "capability", "conversation", "fallback"),
+        ("open the first one", "capability", "conversation", "fallback"),
+        ("Search it.", "capability", "conversation", "fallback"),
+        ("Do that.", "capability", "conversation", "fallback"),
+    ]
+    for text, kind, name, path in cases:
+        before = len(app.bus.history)
+        await app.ask(text)
+        routes = [e for e in app.bus.history[before:] if e.type == EventType.ROUTE]
+        assert routes, f"no route event for {text!r}"
+        route = routes[0].payload
+        assert (route["kind"], route["name"], route["path"]) == (kind, name, path), (
+            f"{text!r} routed to {route['kind']}:{route['name']} via {route['path']}, "
+            f"expected {kind}:{name} via {path}"
+        )
+
+
 async def test_greeting_never_touches_a_model(app, fake_provider):
     result = await app.ask("Hello.")
     assert result.text

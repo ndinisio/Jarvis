@@ -38,6 +38,30 @@ class ToolSpec:
     #: Typical execution budget, used for UI expectations and timeouts.
     expected_ms: int = 200
     examples: list[str] = field(default_factory=list)
+    #: One short phrase describing what the result contains. Shown to the
+    #: reasoning model so it can decide whether a tool answers its question.
+    returns: str = ""
+    #: Does running this change anything? ``None`` derives it from the risk
+    #: level, which is right for almost every tool.
+    mutates: bool | None = None
+    #: Is running it twice harmless? ``None`` derives it from ``mutates``.
+    retryable: bool | None = None
+
+    @property
+    def changes_state(self) -> bool:
+        if self.mutates is not None:
+            return self.mutates
+        return self.risk != RiskLevel.LOW
+
+    @property
+    def safe_to_retry(self) -> bool:
+        if self.retryable is not None:
+            return self.retryable
+        return not self.changes_state
+
+    @property
+    def needs_confirmation(self) -> bool:
+        return self.risk != RiskLevel.LOW
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +75,9 @@ class ToolSpec:
             "requires_macos": self.requires_macos,
             "expected_ms": self.expected_ms,
             "examples": self.examples,
+            "returns": self.returns,
+            "mutates": self.changes_state,
+            "retryable": self.safe_to_retry,
         }
 
     def required_args(self) -> list[str]:
@@ -68,10 +95,16 @@ class ToolResult:
     display: dict[str, Any] | None = None
     error: str | None = None
     duration_ms: float = 0.0
+    #: The tool concluded the request wasn't its to carry out — the thing it was
+    #: asked to act on doesn't exist *for it*. That is different from the action
+    #: failing, which the user should simply be told about, and it lets a wrong
+    #: guess by the fast path be reconsidered instead of becoming a dead end.
+    wrong_tool: bool = False
 
     @classmethod
-    def failure(cls, message: str, detail: str | None = None) -> ToolResult:
-        return cls(ok=False, summary=message, error=detail or message)
+    def failure(cls, message: str, detail: str | None = None, *,
+                wrong_tool: bool = False) -> ToolResult:
+        return cls(ok=False, summary=message, error=detail or message, wrong_tool=wrong_tool)
 
     def as_dict(self) -> dict[str, Any]:
         return {

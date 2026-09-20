@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from ..models.base import extract_json
 
@@ -74,6 +74,38 @@ class Objective(BaseModel):
     @property
     def needs_planning(self) -> bool:
         return self.complexity == Complexity.MULTI_STEP
+
+
+class Triage(BaseModel):
+    """Chat or action — the one semantic decision every non-deterministic turn
+    makes, before any tool-shaped machinery runs (V1.3).
+
+    Triage decides; it does not execute and does not reply — there is no
+    ``reply`` field on purpose. ``objective`` is populated only for
+    mode="action", and only ever used directly (skipping a separate
+    Understanding call) when it is confident and complete; see
+    ``triage.objective_sufficient``.
+    """
+
+    mode: Literal["chat", "action"] = "chat"
+    confidence: float = 0.5
+    action_evidence: list[str] = Field(default_factory=list)
+    objective: Objective | None = None
+    requires_tools: bool = False
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _evidence_gates_action(self) -> Triage:
+        """No action without positive evidence.
+
+        A domain word mentioned in passing ("I hate dealing with email") is
+        not a request. The V1.3 benchmark is what surfaced this as the gate
+        that actually matters, not a keyword or a capability guess.
+        """
+        if self.mode == "action" and not self.action_evidence:
+            self.mode = "chat"
+            self.objective = None
+        return self
 
 
 class PlanStep(BaseModel):

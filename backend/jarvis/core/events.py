@@ -40,6 +40,7 @@ class EventType:
 
     # execution
     ACTIVITY = "activity"                # human-readable "what I'm doing right now"
+    INTELLIGENCE_TRACE = "intelligence.trace"  # one stage of the agentic loop
     TOOL_CALL = "tool.call"
     TOOL_RESULT = "tool.result"
     TASK_CREATED = "task.created"

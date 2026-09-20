@@ -302,8 +302,12 @@ async def test_send_it_reuses_the_last_draft_and_still_confirms(app, mail, fake_
     fake_provider.json_responses.append(
         '{"to": ["ada@example.com"], "subject": "Re: contract", "body": "Signing today."}'
     )
+    # Exercises the V1.1 capability path deliberately: this test scripts one
+    # model response for one planned call. The agent's route to the same gate is
+    # covered in tests/test_intelligence.py.
     app.config_store.update({"security": {"auto_approve": ["low", "medium"],
-                                          "confirmation_timeout_s": 0.2}})
+                                          "confirmation_timeout_s": 0.2},
+                             "intelligence": {"enabled": False}})
 
     # Mail work runs as a background task, so wait for it to deliver.
     result = await app.ask("draft a reply to Ada saying I will sign the contract today")

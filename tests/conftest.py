@@ -34,6 +34,10 @@ class FakeProvider(ModelProvider):
         self.calls: list[dict[str, Any]] = []
         self._models = models or ["fake-fast:1b", "fake-general:8b", "fake-vision:7b"]
         self.fail = False
+        #: Optional ``(messages, kwargs) -> str | None`` hook. The agent's call
+        #: count depends on what tools return, so intelligence tests answer by
+        #: *what was asked* rather than by queue position.
+        self.router: Any = None
 
     async def available(self) -> bool:
         return not self.fail
@@ -47,7 +51,10 @@ class FakeProvider(ModelProvider):
             from jarvis.core.errors import ModelUnavailable
 
             raise ModelUnavailable("test provider is offline")
-        if kwargs.get("json_mode"):
+        routed = self.router(messages, kwargs) if self.router is not None else None
+        if routed is not None:
+            text = routed
+        elif kwargs.get("json_mode"):
             text = (self.json_responses.pop(0) if self.json_responses
                     else '{"capability": "conversation", "confidence": 0.5}')
         else:

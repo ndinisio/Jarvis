@@ -78,6 +78,19 @@ class Understanding:
         objective = await self._from_model(text, state)
         if objective is None:
             objective = self._fallback(text, state)
+        return self.finalize(objective, text, state, pending)
+
+    def finalize(self, objective: Objective, text: str, state: ConversationState,
+                pending: PendingClarification | None = None) -> Objective:
+        """Run the deterministic passes on an objective that already exists.
+
+        Shared with :class:`~.triage.IntentTriage`: when triage's own
+        objective is already confident and complete, the agent uses it
+        directly rather than paying for a second model call — but it still
+        needs the same clarification-résumé, reference-resolution and
+        inheritance handling any other objective gets.
+        """
+        pending = pending if pending is not None else state.pending_clarification
         self._apply_clarification(objective, text, pending)
         self._resolve_references(objective, state)
         self._inherit(objective, state)

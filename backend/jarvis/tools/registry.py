@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import platform
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from ..core.errors import Cancelled, JarvisError, NetworkUnavailable
@@ -20,6 +20,18 @@ IS_MACOS = platform.system() == "Darwin"
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._observers: list[Callable[[str, dict[str, Any], ToolResult, str], None]] = []
+
+    def observe(self, callback: Callable[[str, dict[str, Any], ToolResult, str], None]) -> None:
+        """Watch every call with its *structured* result.
+
+        The event bus carries summaries, which is all the UI needs. Conversation
+        context needs the payload — the actual messages, the actual URL — and it
+        needs it for every call whatever made it, so that "reply to the second
+        one" still means something when the previous turn took the fast path.
+        Observers are notified after the result is complete and must not raise.
+        """
+        self._observers.append(callback)
 
     def register(self, tool: Tool) -> Tool:
         if tool.spec.name in self._tools:
@@ -124,6 +136,11 @@ class ToolRegistry:
             task_id=ctx.task_id,
             display=result.display,
         )
+        for observer in self._observers:
+            try:
+                observer(name, cleaned, result, spec.category)
+            except Exception:  # pragma: no cover - an observer must never break a tool
+                log.exception("tool observer failed for %s", name)
         return result
 
 
@@ -154,6 +171,7 @@ def build_registry(deps) -> ToolRegistry:
     from .clipboard.tools import clipboard_tools
     from .email.tools import email_tools
     from .files.tools import file_tools
+    from .interaction.tools import interaction_tools
     from .macos.tools import macos_tools
     from .screen.tools import screen_tools
     from .system.tools import system_tools
@@ -169,6 +187,8 @@ def build_registry(deps) -> ToolRegistry:
         registry.register_all(file_tools(deps))
     if caps.screen:
         registry.register_all(screen_tools(deps))
+        # Seeing the screen is only useful if JARVIS can also act on it.
+        registry.register_all(interaction_tools(deps))
     if caps.browser:
         registry.register_all(browser_tools(deps))
     if caps.research:

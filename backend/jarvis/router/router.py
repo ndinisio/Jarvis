@@ -1,15 +1,25 @@
 """The router.
 
-Four stages, cheapest first. Each stage only runs if the previous one couldn't
-answer confidently:
+Two authoritative stages, cheapest first:
 
 1. **quick** — deterministic patterns (~0.05 ms). Greetings, app launches,
-   system facts, clipboard, volume, time.
-2. **heuristic** — weighted keyword scoring across capabilities (~0.1 ms).
-   Accepted only when one capability clearly wins.
-3. **fast model** — a 1B-class model classifies the request into a capability
-   and extracts arguments, with a hard timeout (~300–800 ms typical).
-4. **chat** — ordinary conversation through the general model.
+   system facts, clipboard, volume, time, explicit browser commands.
+2. **arithmetic** — sums, computed rather than reasoned about.
+
+Everything neither stage catches falls through to a single ``conversation``
+capability decision when ``capability_routing`` is left at its default
+(``False``): the orchestrator hands that turn to the agent loop, and
+specifically to :class:`~jarvis.intelligence.triage.IntentTriage` (V1.3), the
+one semantic authority for chat vs. action. ``_heuristic`` (weighted keyword
+scoring across capabilities) and ``_classify`` (a 1B-class model guessing a
+capability) are no longer part of that decision: a benchmark showed the 1B
+model misclassifying real actions as chat and the keyword scorer scoring
+partial credit for a domain word mentioned in passing ("I hate dealing with
+email"). They remain load-bearing for exactly one case — ``capability_routing
+=True``, which the orchestrator passes when ``intelligence.enabled`` is
+``False``: with no agent and no triage downstream, V1.1 mode has no other way
+to reach a specific capability, so the old three-stage behaviour is preserved
+there unchanged.
 
 The rule the whole design serves: *never spend a second of model time on a
 question the computer can already answer*.
@@ -143,8 +153,16 @@ class Router:
         self._telemetry = telemetry or Telemetry()
         self._quick = quick or QuickCommands()
 
-    async def route(self, text: str, *, context: str = "",
-                    allow_model: bool = True) -> RouteDecision:
+    async def route(self, text: str, *, context: str = "", allow_model: bool = True,
+                    capability_routing: bool = False) -> RouteDecision:
+        """Route one turn.
+
+        ``capability_routing`` opts back into the old heuristic/fast-model
+        capability guess for V1.1 mode (``intelligence.enabled=False``),
+        which has no agent and no triage downstream to do this more
+        reliably. Leave it ``False`` (the default) whenever intelligence is
+        enabled — see the module docstring.
+        """
         t0 = time.perf_counter()
 
         decision = self._quick.match(text)
@@ -159,20 +177,21 @@ class Router:
             self._telemetry.record("router.quick", maths.latency_ms, route="control:arithmetic")
             return maths
 
-        decision = self._heuristic(text)
-        if decision is not None:
-            decision.latency_ms = (time.perf_counter() - t0) * 1000.0
-            self._telemetry.record("router.heuristic", decision.latency_ms,
-                                   route=f"{decision.kind}:{decision.name}")
-            return decision
-
-        if allow_model:
-            decision = await self._classify(text, context)
+        if capability_routing:
+            decision = self._heuristic(text)
             if decision is not None:
                 decision.latency_ms = (time.perf_counter() - t0) * 1000.0
-                self._telemetry.record("router.model", decision.latency_ms,
+                self._telemetry.record("router.heuristic", decision.latency_ms,
                                        route=f"{decision.kind}:{decision.name}")
                 return decision
+
+            if allow_model:
+                decision = await self._classify(text, context)
+                if decision is not None:
+                    decision.latency_ms = (time.perf_counter() - t0) * 1000.0
+                    self._telemetry.record("router.model", decision.latency_ms,
+                                           route=f"{decision.kind}:{decision.name}")
+                    return decision
 
         fallback = RouteDecision(
             kind=RouteKind.CAPABILITY, name="conversation", confidence=0.4,

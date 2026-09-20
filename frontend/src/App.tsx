@@ -6,6 +6,7 @@ import { Core } from './components/Core'
 import { DevPanel } from './components/DevPanel'
 import { Notices } from './components/Notices'
 import { Onboarding } from './components/Onboarding'
+import { ReasoningPanel } from './components/ReasoningPanel'
 import { ResultPanel } from './components/ResultPanel'
 import { Settings } from './components/Settings'
 import { StatusBar } from './components/StatusBar'
@@ -38,6 +39,7 @@ export default function App() {
         </section>
 
         <aside className="app__rail app__rail--right">
+          <ReasoningPanel />
           <ActivityPanel send={send} />
           <ResultPanel />
         </aside>

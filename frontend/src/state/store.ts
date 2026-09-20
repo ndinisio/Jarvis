@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type {
   Activity, AssistantState, Confirmation, JarvisEvent, Message, Panel,
-  RouteTrace, Task, TelemetrySpan, VoiceState,
+  Reasoning, RouteTrace, Task, TelemetrySpan, TraceEntry, VoiceState,
 } from '../lib/events'
 import { EV } from '../lib/events'
 
@@ -9,6 +9,7 @@ const MAX_MESSAGES = 120
 const MAX_ACTIVITIES = 60
 const MAX_PANELS = 24
 const MAX_TRACES = 60
+const MAX_TRACE_ENTRIES = 80
 
 let counter = 0
 const nextId = () => `${Date.now().toString(36)}-${(counter++).toString(36)}`
@@ -39,6 +40,8 @@ interface StoreState {
   confirmation: Confirmation | null
   status: Status
   traces: RouteTrace[]
+  reasoning: Reasoning | null
+  reasoningTrace: TraceEntry[]
   telemetry: TelemetrySpan[]
   notices: { id: string; level: string; message: string; ts: number }[]
   devMode: boolean
@@ -70,6 +73,8 @@ export const useStore = create<StoreState>((set, get) => ({
   confirmation: null,
   status: {},
   traces: [],
+  reasoning: null,
+  reasoningTrace: [],
   telemetry: [],
   notices: [],
   devMode: false,
@@ -91,7 +96,8 @@ export const useStore = create<StoreState>((set, get) => ({
 
   dismissNotice: (id) => set((s) => ({ notices: s.notices.filter((n) => n.id !== id) })),
 
-  clearConversation: () => set({ messages: [], panels: [], activities: [] }),
+  clearConversation: () =>
+    set({ messages: [], panels: [], activities: [], reasoning: null, reasoningTrace: [] }),
 
   apply: (event) => {
     const state = get()
@@ -183,6 +189,16 @@ export const useStore = create<StoreState>((set, get) => ({
         }))
         break
 
+      case EV.INTELLIGENCE_TRACE: {
+        const { type, seq, ...entry } = event
+        set((s) => ({
+          reasoning: reduceReasoning(s.reasoning, entry as TraceEntry),
+          reasoningTrace: [...s.reasoningTrace, { id: nextId(), ...entry } as TraceEntry]
+            .slice(-MAX_TRACE_ENTRIES),
+        }))
+        break
+      }
+
       case EV.TASK_CREATED:
       case EV.TASK_UPDATED:
       case EV.TASK_FINISHED:
@@ -262,6 +278,77 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 }))
+
+/**
+ * Fold one trace entry into the picture of the current turn.
+ *
+ * `intent` starts a new turn; everything after it refines the same picture. A
+ * step is only shown as done once its result came back *and* verified, so the
+ * panel never claims success the backend hasn't established.
+ */
+function reduceReasoning(current: Reasoning | null, entry: TraceEntry): Reasoning | null {
+  switch (entry.stage) {
+    case 'intent':
+      return {
+        objective: entry.goal ?? '',
+        kind: entry.kind ?? '',
+        context: entry.context ?? '',
+        complexity: entry.complexity ?? '',
+        steps: [],
+        question: null,
+        done: false,
+        toolCalls: 0,
+        modelCalls: 0,
+        elapsedMs: 0,
+      }
+    case 'plan': {
+      if (!current) return current
+      const steps = (entry.steps ?? []).map((label: string) => ({
+        label, state: 'pending' as const,
+      }))
+      if (steps.length > 0) steps[0].state = 'active'
+      return { ...current, steps }
+    }
+    case 'decision': {
+      if (!current || entry.action !== 'tool_call') return current
+      const label = humaniseTool(entry.tool, entry.arguments)
+      const steps = [...current.steps]
+      const slot = steps.findIndex((s) => s.state === 'active' || s.state === 'pending')
+      if (slot === -1) steps.push({ label, state: 'active' })
+      else steps[slot] = { label, state: 'active' }
+      return { ...current, steps }
+    }
+    case 'verify': {
+      if (!current) return current
+      const steps = [...current.steps]
+      const slot = steps.map((s) => s.state).lastIndexOf('active')
+      if (slot === -1) return current
+      steps[slot] = { ...steps[slot], state: entry.verified ? 'done' : 'failed' }
+      const next = steps.findIndex((s) => s.state === 'pending')
+      if (entry.verified && next !== -1) steps[next] = { ...steps[next], state: 'active' }
+      return { ...current, steps }
+    }
+    case 'clarify':
+      return current ? { ...current, question: entry.question ?? null, done: true } : current
+    case 'complete':
+      return current
+        ? {
+            ...current, done: true,
+            toolCalls: entry.tool_calls ?? 0,
+            modelCalls: entry.model_calls ?? 0,
+            elapsedMs: entry.elapsed_ms ?? 0,
+          }
+        : current
+    default:
+      return current
+  }
+}
+
+function humaniseTool(tool: string, args: Record<string, any> = {}): string {
+  const label = String(tool ?? '').replace(/_/g, ' ')
+  const hint = args?.query ?? args?.name ?? args?.url ?? args?.label ?? args?.path
+  return hint ? `${label} — ${String(hint).slice(0, 48)}` : label
+}
 
 function describeTool(tool: string, args: Record<string, any> = {}): string {
   const label = tool.replace(/_/g, ' ')

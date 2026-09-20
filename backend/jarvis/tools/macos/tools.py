@@ -33,7 +33,10 @@ class OpenApplicationTool(Tool):
         if not name:
             suggestions = await self._deps.apps.suggestions(spoken)
             hint = f" Did you mean {suggestions[0]}?" if suggestions else ""
-            return ToolResult.failure(f"I can't find an application called {spoken}.{hint}")
+            # Nothing installed by that name. It may well not be an application
+            # at all — "open the BBC" — so say so rather than ending the turn.
+            return ToolResult.failure(f"I can't find an application called {spoken}.{hint}",
+                                      wrong_tool=True)
         ctx.report(f"Opening {name}…", tool="open_application")
         result = await self._deps.controller.open_app(name)
         if not result.ok:
@@ -71,8 +74,11 @@ class CloseApplicationTool(Tool):
         self._deps = deps
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        name, _ = await self._deps.apps.resolve(args["name"])
-        name = name or args["name"]
+        spoken = args["name"]
+        name, _ = await self._deps.apps.resolve(spoken)
+        if not name:
+            return ToolResult.failure(f"I can't find an application called {spoken}.",
+                                      wrong_tool=True)
         if self._deps.apps.is_protected(name):
             return ToolResult.failure(f"I'd rather not quit {name} — the system depends on it.")
         if not await self._deps.controller.is_app_running(name):
@@ -103,8 +109,13 @@ class ActivateApplicationTool(Tool):
         self._deps = deps
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        name, _ = await self._deps.apps.resolve(args["name"])
-        name = name or args["name"]
+        spoken = args["name"]
+        name, _ = await self._deps.apps.resolve(spoken)
+        if not name:
+            # "Focus on the medical ones" is not a request to focus a window.
+            # Say so rather than sending nonsense to System Events.
+            return ToolResult.failure(f"I can't find an application called {spoken}.",
+                                      wrong_tool=True)
         result = await self._deps.controller.activate_app(name)
         if not result.ok:
             return ToolResult.failure(f"{name} didn't come forward.", detail=result.output)

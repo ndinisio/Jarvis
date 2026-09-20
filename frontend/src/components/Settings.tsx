@@ -2,6 +2,16 @@ import { useEffect, useState } from 'react'
 import { useStore } from '../state/store'
 
 /**
+ * Slots that fall back to another slot when left blank (mirrors
+ * backend/jarvis/models/registry.py). Shown as placeholder text so an empty
+ * field reads as "deliberately inherited" rather than "broken".
+ */
+const SLOT_DEFERS_TO: Record<string, string | undefined> = {
+  reasoning: 'general',
+  specialist: 'reasoning',
+}
+
+/**
  * Configuration.
  *
  * Every field here maps to a value in ~/JARVIS/config/config.json. Nothing in
@@ -114,9 +124,10 @@ export function Settings() {
               <input value={draft.models.providers.ollama.base_url}
                      onChange={(e) => set(['models', 'providers', 'ollama', 'base_url'], e.target.value)} />
             </Field>
-            {(['fast', 'general', 'vision'] as const).map((slot) => (
+            {(['fast', 'general', 'reasoning', 'vision', 'specialist'] as const).map((slot) => (
               <Field key={slot} label={`${slot} model`}>
-                <input list="installed-models" value={draft.models[slot].model}
+                <input list="installed-models" value={draft.models[slot]?.model ?? ''}
+                       placeholder={SLOT_DEFERS_TO[slot] ? `uses the ${SLOT_DEFERS_TO[slot]} model` : ''}
                        onChange={(e) => set(['models', slot, 'model'], e.target.value)} />
               </Field>
             ))}
@@ -146,6 +157,21 @@ export function Settings() {
                     onChange={(v) => set(['security', 'allow_shell'], v)} />
             <Toggle label="Allow screen capture" value={draft.security.allow_screen_capture}
                     onChange={(v) => set(['security', 'allow_screen_capture'], v)} />
+          </Group>
+
+          <Group title="Intelligence">
+            <Toggle label="Agentic reasoning" value={draft.intelligence?.enabled ?? true}
+                    onChange={(v) => set(['intelligence', 'enabled'], v)} />
+            <Field label="Maximum steps per request">
+              <input type="number" min={1} max={12} value={draft.intelligence?.max_steps ?? 6}
+                     onChange={(e) => set(['intelligence', 'max_steps'], Number(e.target.value))} />
+            </Field>
+            <Field label="Repair attempts per step">
+              <input type="number" min={0} max={5} value={draft.intelligence?.recovery_budget ?? 2}
+                     onChange={(e) => set(['intelligence', 'recovery_budget'], Number(e.target.value))} />
+            </Field>
+            <Toggle label="Publish the reasoning trace" value={draft.intelligence?.trace ?? true}
+                    onChange={(v) => set(['intelligence', 'trace'], v)} />
           </Group>
 
           <Group title="Capabilities">

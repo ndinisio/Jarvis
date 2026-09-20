@@ -134,13 +134,17 @@ def _seed_state(seed: str) -> ConversationState:
 # per the authorization ("implement B only inside the benchmark")
 # ===========================================================================
 class TriageResult(BaseModel):
-    mode: Literal["chat", "action", "clarification"] = "chat"
+    #: v2 schema: "clarification" removed (unused by either model in round 1 —
+    #: see the benchmark report; an underspecified action is now expressed as
+    #: mode="action" with objective_sufficient=False, not a third mode).
+    mode: Literal["chat", "action"] = "chat"
     confidence: float = 0.5
     action_evidence: list[str] = Field(default_factory=list)
     requires_tools: bool = False
     objective: Objective | None = None
-    reply: str = ""
     reason: str = ""
+    #: reply removed: triage routes, it does not draft the conversational
+    #: answer — that call belongs to a separate, streamed step either way.
 
     #: Set after validation if the "positive evidence" rule fired.
     evidence_correction_applied: bool = False
@@ -154,38 +158,40 @@ class TriageResult(BaseModel):
         return self
 
 
-_TRIAGE_PROMPT = """You decide what the user wants, in three modes only.
+_TRIAGE_PROMPT = """You decide what the user wants. Two modes only.
 
 mode="chat": ordinary conversation, greetings, opinions, questions about you,
   discussing a topic, thinking aloud — even if it mentions email, files,
   Safari, calendars or other things JARVIS can act on. Mentioning a domain is
-  NOT evidence of wanting an action in that domain. This is the default.
+  NOT evidence of wanting an action in that domain. This is the default:
+  when in doubt, chat.
 mode="action": the user is asking JARVIS to actually do something right now.
-mode="clarification": action intent is clear but there is nothing concrete
-  enough to act on, even with the context given.
+  This includes requests where something is missing (who to email, what to
+  send) — say mode="action" and list what's missing in objective.missing
+  rather than downgrading to chat just because a detail is absent.
 
 Require POSITIVE evidence for mode="action": action_evidence must be short
 literal phrases from the user's own words that justify it. If you cannot
 point to such words, use mode="chat". Do not guess.
+
+Examples of clear action requests (mode="action"):
+  "Open Safari." -> action_evidence: ["open safari"]
+  "Check my email." -> action_evidence: ["check my email"]
+  "Take a screenshot." -> action_evidence: ["take a screenshot"]
+These are genuinely being asked for, not merely mentioned in passing — that
+distinction, not the presence of a domain word, is what "action" means.
 
 {context}
 
 User said: "{text}"
 
 Reply with JSON only:
-{{"mode": "chat|action|clarification",
+{{"mode": "chat|action",
  "confidence": 0.0-1.0,
- "action_evidence": ["<literal phrase>", ...],
+ "action_evidence": ["open safari"],
  "requires_tools": true|false,
  "objective": {{"goal": "...", "kind": "...", "targets": [...], "complexity": "trivial|simple|multi_step", "confidence": "confident|probable|ambiguous|impossible", "missing": [...]}} or null,
- "reply": "<only if mode=chat and you are asked to draft the reply here, else empty>",
  "reason": "<one short phrase>"}}"""
-
-_UNIFIED_PROMPT = _TRIAGE_PROMPT + (
-    "\n\nYou are the only model consulted this turn. When mode=\"chat\", also "
-    "write the actual reply to the user in the \"reply\" field, in JARVIS's "
-    "voice: precise, warm, a little formal, addressing the user as sir."
-)
 
 
 def _build_context(state: ConversationState | None) -> str:
@@ -205,6 +211,23 @@ def _objective_sufficient(obj: Objective | None) -> bool:
     if obj.confidence not in ("confident", "probable"):
         return False
     return not obj.missing
+
+
+def _evidence_grounded(evidence: list[str], text: str) -> bool:
+    """Is every claimed action_evidence phrase actually present, verbatim
+    (case-insensitive), in what the user said?
+
+    Round 1 showed a model can emit plausible-looking evidence — sometimes
+    even literal prompt-template placeholder text — that doesn't correspond to
+    anything in the input. This turns that manual read into a checkable fact:
+    an empty evidence list on mode="chat" counts as vacuously grounded (there
+    is nothing ungrounded to claim), but a non-empty list is only grounded if
+    every phrase is a real substring of the source text.
+    """
+    if not evidence:
+        return True
+    lowered = text.lower()
+    return all(phrase.lower() in lowered for phrase in evidence)
 
 
 # ===========================================================================
@@ -395,10 +418,9 @@ async def main() -> int:
     for case in CASES:
         state = _seed_state(case.seed) if case.seed else None
         context = _build_context(state)
-        for arch, slot, prompt_template in (("A_prime", Slot.FAST, _TRIAGE_PROMPT),
-                                            ("B", Slot.REASONING, _UNIFIED_PROMPT)):
+        for arch, slot in (("A_prime", Slot.FAST), ("B", Slot.REASONING)):
             for rep in range(args.reps):
-                prompt = prompt_template.format(context=context, text=case.text)
+                prompt = _TRIAGE_PROMPT.format(context=context, text=case.text)
                 call = await _call_triage(models, slot, prompt)
                 entry = {
                     "text": case.text, "category": case.category,
@@ -406,6 +428,10 @@ async def main() -> int:
                     "architecture": arch, "rep": rep, "ok": call.ok,
                     "json_ok": call.json_ok, "latency_ms": round(call.latency_ms, 1),
                     "error": call.error,
+                    # Persisted unconditionally — including on failure — so a
+                    # validation error can actually be diagnosed afterwards
+                    # instead of only being visible as an opaque error count.
+                    "raw_text": call.raw_text,
                 }
                 if call.result is not None:
                     entry.update({
@@ -416,13 +442,26 @@ async def main() -> int:
                         "objective_sufficient": _objective_sufficient(call.result.objective),
                         "objective_goal": call.result.objective.goal if call.result.objective else "",
                         "evidence_correction_applied": call.result.evidence_correction_applied,
-                        "reply_len": len(call.result.reply),
+                        "evidence_grounded": _evidence_grounded(call.result.action_evidence,
+                                                                case.text),
                     })
                 results["cases"].append(entry)
-                tag = "OK " if call.ok else "ERR"
+                # [RUN]/[FAIL] describes whether the call executed and parsed
+                # into a valid TriageResult — nothing about whether the model
+                # was *right*. That's what the trailing [match]/[MISS] marker
+                # is for for scored cases (see the legend printed with the
+                # summary); an unscored case never gets one, since there is no
+                # single correct answer to check it against.
+                tag = "RUN " if call.ok else "FAIL"
                 mode = call.result.mode if call.result else "-"
+                if case.expected_mode is None or call.result is None:
+                    correctness = ""
+                elif call.result.mode == case.expected_mode:
+                    correctness = "  [match]"
+                else:
+                    correctness = "  [MISS]"
                 print(f"  [{tag}] {arch:8} {case.category:24} {case.text[:42]!r:44} "
-                     f"mode={mode:6} {call.latency_ms:7.0f}ms" +
+                     f"mode={mode:6} {call.latency_ms:7.0f}ms{correctness}" +
                      (f"  ({call.error})" if not call.ok else ""))
 
     if args.output != "-":
@@ -433,38 +472,137 @@ async def main() -> int:
     return 0
 
 
+def pct(n: int, d: int) -> str:
+    return f"{100 * n / d:.0f}%" if d else "n/a"
+
+
+def _p(vals: list[float], q: float) -> str:
+    if not vals:
+        return "n/a"
+    idx = min(len(vals) - 1, int(len(vals) * q))
+    return f"{vals[idx]:.0f}ms"
+
+
 def _print_report(results: dict[str, Any]) -> None:
+    """Every number below is counted directly from ``results["cases"]`` —
+    each metric is its own independent pass over the raw records, never
+    derived by arithmetic on another already-computed metric. That's
+    deliberate: the bug this function replaces (a "JSON failure rate" that
+    read 0% while three schema-validation failures sat in the same rows)
+    came from counting only one failure *kind* under a label that implied
+    it covered both. Direct, separate counts for each named thing, plus the
+    consistency checks at the end of each block, are what stop that class of
+    bug from being silent again.
+    """
     cases = results["cases"]
     print("\n" + "=" * 72)
     print("SUMMARY")
     print("=" * 72)
+    print("([RUN]/[FAIL] above describes whether a call executed and parsed —")
+    print(" never whether the model's answer was correct. [match]/[MISS] is correctness.)")
+
     for arch in ("A_prime", "B"):
         rows = [c for c in cases if c["architecture"] == arch]
         scored = [c for c in rows if c["expected_mode"] is not None]
-        correct = [c for c in scored if c.get("mode") == c["expected_mode"]]
-        latencies = sorted(c["latency_ms"] for c in rows if c["ok"])
-        json_fail = sum(1 for c in rows if not c["json_ok"])
-        action_rows = [c for c in rows if c.get("mode") == "action"]
-        sufficient = [c for c in action_rows if c.get("objective_sufficient")]
+
+        # -- execution status: every row is either ok or not-ok, and every
+        # not-ok row failed at exactly one of two points — parsing the JSON,
+        # or validating it against the schema. Each is counted on its own.
+        ok_count = sum(1 for c in rows if c["ok"])
+        not_ok_count = sum(1 for c in rows if not c["ok"])
+        parse_fail_count = sum(1 for c in rows if not c["json_ok"])
+        validation_fail_count = sum(1 for c in rows if c["json_ok"] and not c["ok"])
+
+        # -- correctness, scored cases only (expected_mode in {chat, action}) --
+        # A call that failed to execute has no `mode` at all — it is neither a
+        # correct "chat" nor a wrong "action", it's a third thing the four
+        # confusion buckets don't have room for. Forcing it into one (e.g.
+        # letting a chat-expected failure hide inside "not predicted action")
+        # is exactly the kind of miscount this rewrite exists to stop. So the
+        # confusion matrix covers only scored calls that actually executed;
+        # a failed scored call is still counted as wrong in `scored accuracy`
+        # (below) and in the failure-rate metrics, just not force-fit here.
+        correct_count = sum(1 for c in scored if c.get("mode") == c["expected_mode"])
+        scored_ok = [c for c in scored if c["ok"]]
+        scored_failed_count = len(scored) - len(scored_ok)
+        tp = sum(1 for c in scored_ok if c["expected_mode"] == "action" and c["mode"] == "action")
+        fn = sum(1 for c in scored_ok if c["expected_mode"] == "action" and c["mode"] != "action")
+        tn = sum(1 for c in scored_ok if c["expected_mode"] == "chat" and c["mode"] == "chat")
+        fp = sum(1 for c in scored_ok if c["expected_mode"] == "chat" and c["mode"] == "action")
+
+        # -- evidence grounding: only meaningful where evidence was claimed --
+        with_evidence_count = sum(1 for c in rows if c.get("action_evidence"))
+        grounded_count = sum(1 for c in rows if c.get("action_evidence") and c.get("evidence_grounded"))
+
+        # -- objective sufficiency, split: genuine (scored) actions vs. the
+        # deliberately underspecified pool, which should legitimately score
+        # low here — that's a correct "I can't act on this yet", not a miss.
+        genuine_action_count = sum(1 for c in rows
+                                   if c.get("mode") == "action" and c["expected_mode"] == "action")
+        genuine_sufficient_count = sum(1 for c in rows if c.get("mode") == "action"
+                                       and c["expected_mode"] == "action"
+                                       and c.get("objective_sufficient"))
+        underspec_action_count = sum(1 for c in rows if c.get("mode") == "action"
+                                     and c["category"] == "clarification_underspecified")
+        underspec_sufficient_count = sum(1 for c in rows if c.get("mode") == "action"
+                                         and c["category"] == "clarification_underspecified"
+                                         and c.get("objective_sufficient"))
+
         corrections = sum(1 for c in rows if c.get("evidence_correction_applied"))
+        latencies = sorted(c["latency_ms"] for c in rows if c["ok"])
 
-        def pct(n: int, d: int) -> str:
-            return f"{100 * n / d:.0f}%" if d else "n/a"
+        # -- self-checks: every count above was taken independently straight
+        # from `rows`/`scored`, so these should hold by construction. If they
+        # don't, the report is wrong and says so loudly rather than quietly
+        # printing numbers that don't add up.
+        checks = [
+            ("ok + not-ok == total rows", ok_count + not_ok_count == len(rows)),
+            ("parse-fail + validation-fail == not-ok",
+             parse_fail_count + validation_fail_count == not_ok_count),
+            ("TP+FN+TN+FP == scored calls that executed", tp + fn + tn + fp == len(scored_ok)),
+            ("grounded <= claimed evidence", grounded_count <= with_evidence_count),
+        ]
+        for description, holds in checks:
+            if not holds:
+                print(f"  ⚠️  INTERNAL CHECK FAILED for {arch}: {description}")
 
-        def p(vals: list[float], q: float) -> str:
-            if not vals:
-                return "n/a"
-            idx = min(len(vals) - 1, int(len(vals) * q))
-            return f"{vals[idx]:.0f}ms"
-
-        print(f"\n{arch}")
-        print(f"  accuracy (scored cases): {pct(len(correct), len(scored))} "
-             f"({len(correct)}/{len(scored)})")
-        print(f"  JSON failure rate: {pct(json_fail, len(rows))} ({json_fail}/{len(rows)})")
-        print(f"  evidence-validator corrections: {corrections}")
-        print(f"  p50 latency: {p(latencies, 0.50)}   p95: {p(latencies, 0.95)}")
-        print(f"  action cases with a skip-Understanding-worthy objective: "
-             f"{pct(len(sufficient), len(action_rows))} ({len(sufficient)}/{len(action_rows)})")
+        print(f"\n{arch}  ({len(rows)} calls, {len(scored)} scored)")
+        print("  -- correctness --")
+        print(f"    scored accuracy: {pct(correct_count, len(scored))} "
+             f"({correct_count}/{len(scored)})")
+        print(f"    action recall  (of {tp + fn} genuine actions, caught): "
+             f"{pct(tp, tp + fn)} ({tp}/{tp + fn})")
+        print(f"    chat precision (of {tn + fn} calls predicted chat, truly chat): "
+             f"{pct(tn, tn + fn)} ({tn}/{tn + fn})")
+        excl = (f" — excludes {scored_failed_count} failed scored call(s), already counted "
+               "as wrong above and in the failure rates below") if scored_failed_count else ""
+        print(f"    confusion matrix (scored cases that executed successfully{excl}):")
+        print(f"        TP={tp}   FN={fn}")
+        print(f"        FP={fp}   TN={tn}")
+        print("  -- execution --")
+        print(f"    JSON/schema failure rate (either kind): "
+             f"{pct(not_ok_count, len(rows))} ({not_ok_count}/{len(rows)})")
+        print(f"    parse failure rate       (not valid JSON at all): "
+             f"{pct(parse_fail_count, len(rows))} ({parse_fail_count}/{len(rows)})")
+        print(f"    validation failure rate  (valid JSON, failed the schema): "
+             f"{pct(validation_fail_count, len(rows))} ({validation_fail_count}/{len(rows)})")
+        print(f"    evidence-validator corrections (empty evidence + action): {corrections}")
+        print("  -- evidence & objectives --")
+        print(f"    evidence-grounding rate (claimed evidence actually in the input): "
+             f"{pct(grounded_count, with_evidence_count)} ({grounded_count}/{with_evidence_count})")
+        print(f"    objective sufficiency on genuine actions: "
+             f"{pct(genuine_sufficient_count, genuine_action_count)} "
+             f"({genuine_sufficient_count}/{genuine_action_count})")
+        if underspec_action_count:
+            print(f"    objective sufficiency on underspecified requests "
+                 f"(low is correct — nothing to act on yet): "
+                 f"{pct(underspec_sufficient_count, underspec_action_count)} "
+                 f"({underspec_sufficient_count}/{underspec_action_count})")
+        else:
+            print("    objective sufficiency on underspecified requests: "
+                 "n/a (none classified action)")
+        print("  -- latency --")
+        print(f"    p50: {_p(latencies, 0.50)}    p95: {_p(latencies, 0.95)}")
 
     print("\nClarification/underspecified cases (no single right answer — raw outputs):")
     for c in cases:
