@@ -15,7 +15,7 @@ import json
 import pytest
 from jarvis.capabilities.automation import AutomationCapability
 from jarvis.capabilities.base import Request
-from jarvis.core.errors import Cancelled, ConfirmationDeclined
+from jarvis.core.errors import Cancelled
 from jarvis.tools.base import ToolResult
 
 pytestmark = pytest.mark.asyncio
@@ -126,13 +126,21 @@ async def test_handle_reports_a_milestone_the_model_gives_up_on(app, scripted):
 # -- the starting confirmation -------------------------------------------------
 
 async def test_a_declined_start_never_runs_anything(app, scripted, monkeypatch):
+    """handle() catches its own start confirmation's decline and returns a
+    normal, spoken Response rather than letting ConfirmationDeclined escape —
+    unlike every other gated call, this one isn't routed through the tool
+    registry (which does that conversion for a plain tool call), and handle()
+    always runs inside a background Task, where an uncaught raise would be
+    swallowed with no reply at all (see test_intelligence.py's
+    test_declining_the_automation_start_confirmation_still_gets_a_reply for
+    the end-to-end proof)."""
     app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
     calls = _stub(app, monkeypatch, "browse_to", ToolResult(summary="should not run"))
     scripted.script_decompose(["open the site"])
 
     task = app.deps.tasks.create("automation", "test")
-    with pytest.raises(ConfirmationDeclined):
-        await AutomationCapability(app.deps).handle(_request(app, task))
+    response = await AutomationCapability(app.deps).handle(_request(app, task))
+    assert response.text and response.spoken
     assert calls == []
     assert task.id not in app.deps.permissions._task_grants
 

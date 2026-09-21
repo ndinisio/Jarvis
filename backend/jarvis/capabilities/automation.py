@@ -36,6 +36,7 @@ import time
 from collections import deque
 from typing import Any
 
+from ..core.errors import ConfirmationDeclined
 from ..core.logging import get_logger
 from ..core.narration import ActionNarrator
 from ..intelligence.schema import Objective
@@ -132,7 +133,16 @@ class AutomationCapability(Capability):
 
         request.ctx.raise_if_cancelled()
         milestones = await self._decompose(goal)
-        await self._confirm_start(goal, milestones)
+        try:
+            await self._confirm_start(goal, milestones)
+        except ConfirmationDeclined as exc:
+            # Unlike a tool call's decline (converted to a ToolResult by
+            # registry.py before it ever reaches a capability), this
+            # permissions.require() is called directly, and handle() runs
+            # inside a background Task — an uncaught raise here would be
+            # swallowed by TaskManager._run as a bare failure, leaving the
+            # user with silence after the "I'm on it" acknowledgement.
+            return Response(text=exc.user_message, spoken=exc.user_message)
 
         task_id = request.ctx.task_id
         if task_id:

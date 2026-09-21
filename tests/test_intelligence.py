@@ -1707,3 +1707,63 @@ async def test_download_file_works_as_a_standalone_tool_through_the_small_loop(a
     await app.ask("download the latest python installer")
     assert len(calls) == 1
     assert calls[0]["url"] == "https://python.org/installer.pkg"
+
+
+async def test_declining_the_automation_start_confirmation_still_gets_a_reply(
+    app, brain, fake_provider, monkeypatch
+):
+    """A real gap found while auditing narration for double-speech: handle()
+    calls permissions.require() directly for its one start confirmation
+    (nothing else in any capability does — every other gated call goes
+    through the tool registry, which already converts a decline into a
+    ToolResult rather than a raised exception). Because this capability is
+    always long_running, that call runs inside a background Task
+    (core/orchestrator.py: _run_in_background), so an uncaught
+    ConfirmationDeclined used to be swallowed by TaskManager._run as a bare
+    failure — the user heard the "I'm on it" acknowledgement and then
+    silence, forever. Proven end-to-end: the brain fixture pre-approves
+    medium risk for convenience, so it's turned back off here to force a
+    real confirmation that then times out unanswered."""
+    class _FakeVoice:
+        def __init__(self):
+            self.spoken: list[str] = []
+
+        def enqueue(self, text):
+            self.spoken.append(text)
+
+        async def stop_speaking(self):
+            return False
+
+    voice = _FakeVoice()
+    app.deps.voice = voice
+    app.orchestrator.voice = voice
+    app.config.voice.enabled = True
+
+    app.config_store.update({"security": {"auto_approve": ["low"], "confirmation_timeout_s": 0.15}})
+
+    calls = _stub_tool(app, monkeypatch, "browse_to",
+                       ToolResult(data={"url": "https://x.example"}, summary="Opened it."))
+
+    decompose_q = [json.dumps({"milestones": ["open the site"]})]
+    brain_reply = brain._reply
+
+    def combined_router(messages, kwargs):
+        text = " ".join(m.content for m in messages)
+        if "break a task into milestones" in text:
+            return decompose_q.pop(0) if decompose_q else None
+        return brain_reply(messages, kwargs)
+
+    fake_provider.router = combined_router
+    brain.understand(goal="open x.example", kind="automation", complexity=Complexity.MULTI_STEP,
+                     needs_tools=True)
+
+    result = await app.ask("open x.example please, step by step")
+    assert result.task_id
+    await settle(app)
+
+    assert calls == [], "declining the start must stop before any tool runs"
+    task = app.tasks.get(result.task_id)
+    assert task.status == "succeeded", "a decline is an answer, not a task failure"
+    assert len(voice.spoken) == 2, (
+        f"expected the acknowledgement plus the decline reply, got: {voice.spoken}")
+    assert "left it" in voice.spoken[-1].lower() or "understood" in voice.spoken[-1].lower()
