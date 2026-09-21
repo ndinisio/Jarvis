@@ -9,12 +9,14 @@ screen coordinates.
 from __future__ import annotations
 
 import abc
+import json
 from typing import Any
 
 from ...security.permissions import RiskLevel
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
 from ..macos.tools import normalise_url
 from ..web.search import search_url
+from . import manifest_js
 
 
 class BrowserDriver(abc.ABC):
@@ -27,13 +29,43 @@ class BrowserDriver(abc.ABC):
     async def current_page(self) -> dict[str, str]: ...
 
     @abc.abstractmethod
-    async def page_text(self) -> str: ...
+    async def run_js(self, script: str, *, timeout: float = 20.0) -> str:
+        """Execute *script* in the front tab/document, return its result as
+        a string. Every write-capable web primitive below is built on this
+        one per-browser AppleScript↔JS bridge — the same mechanism the
+        (read-only) :meth:`page_text` already used."""
 
     async def open(self, url: str) -> bool:
         return (await self._c.open_url(url, self.app_name)).ok
 
     async def tabs(self) -> list[dict[str, str]]:
         return []
+
+    async def page_text(self) -> str:
+        return await self.run_js("document.body.innerText", timeout=30.0)
+
+    async def can_execute_js(self) -> bool:
+        """Cheap probe for the developer setting every write primitive here
+        depends on ("Allow JavaScript from Apple Events"), which is off by
+        default in both Safari and Chromium-family browsers."""
+        return (await self.run_js("1+1")).strip() == "2"
+
+    # -- grounded interaction, built entirely on run_js() -------------------
+    async def page_manifest(self, *, limit: int = 60,
+                            roles: list[str] | None = None) -> dict[str, Any]:
+        raw = await self.run_js(manifest_js.build_manifest_script(limit=limit, roles=roles),
+                                timeout=20.0)
+        return _parse_js_json(raw)
+
+    async def click_handle(self, handle: str) -> dict[str, Any]:
+        return _parse_js_json(await self.run_js(manifest_js.build_click_script(handle)))
+
+    async def fill_handle(self, handle: str, text: str, *, submit: bool = False) -> dict[str, Any]:
+        raw = await self.run_js(manifest_js.build_fill_script(handle, text, submit))
+        return _parse_js_json(raw)
+
+    async def submit_handle(self, handle: str) -> dict[str, Any]:
+        return _parse_js_json(await self.run_js(manifest_js.build_submit_script(handle)))
 
 
 class SafariDriver(BrowserDriver):
@@ -49,11 +81,11 @@ class SafariDriver(BrowserDriver):
         parts = result.stdout.strip().split("\n", 1)
         return {"url": parts[0].strip(), "title": parts[1].strip() if len(parts) > 1 else ""}
 
-    async def page_text(self) -> str:
+    async def run_js(self, script: str, *, timeout: float = 20.0) -> str:
         result = await self._c.osascript(
-            'tell application "Safari" to return (do JavaScript "document.body.innerText" '
-            "in front document)",
-            timeout=30.0,
+            'tell application "Safari" to return (do JavaScript "'
+            + _as_applescript_literal(script) + '" in front document)',
+            timeout=timeout,
         )
         return result.stdout.strip() if result.ok else ""
 
@@ -83,11 +115,11 @@ class ChromiumDriver(BrowserDriver):
         parts = result.stdout.strip().split("\n", 1)
         return {"url": parts[0].strip(), "title": parts[1].strip() if len(parts) > 1 else ""}
 
-    async def page_text(self) -> str:
+    async def run_js(self, script: str, *, timeout: float = 20.0) -> str:
         result = await self._c.osascript(
             f'tell application "{self.app_name}" to return (execute active tab of front window '
-            'javascript "document.body.innerText")',
-            timeout=30.0,
+            'javascript "' + _as_applescript_literal(script) + '")',
+            timeout=timeout,
         )
         return result.stdout.strip() if result.ok else ""
 
@@ -98,6 +130,32 @@ class ChromiumDriver(BrowserDriver):
         if not result.ok:
             return []
         return [{"url": u.strip()} for u in result.stdout.split(",") if u.strip()]
+
+
+def _as_applescript_literal(script: str) -> str:
+    """Escape JS *script* for embedding as an AppleScript double-quoted
+    string literal — the same escaping ``macos/controller.py: _esc()`` uses
+    for any AppleScript literal, applied here to a whole JS program rather
+    than a single value. Every dynamic value inside *script* was already
+    embedded via ``json.dumps()`` (see ``manifest_js.py``), so this layer
+    only ever has to protect the literal boundary itself, not page content."""
+    return script.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _parse_js_json(raw: str) -> dict[str, Any]:
+    """Every script in ``manifest_js.py`` returns ``JSON.stringify(...)`` of
+    its result — a plain JS string, which is what survives the AppleScript
+    round trip losslessly. Parse it back, and fail safely (never raise) when
+    the browser returned nothing usable, which is exactly what happens when
+    JavaScript-from-Apple-Events is off."""
+    if not raw:
+        return {"ok": False, "reason": "the browser didn't respond \u2014 JavaScript from Apple "
+                                       "Events may be disabled, or nothing is open"}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"ok": False, "reason": "the page returned something unexpected"}
+    return data if isinstance(data, dict) else {"ok": False, "reason": "unexpected response shape"}
 
 
 def driver_for(controller, name: str) -> BrowserDriver:
@@ -173,7 +231,7 @@ class CurrentPageTool(Tool):
         self._deps = deps
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        name = args.get("browser") or await self._detect_browser()
+        name = args.get("browser") or await detect_browser(self._deps)
         driver = driver_for(self._deps.controller, name)
         page = await driver.current_page()
         if not page.get("url"):
@@ -199,12 +257,6 @@ class CurrentPageTool(Tool):
             display={"kind": "page", "title": page.get("title", ""), "url": page["url"],
                      "text": text[:3000]},
         )
-
-    async def _detect_browser(self) -> str:
-        front = await self._deps.controller.frontmost_app()
-        if front and any(b in front.lower() for b in ("safari", "chrome", "brave", "edge", "arc")):
-            return front
-        return self._deps.config.capabilities and "Safari"
 
 
 class BrowserTabsTool(Tool):
@@ -238,6 +290,16 @@ def _domain(url: str) -> str:
     from urllib.parse import urlparse
 
     return urlparse(url).netloc.replace("www.", "") or url
+
+
+async def detect_browser(deps) -> str:
+    """Which browser to address when a tool call doesn't name one — the
+    frontmost app if it looks like a browser, Safari otherwise. Shared by
+    every browser/page tool so they all guess the same way."""
+    front = await deps.controller.frontmost_app()
+    if front and any(b in front.lower() for b in ("safari", "chrome", "brave", "edge", "arc")):
+        return front
+    return "Safari"
 
 
 def browser_tools(deps) -> list[Tool]:

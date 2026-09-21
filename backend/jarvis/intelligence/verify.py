@@ -44,6 +44,14 @@ class Verifier:
         spec = self._spec(tool)
         category = spec.category if spec else ""
 
+        # Checked by tool name, ahead of the category-based checks below,
+        # because click_page_element/fill_page_field/submit_page_form share
+        # category="browser" with the navigation tools but need a different
+        # check entirely — and click_element/type_text previously had no
+        # real check at all, always falling through to the generic
+        # skipped=True case at the bottom of this method.
+        if tool in {"click_element", "click_page_element", "type_text", "fill_page_field"}:
+            return self._verify_interaction(tool, result)
         if category == "browser" or tool in {"browse_to", "open_url", "get_current_page"}:
             return self._verify_navigation(arguments, result, objective, state)
         if category == "files":
@@ -127,6 +135,49 @@ class Verifier:
         return Verification(verified=running, confidence=0.85,
                             problem="" if running else f"{name} doesn't appear to be running",
                             evidence=f"{name} {'is running' if running else 'is not running'}")
+
+    @staticmethod
+    def _verify_interaction(tool: str, result: ToolResult) -> Verification:
+        """click/type on a native window or a web page.
+
+        There is no cheap independent probe for "did that click do the
+        right thing" — the check runs entirely on evidence the tool already
+        returned, per this module's own stated approach. A web page
+        interaction's ``ok: true`` already came from JavaScript that
+        genuinely located the element by its handle and acted on it (a
+        stale handle fails before this is ever reached), so it earns
+        higher confidence than a native click, which only confirms an
+        accessibility element by that name existed and a generic ``click``
+        command was sent to it — real evidence, but a weaker guarantee.
+        Nothing here is a hard failure: many correct clicks have no
+        observable side effect at all, so an empty signal just means
+        ``skipped``, never ``verified=False``.
+        """
+        data = result.data if isinstance(result.data, dict) else {}
+        if tool == "click_element":
+            matched = str(data.get("matched") or "")
+            if matched:
+                return Verification(verified=True, confidence=0.7, evidence=f"clicked “{matched}”")
+            return Verification(verified=True, confidence=0.4, skipped=True,
+                                evidence="the click ran, but nothing came back naming what it hit")
+        if tool == "click_page_element":
+            clicked = str(data.get("clicked") or "")
+            return Verification(verified=True, confidence=0.8,
+                                evidence=f"the page confirmed clicking “{clicked}”" if clicked
+                                else "the page confirmed the click reached a real element")
+        if tool == "type_text":
+            target = str(data.get("application") or "")
+            if target:
+                return Verification(verified=True, confidence=0.6, evidence=f"typed into {target}")
+            return Verification(verified=True, confidence=0.4, skipped=True,
+                                evidence="typed, but nothing came back confirming where")
+        if tool == "fill_page_field":
+            filled = str(data.get("filled") or "")
+            return Verification(verified=True, confidence=0.8,
+                                evidence=f"the page confirmed filling “{filled}”" if filled
+                                else "the page confirmed the fill reached a real element")
+        return Verification(verified=True, confidence=0.4, skipped=True,  # pragma: no cover
+                            evidence="no cheap way to verify this action")
 
     @staticmethod
     def _verify_screen(result: ToolResult) -> Verification:

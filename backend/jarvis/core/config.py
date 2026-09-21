@@ -175,6 +175,14 @@ class SecurityConfig(BaseModel):
             "curl", "wget", "ssh", "scp", "defaults", "pkill", "installer", "brew",
         ]
     )
+    #: Binaries whose *version flag only* (e.g. ``python3 --version``) is a
+    #: pure read with no side effect — narrowly allowed without confirmation
+    #: even though the binary itself isn't on ``shell_allowlist``. Running
+    #: these binaries any other way still requires the normal HIGH-risk
+    #: confirmation.
+    version_check_binaries: list[str] = Field(
+        default_factory=lambda: ["python3", "python", "node", "npm", "git", "ruby", "java", "go"]
+    )
     #: Never transmit clipboard contents to a remote provider without asking.
     clipboard_remote_guard: bool = True
     #: Screen capture is on demand only. There is no continuous-capture mode.
@@ -190,6 +198,9 @@ class CapabilitiesConfig(BaseModel):
     files: bool = True
     browser: bool = True
     clipboard: bool = True
+    #: Multi-step app/web operation — page interaction, downloads, installers,
+    #: and the automation capability itself. Off turns all of it off at once.
+    automation: bool = True
 
 
 class ResearchConfig(BaseModel):
@@ -239,6 +250,34 @@ class IntelligenceConfig(BaseModel):
     trace: bool = True
 
 
+class AutomationConfig(BaseModel):
+    """Multi-step app/web operation (the automation capability).
+
+    Separate from :class:`IntelligenceConfig` deliberately: the generic
+    agent loop's ``max_steps=6`` is tuned for short info-gathering turns and
+    would truncate a real multi-step errand silently. A dedicated,
+    much larger budget here is what lets "find the best value X and add it
+    to my basket" actually finish instead of being cut off mid-task.
+    """
+
+    #: Steps allowed within one milestone (e.g. one page of search results)
+    #: before giving up on it.
+    max_steps_per_milestone: int = 15
+    #: Hard ceiling across the whole task, however many milestones it takes.
+    max_total_steps: int = 60
+    #: Findings kept for the model's own prompt context; the full trail is
+    #: still preserved in the task's step log for the user regardless.
+    findings_window: int = 16
+    #: Speak a step's narration only if it ran (or is expected to run)
+    #: longer than this — fast, routine steps stay silent.
+    narration_action_threshold_s: float = 5.0
+    #: Minimum gap between two spoken narration lines, so a slow step right
+    #: after a milestone announcement doesn't talk over it.
+    narration_min_gap_s: float = 4.0
+    #: Hard cap on a single download's size.
+    max_download_mb: int = 2048
+
+
 class UIConfig(BaseModel):
     developer_mode: bool = False
     show_telemetry: bool = True
@@ -258,6 +297,7 @@ class Config(BaseModel):
     research: ResearchConfig = ResearchConfig()
     memory: MemoryConfig = MemoryConfig()
     intelligence: IntelligenceConfig = IntelligenceConfig()
+    automation: AutomationConfig = AutomationConfig()
     ui: UIConfig = UIConfig()
     #: Set once the first-run walkthrough has been completed.
     onboarding_complete: bool = False

@@ -49,6 +49,20 @@ Examples of clear action requests (mode="action"):
 These are genuinely being asked for, not merely mentioned in passing — that
 distinction, not the presence of a domain word, is what "action" means.
 
+A request that requires operating an app or a website through several real
+steps to reach an end result — searching, comparing options, filling in
+forms, clicking through pages, downloading a file — is objective.kind=
+"automation" with objective.complexity="multi_step", not a single tool call:
+  "Find me the best value two-pack of ESP-32 boards and add them to my
+  basket." -> action_evidence: ["find me", "add them to my basket"],
+  objective.kind="automation", objective.complexity="multi_step"
+  "Check if I have the latest Python, and if not, download it." ->
+  action_evidence: ["check if i have", "download it"],
+  objective.kind="automation", objective.complexity="multi_step"
+A single click, read or lookup ("click the search bar", "what's on my
+screen") stays whatever kind describes it, at complexity="simple" —
+"automation" is specifically for a multi-step operation, not every action.
+
 {context}
 
 User said: "{text}"

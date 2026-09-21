@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .automation import AutomationCapability
 from .base import Capability
 from .conversation import ConversationCapability
 from .diagnostics import DiagnosticsCapability
@@ -43,4 +44,6 @@ def build_capabilities(deps) -> dict[str, Capability]:
         capabilities.append(EmailCapability(deps))
     if caps.calendar:
         capabilities.append(CalendarCapability(deps))
+    if caps.automation:
+        capabilities.append(AutomationCapability(deps))
     return {capability.name: capability for capability in capabilities}

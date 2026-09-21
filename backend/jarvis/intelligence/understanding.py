@@ -30,7 +30,7 @@ User just said: "{text}"
 
 Return:
 {{"goal": "<what they want, one short phrase>",
- "kind": "<verb phrase: read email|navigate|research|inspect screen|type text|schedule|diagnose|chat|...>",
+ "kind": "<verb phrase: read email|navigate|research|inspect screen|type text|schedule|diagnose|automation|chat|...>",
  "targets": ["<things acted on>"],
  "constraints": ["<filters or limits they gave>"],
  "references": [{{"text": "<phrase like 'it' or 'my brother'>", "kind": "person|app|url|email|file|result|screen_element"}}],
@@ -46,6 +46,11 @@ Rules:
 - is_correction is true when the user is saying the last action was wrong.
 - needs_tools is false only for chat, greetings and questions you can answer from what is already known.
 - complexity is multi_step only when several different actions are genuinely required.
+- kind="automation" (always with complexity="multi_step") is specifically for operating an app or
+  website through several real steps to reach an end result — searching, comparing, filling in
+  forms, clicking through pages, downloading a file. "Click the search bar" is kind="click",
+  complexity="simple"; "find the best value two-pack of ESP-32 boards and add them to my basket"
+  is kind="automation", complexity="multi_step".
 - confidence is ambiguous when a reference could mean several different things."""
 
 

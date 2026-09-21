@@ -371,7 +371,7 @@ async def test_example_d_screen_context_makes_the_screen_actionable(app, brain, 
     await app.ask("click the search bar")
     await settle(app)
 
-    assert clicks == [{"label": "search bar"}]
+    assert clicks == [{"label": "search bar", "app": ""}]
     assert "search bar" in brain.prompts("decide")[-1].lower()
 
 
@@ -1035,6 +1035,29 @@ async def test_recovery_will_not_blindly_repeat_a_state_change(app):
     assert plan.strategy == "report"
 
 
+async def test_recovery_reports_a_decline_whether_timed_out_or_explicit(app):
+    """A declined confirmation is an answer, not a failure to route around —
+    for both flavours registry.py can produce. Previously this matched on
+    the human-facing wording, which only happens to contain "confirm"/
+    "declin" for the timeout case; an explicit "no" (default message
+    "Understood — I've left it alone.") fell through to a model call
+    instead of a guaranteed report. registry.py now stamps a single stable
+    machine-readable prefix on both, and this must short-circuit deterministically
+    with no model call at all — the test provider isn't even asked."""
+    from jarvis.intelligence.recovery import RecoveryManager
+
+    manager = RecoveryManager(app.deps.models, ToolCatalog(app.deps.registry), budget=3)
+    app.models._providers = {}  # a model call here would mean the shortcut didn't fire
+    for detail in ("timed out", "delete_file"):  # timeout flavour vs. explicit "no" flavour
+        plan = await manager.decide(
+            Objective(goal="delete the file"), "delete_file", {"path": "x.txt"},
+            ToolResult.failure("Understood — I've left it alone.",
+                              detail=f"confirmation_declined:{detail}"),
+            Verification(verified=False, problem="declined"), [], attempts=1)
+        assert plan.strategy == "report"
+        assert plan.reason == "the user declined the action"
+
+
 async def test_multi_step_work_is_planned_and_simple_work_is_not(app, brain, monkeypatch):
     _stub_tool(app, monkeypatch, "research_topic",
                ToolResult(data={"sources": [{"title": "T", "url": "https://x.example"}]},
@@ -1092,7 +1115,7 @@ async def test_a_failed_argument_check_is_fed_back_rather_than_crashing(app, bra
     steps = [e.payload for e in app.bus.history
              if e.type == "intelligence.trace" and e.payload.get("stage") == "step"]
     assert steps and "rejected" in steps[0]["note"], "the bad call should be fed back"
-    assert clicks == [{"label": "Search"}], "and the corrected call should then run"
+    assert clicks == [{"label": "Search", "app": ""}], "and the corrected call should then run"
 
 
 async def test_the_trace_reports_stages_without_exposing_reasoning(app, brain, desktop):
@@ -1488,3 +1511,109 @@ async def test_contextual_open_the_second_one_executes_at_most_once(app, brain, 
     await app.ask("Open the second one.")
 
     assert len(calls) == 1, f"browse_to.run() was called {len(calls)} times: {calls!r}"
+
+
+# ===========================================================================
+# The automation handoff (Part 4): a multi-step app/web objective must never
+# be run through this file's short decide/verify loop — it hands off before
+# the shortlist is even built, and the orchestrator re-routes it through the
+# same backgrounding machinery a quick-matched capability gets.
+# ===========================================================================
+async def test_a_multi_step_automation_objective_hands_off_before_shortlisting(app, brain,
+                                                                               monkeypatch):
+    """The loop must return outcome.handoff without ever calling
+    catalog.shortlist() — that is the concrete claim in agent.py's comment
+    ("no model spend is wasted on a turn that's about to be re-routed")."""
+    from jarvis.intelligence.agent import IntelligenceAgent
+
+    agent = IntelligenceAgent(app.deps, app.deps.models, app.orchestrator.state)
+    shortlisted = []
+    monkeypatch.setattr(agent.catalog, "shortlist",
+                        lambda *a, **k: shortlisted.append(1) or [])
+
+    brain.understand(goal="find the best value ESP-32 two-pack and add it to my basket",
+                     kind="automation", complexity=Complexity.MULTI_STEP, needs_tools=True)
+    ctx = app.deps.tool_context()
+    outcome = await agent.run("find me a good esp32 board and add it to my basket", ctx)
+
+    assert outcome.handoff == "automation"
+    assert outcome.objective is not None and outcome.objective.kind == "automation"
+    assert not shortlisted, "shortlist() must never run for a handed-off objective"
+
+
+async def test_a_single_step_click_does_not_hand_off(app, brain):
+    """Only genuinely multi-step automation objectives hand off — an
+    ordinary single click keeps going through the small loop exactly as
+    before, unaffected by this feature."""
+    from jarvis.intelligence.agent import IntelligenceAgent
+
+    agent = IntelligenceAgent(app.deps, app.deps.models, app.orchestrator.state)
+    brain.understand(goal="click the search bar", kind="click", complexity=Complexity.SIMPLE,
+                     needs_tools=True)
+    brain.decide(action="tool_call", tool="click_element", arguments={"label": "search bar"},
+                reason="click it")
+    ctx = app.deps.tool_context()
+    outcome = await agent.run("click the search bar", ctx)
+    assert outcome.handoff is None
+
+
+async def test_the_handoff_survives_case_and_whitespace_drift_in_kind(app, brain):
+    """Objective.kind has no validator (unlike complexity/confidence, each
+    of which falls back to a safe default) — an exact, case-sensitive
+    string comparison against a free-form LLM field would silently miss
+    "Automation" or trailing whitespace despite the prompt's exact-string
+    instruction, sending a real multi-step errand through the 6-step loop
+    instead of handing it off."""
+    from jarvis.intelligence.agent import IntelligenceAgent
+
+    agent = IntelligenceAgent(app.deps, app.deps.models, app.orchestrator.state)
+    for kind in (" Automation ", "AUTOMATION", "automation"):
+        brain.understand(goal="find the best value ESP-32 two-pack and add it to my basket",
+                         kind=kind, complexity=Complexity.MULTI_STEP, needs_tools=True)
+        ctx = app.deps.tool_context()
+        outcome = await agent.run("find me a good esp32 board and add it to my basket", ctx)
+        assert outcome.handoff == "automation", f"kind={kind!r} should still hand off"
+
+
+async def test_automation_is_disabled_by_the_capability_flag(app, brain):
+    """caps.automation=False must fall through to the ordinary loop, the
+    same escape hatch every other capability flag gets."""
+    from jarvis.intelligence.agent import IntelligenceAgent
+
+    app.config_store.update({"capabilities": {"automation": False}})
+    agent = IntelligenceAgent(app.deps, app.deps.models, app.orchestrator.state)
+    brain.understand(goal="find the best value ESP-32 two-pack and add it to my basket",
+                     kind="automation", complexity=Complexity.MULTI_STEP, needs_tools=True)
+    brain.decide(action="complete", reason="nothing to do")
+    ctx = app.deps.tool_context()
+    outcome = await agent.run("find me a good esp32 board", ctx)
+    assert outcome.handoff is None
+
+
+async def test_stop_cancels_a_handed_off_automation_task(app, brain, monkeypatch):
+    """The concrete proof the cancel_event gap is closed: a turn that started
+    in the agent loop and got handed off can now be stopped, which was
+    structurally impossible before this feature (task=None on the only
+    call site of _run_agent meant ctx.cancelled() could never be true)."""
+    from jarvis.capabilities.base import Response
+
+    cancelled = asyncio.Event()
+
+    async def slow_handle(request):
+        for _ in range(300):
+            if request.ctx.cancelled():
+                cancelled.set()
+                return Response(text="stopped")
+            await asyncio.sleep(0.01)
+        return Response(text="completed")  # pragma: no cover - only on a real timeout
+
+    monkeypatch.setattr(app.capabilities["automation"], "handle", slow_handle)
+    brain.understand(goal="find the best value ESP-32 two-pack and add it to my basket",
+                     kind="automation", complexity=Complexity.MULTI_STEP, needs_tools=True)
+    result = await app.ask("find me a good esp32 board and add it to my basket")
+    assert result.task_id
+    await asyncio.sleep(0.1)
+
+    await app.ask("stop")
+    await asyncio.sleep(0.2)
+    assert cancelled.is_set()

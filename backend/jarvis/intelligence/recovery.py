@@ -100,8 +100,13 @@ class RecoveryManager:
                        verification: Verification, attempts: int) -> RecoveryPlan | None:
         detail = f"{result.summary} {result.error or ''}".lower()
 
-        # The user said no. That is an answer, not a failure to work around.
-        if "confirm" in detail and ("declin" in detail or "didn't receive" in detail):
+        # The user said no — or never answered. That is an answer, not a
+        # failure to work around. registry.py stamps this prefix onto
+        # result.error for every ConfirmationDeclined, timeout or explicit
+        # "no" alike, so this matches both uniformly instead of sniffing the
+        # human-facing wording (which differs between the two: an explicit
+        # decline's default message contains neither "confirm" nor "declin").
+        if (result.error or "").startswith("confirmation_declined"):
             return RecoveryPlan(strategy="report", reason="the user declined the action")
 
         # Bad or missing arguments are the model's to fix, not worth a round trip.

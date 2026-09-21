@@ -92,6 +92,12 @@ class AgentOutcome:
     #: True when ``text`` was already delivered token by token.
     streamed: bool = False
     trace: list[dict[str, Any]] = field(default_factory=list)
+    #: Set when this turn belongs to a capability better suited to run it
+    #: than this loop — currently only "automation" (see the handoff in
+    #: run(), just before the shortlist is built). When set, every other
+    #: field except ``objective`` is meaningless; the orchestrator re-routes
+    #: instead of composing an answer from this outcome.
+    handoff: str | None = None
 
 
 class IntelligenceAgent:
@@ -178,6 +184,20 @@ class IntelligenceAgent:
         # much thinking it takes.
         if not objective.needs_tools:
             return await self._converse(text, objective, outcome, trace, stream)
+
+        # A genuinely multi-step app/web operation — search, compare, click
+        # through, fill in, download — needs a real Task (cancel_event,
+        # progress, a step budget this loop's max_steps was never sized
+        # for), not the short decide/verify loop below. Handing off here,
+        # before shortlist() runs, means no model spend is wasted on a turn
+        # that's about to be re-routed. See orchestrator.py's handling of
+        # AgentOutcome.handoff for what happens next.
+        if (self.deps.config.capabilities.automation
+                and _normalise_kind(objective.kind) == "automation"
+                and objective.complexity == Complexity.MULTI_STEP):
+            outcome.handoff = "automation"
+            outcome.trace = trace.entries
+            return outcome
 
         cards = self.catalog.shortlist(objective, state)
 
@@ -487,6 +507,14 @@ class IntelligenceAgent:
         from ..core.personality import Personality
 
         return Personality(self.deps.config).system_prompt(self._context)
+
+
+def _normalise_kind(kind: str) -> str:
+    """``Objective.kind`` is free-form (no validator, unlike ``complexity``/
+    ``confidence`` — see its docstring), so the model returning
+    "Automation", trailing whitespace, or similar despite the prompt's
+    exact-string instruction must not silently defeat the handoff check."""
+    return (kind or "").strip().lower()
 
 
 def _changes_state(cards: list[ToolCard]) -> bool:

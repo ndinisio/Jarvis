@@ -62,6 +62,12 @@ CALENDAR_ACKS = ["Let me check your calendar.", "Looking at your schedule."]
 
 SCREEN_ACKS = ["Let me look.", "Taking a look at your screen."]
 
+AUTOMATION_ACKS = [
+    "On it — I'll talk you through it as I go.",
+    "Right away. I'll keep you posted as I work through it.",
+    "Starting now, sir — I'll narrate anything that takes a moment.",
+]
+
 _ACK_BY_KIND = {
     "research": RESEARCH_ACKS,
     "system": DIAGNOSTIC_ACKS,
@@ -70,6 +76,7 @@ _ACK_BY_KIND = {
     "email": MAIL_ACKS,
     "calendar": CALENDAR_ACKS,
     "screen": SCREEN_ACKS,
+    "automation": AUTOMATION_ACKS,
 }
 
 GREETINGS_MORNING = ["Good morning, sir.", "Morning, sir. How may I assist?"]

@@ -7,10 +7,11 @@ import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from ..core.errors import Cancelled, JarvisError, NetworkUnavailable
+from ..core.errors import Cancelled, ConfirmationDeclined, JarvisError, NetworkUnavailable
 from ..core.events import EventType
 from ..core.logging import get_logger
 from ..core.tracing import current_turn_id
+from ..security import consequence
 from .base import Tool, ToolContext, ToolResult
 
 log = get_logger("jarvis.tools")
@@ -121,10 +122,21 @@ class ToolRegistry:
                     risk=spec.risk,
                     summary=_confirmation_text(spec, cleaned),
                     details={"tool": name, "args": _redact(cleaned), "category": spec.category},
+                    consequential=consequence.classify(name, cleaned, spec),
+                    task_id=ctx.task_id,
                 )
             result = await tool.run(cleaned, ctx)
         except Cancelled:
             result = ToolResult.failure("Stopped.", detail="cancelled")
+        except ConfirmationDeclined as exc:
+            # A distinct branch (not folded into the generic JarvisError
+            # catch below) so recovery.py can tell "the user said no" apart
+            # from every other failure by a stable machine-readable prefix
+            # instead of sniffing the human-facing wording, which differs
+            # between a timeout and an explicit decline.
+            result = ToolResult.failure(
+                exc.user_message, detail=f"confirmation_declined:{exc.detail or ''}"
+            )
         except NetworkUnavailable as exc:
             result = ToolResult.failure(exc.user_message, detail=exc.detail)
         except JarvisError as exc:
@@ -173,15 +185,23 @@ def _redact(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _confirmation_text(spec, args: dict[str, Any]) -> str:
+    if spec.confirmation_template:
+        try:
+            return spec.confirmation_template.format(**args)
+        except (KeyError, IndexError):
+            pass  # fall through to the generic phrasing below
     detail = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3])
     return f"{spec.description} ({detail})" if detail else spec.description
 
 
 def build_registry(deps) -> ToolRegistry:
     """Construct the full tool set. Imported lazily to keep start-up light."""
+    from .browser.page_tools import page_tools
     from .browser.tools import browser_tools
     from .calendar.tools import calendar_tools
     from .clipboard.tools import clipboard_tools
+    from .downloads.installer import installer_tools
+    from .downloads.tools import download_tools
     from .email.tools import email_tools
     from .files.tools import file_tools
     from .interaction.tools import interaction_tools
@@ -198,12 +218,20 @@ def build_registry(deps) -> ToolRegistry:
         registry.register_all(clipboard_tools(deps))
     if caps.files:
         registry.register_all(file_tools(deps))
+        if caps.automation:
+            registry.register_all(download_tools(deps))
+            registry.register_all(installer_tools(deps))
     if caps.screen:
         registry.register_all(screen_tools(deps))
         # Seeing the screen is only useful if JARVIS can also act on it.
         registry.register_all(interaction_tools(deps))
     if caps.browser:
         registry.register_all(browser_tools(deps))
+        if caps.automation:
+            # Write-capable page interaction (click/fill/submit) builds on
+            # the same driver browser_tools already uses; gated separately
+            # so the read-only trio above can stay on without exposing it.
+            registry.register_all(page_tools(deps))
     if caps.research:
         registry.register_all(web_tools(deps))
     if caps.email:

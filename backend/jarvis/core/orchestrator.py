@@ -468,10 +468,29 @@ class Orchestrator:
         if agent is None:  # configuration turned it off mid-flight
             return await self._handle_capability(text, decision)
 
-        response = await self._run_agent(agent, text, None)
-        return await self._finish_capability(response, decision)
+        outcome = await self._run_agent(agent, text, None)
+        if outcome.handoff == "automation":
+            return await self._handoff_to_automation(text, decision, outcome)
+        return await self._finish_capability(_response_from_outcome(outcome), decision)
 
-    async def _run_agent(self, agent, text: str, task: Task | None) -> Response:
+    async def _handoff_to_automation(self, text: str, decision: RouteDecision, outcome) -> TurnResult:
+        """A multi-step app/web objective needs a real Task — cancel_event,
+        progress, a step budget the short agent loop was never sized for —
+        so it goes through the exact backgrounding machinery a quick-matched
+        capability already gets (:meth:`_handle_capability` →
+        :meth:`_run_in_background`), rather than the loop that just produced
+        this outcome. See ``intelligence/agent.py``'s handoff branch and
+        ``capabilities/automation.py`` for what runs next.
+        """
+        automation_decision = RouteDecision(
+            kind=RouteKind.CAPABILITY, name="automation",
+            args={"query": text, "objective": outcome.objective},
+            confidence=decision.confidence, path=decision.path,
+            reason="multi-step automation objective", long_running=True,
+        )
+        return await self._handle_capability(text, automation_decision)
+
+    async def _run_agent(self, agent, text: str, task: Task | None):
         ctx = self._tool_context(task)
         stream, flush = self._stream_sink(task)
 
@@ -482,11 +501,7 @@ class Orchestrator:
         outcome = await agent.run(text, ctx, task=task, emit=activity, stream=stream,
                                   context=self.context.build(text))
         flush()
-        # An AgentOutcome and a capability Response say the same things; making
-        # the agent look like a capability here means delivery, speech, memory
-        # and background reporting all stay in one place.
-        return Response(text=outcome.text, spoken=outcome.spoken, display=outcome.display,
-                        error=outcome.error, streamed=outcome.streamed)
+        return outcome
 
     def _intelligence(self):
         """The agent, rebuilt only when its configuration actually changes."""
@@ -658,6 +673,14 @@ class Orchestrator:
             }
 
 
+def _response_from_outcome(outcome) -> Response:
+    """An AgentOutcome and a capability Response say the same things; making
+    the agent look like a capability here means delivery, speech, memory and
+    background reporting all stay in one place."""
+    return Response(text=outcome.text, spoken=outcome.spoken, display=outcome.display,
+                    error=outcome.error, streamed=outcome.streamed)
+
+
 def _title_for(decision: RouteDecision) -> str:
     query = decision.args.get("query") or decision.args.get("question") or ""
     names = {
@@ -670,6 +693,7 @@ def _title_for(decision: RouteDecision) -> str:
         "read_calendar": "Reading the calendar",
         "check_email": "Checking mail",
         "run_diagnostics": "Running system diagnostics",
+        "automation": f"{query[:60]}" if query else "Working on that",
     }
     return names.get(decision.name, decision.name.replace("_", " ").capitalize())
 
@@ -679,6 +703,7 @@ def _kind_for(decision: RouteDecision) -> str:
         "research": "research", "diagnostics": "system", "email": "mail",
         "calendar": "calendar", "screen": "screen", "analyse_screen": "screen",
         "read_calendar": "calendar", "check_email": "mail", "run_diagnostics": "system",
+        "automation": "automation",
     }
     return mapping.get(decision.name, decision.kind)
 

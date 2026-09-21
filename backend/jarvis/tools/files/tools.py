@@ -36,6 +36,12 @@ class _SandboxTool(Tool):
                 risk=verdict.risk,
                 summary=f"{verb} {verdict.path} ({verdict.reason})",
                 details={"path": str(verdict.path), "reason": verdict.reason},
+                # A file write inside an approved automation task (e.g. a
+                # download) is routine, not consequential on its own — the
+                # task grant covers it the same way it covers a click.
+                # Delete never reaches here (DeleteFileTool doesn't call
+                # _authorise; see its own always-consequential gating).
+                task_id=ctx.task_id,
             )
         return verdict.path
 

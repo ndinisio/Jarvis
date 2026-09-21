@@ -46,6 +46,15 @@ class ToolSpec:
     mutates: bool | None = None
     #: Is running it twice harmless? ``None`` derives it from ``mutates``.
     retryable: bool | None = None
+    #: Never covered by a task-scoped or remembered session grant — every
+    #: call gets its own confirmation, however the surrounding task was
+    #: approved. For actions with no safe "routine" case (running an
+    #: installer, sending mail, deleting something).
+    always_confirm_individually: bool = False
+    #: Human-meaningful confirmation prompt, formatted with the call's
+    #: arguments (``"Run the installer at {path}?"``). Falls back to the
+    #: generic ``"{description} ({detail})"`` phrasing when empty.
+    confirmation_template: str = ""
 
     @property
     def changes_state(self) -> bool:
@@ -78,6 +87,7 @@ class ToolSpec:
             "returns": self.returns,
             "mutates": self.changes_state,
             "retryable": self.safe_to_retry,
+            "always_confirm_individually": self.always_confirm_individually,
         }
 
     def required_args(self) -> list[str]:

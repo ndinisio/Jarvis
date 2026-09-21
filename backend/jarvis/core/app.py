@@ -78,6 +78,10 @@ class JarvisApp:
         if enable_voice:
             self.voice = VoiceManager(config, self.bus, self.telemetry,
                                       on_utterance=self._on_voice_utterance)
+        # Same after-the-fact wiring as deps.registry above: capabilities are
+        # built before voice exists, but a capability that needs to narrate
+        # long-running work (see core/narration.py) reaches it through here.
+        self.deps.voice = self.voice
 
         self.orchestrator = Orchestrator(
             self.deps, self.router, self.capabilities, self.personality, self.voice

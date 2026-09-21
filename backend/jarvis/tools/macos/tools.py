@@ -298,12 +298,18 @@ class ShellCommandTool(Tool):
             return ToolResult.failure(exc.user_message, detail=exc.detail)
         if not auto_ok:
             try:
+                # Never covered by a task-scoped or remembered grant: a
+                # command that isn't on the read-only allowlist is exactly
+                # the case where each one deserves its own look, whatever a
+                # surrounding automation task was approved to do.
                 await ctx.permissions.require(
                     action=f"shell:{command.split()[0]}",
                     risk=RiskLevel.HIGH,
                     summary=f"Run shell command: {command}",
                     details={"command": command, "why": reason,
                              "reason": args.get("reason", "")},
+                    consequential=True,
+                    task_id=ctx.task_id,
                 )
             except Exception as exc:
                 return ToolResult.failure(getattr(exc, "user_message", "Not permitted."),

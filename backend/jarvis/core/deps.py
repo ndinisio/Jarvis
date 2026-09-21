@@ -42,6 +42,7 @@ class Deps:
     diagnostics: Diagnostics
     sandbox: FileSandbox
     registry: Any = None  # ToolRegistry, filled in after tools are built
+    voice: Any = None  # VoiceManager | None, filled in after tools are built (see core/app.py)
 
     @property
     def config(self) -> Config:
