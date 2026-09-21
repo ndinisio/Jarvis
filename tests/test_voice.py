@@ -107,6 +107,48 @@ async def test_voice_manager_start_degrades_without_a_microphone(app, config):
     await manager.stop()
 
 
+async def test_concurrent_start_creates_only_one_listen_loop(app, config, monkeypatch):
+    """A real macOS runtime report described a browser action apparently
+    running several times for one spoken request, though the route log
+    showed only a single decision — consistent with two capture/dispatch
+    pipelines racing on the same microphone. start() used to check "already
+    listening" only *after* awaiting probe(), so two overlapping calls (the
+    automatic startup call and a user-triggered "voice.start" arriving
+    while it was still probing, say) could both pass that check before
+    either had set _listen_task. Fixed by moving the check inside a lock,
+    before the await."""
+    from jarvis.voice.audio import Microphone
+
+    config.voice.enabled = True
+    manager = VoiceManager(config, app.bus, app.telemetry)
+
+    async def ok():
+        return True, "ok"
+
+    monkeypatch.setattr(Microphone, "available", staticmethod(lambda: (True, "ok")))
+    monkeypatch.setattr(manager.stt, "available", ok)
+    monkeypatch.setattr(manager.wake, "available", ok)
+
+    entered = 0
+    release = asyncio.Event()
+
+    async def fake_listen_loop():
+        nonlocal entered
+        entered += 1
+        await release.wait()
+
+    monkeypatch.setattr(manager, "_listen_loop", fake_listen_loop)
+
+    results = await asyncio.gather(manager.start(), manager.start(), manager.start())
+    await asyncio.sleep(0.05)
+
+    assert results == [True, True, True]
+    assert entered == 1, f"_listen_loop was entered {entered} time(s), expected exactly 1"
+
+    release.set()
+    await manager.stop()
+
+
 async def test_speech_queue_can_be_interrupted(app, config):
     config.voice.enabled = True
     manager = VoiceManager(config, app.bus, app.telemetry)

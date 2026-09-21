@@ -10,6 +10,7 @@ from typing import Any
 from ..core.errors import Cancelled, JarvisError, NetworkUnavailable
 from ..core.events import EventType
 from ..core.logging import get_logger
+from ..core.tracing import current_turn_id
 from .base import Tool, ToolContext, ToolResult
 
 log = get_logger("jarvis.tools")
@@ -103,6 +104,16 @@ class ToolRegistry:
             return ToolResult.failure("Cancelled.", detail="cancelled before execution")
 
         t0 = time.perf_counter()
+        turn_id = current_turn_id()
+        # This is the one place in the whole codebase that actually performs
+        # a tool's side effect — every dispatch path (quick, agent,
+        # capability, background) funnels through here. Bracketing exactly
+        # this call, under the turn id that started the request, is what
+        # turns "the browser opened several times" from an observation into
+        # a fact: either tool_start for this turn_id appears more than once
+        # (the side effect really did run repeatedly) or it doesn't (the
+        # duplication is somewhere else — voice capture, TTS, the UI).
+        log.info("turn_id=%s stage=tool_start tool=%s", turn_id, name)
         try:
             if spec.risk != "low":
                 await ctx.permissions.require(
@@ -125,6 +136,8 @@ class ToolRegistry:
             )
 
         result.duration_ms = (time.perf_counter() - t0) * 1000.0
+        log.info("turn_id=%s stage=tool_end tool=%s ok=%s duration_ms=%.1f",
+                 turn_id, name, result.ok, result.duration_ms)
         ctx.telemetry.record(f"tool.{name}", result.duration_ms, ok=result.ok, category=spec.category)
         ctx.bus.publish(
             EventType.TOOL_RESULT,

@@ -1303,3 +1303,188 @@ async def test_the_acceptance_conversation_holds_together(app, brain, inbox, des
     # And the whole conversation is still one coherent state.
     assert state.turn == 14, "one state turn per exchange, all the way through"
     assert state.email.messages and state.research.sources and state.browser.url
+
+
+# ===========================================================================
+# V1.3 runtime duplication: a real macOS report of responses spoken twice
+# and a browser action apparently running several times for what the route
+# log showed as a single decision. Root causes and fixes:
+#
+#   - orchestrator._respond() queued a streamed answer for speech a second
+#     time, unconditionally, on top of _stream_sink's own sentence-by-
+#     sentence queueing during generation. Fixed with the `not
+#     already_streamed` guard.
+#   - VoiceManager.start() checked "already listening" *after* awaiting
+#     probe(), so two overlapping calls could both pass the check before
+#     either had set _listen_task, each creating its own _listen_loop.
+#     Fixed by moving the check inside a lock, before the await.
+#
+# Each test below targets the actual layer the bug lived in — the tool's
+# own run(), the TTS engine's own speak() — rather than a higher-level
+# proxy for it.
+# ===========================================================================
+class _RecordingTTS:
+    """Records exactly what was spoken, in order — nothing more."""
+
+    name = "recording"
+
+    def __init__(self):
+        self.spoken: list[str] = []
+
+    async def available(self):
+        return True, "ok"
+
+    async def speak(self, text):
+        self.spoken.append(text)
+        return True
+
+    async def stop(self):
+        return True
+
+    async def voices(self):
+        return []
+
+
+async def test_a_streamed_chat_response_is_spoken_only_once(app, brain, config):
+    """The exact scenario reported: a plain chat reply, generated through
+    the streaming path every agent-routed turn now uses, audibly spoken
+    twice."""
+    from jarvis.voice.manager import VoiceManager
+
+    config.voice.enabled = True
+    manager = VoiceManager(config, app.bus, app.telemetry)
+    manager.tts = _RecordingTTS()
+    app.orchestrator.voice = manager
+
+    brain.triage(mode="chat", confidence=0.95, action_evidence=[], objective=None,
+                requires_tools=False, reason="greeting")
+    app.models._providers["ollama"].responses.append("I'm quite well, thank you, sir.")
+    result = await app.ask("Hey Jarvis, how are you?")
+    await asyncio.sleep(0.1)  # let the speech queue drain
+
+    assert result.text == "I'm quite well, thank you, sir."
+    occurrences = sum(1 for s in manager.tts.spoken if "quite well" in s)
+    assert occurrences == 1, f"the response was spoken {occurrences} times: {manager.tts.spoken!r}"
+
+
+async def test_a_quick_path_reply_is_still_spoken_exactly_once(app, config):
+    """The fix must not overcorrect: a reply that was never streamed (the
+    quick path never streams) still needs to be spoken — exactly once,
+    same as before the fix."""
+    from jarvis.voice.manager import VoiceManager
+
+    config.voice.enabled = True
+    manager = VoiceManager(config, app.bus, app.telemetry)
+    manager.tts = _RecordingTTS()
+    app.orchestrator.voice = manager
+
+    result = await app.ask("what time is it")
+    await asyncio.sleep(0.1)
+
+    assert result.decision.path == "quick"
+    assert len(manager.tts.spoken) == 1, \
+        f"expected exactly one spoken reply, got {manager.tts.spoken!r}"
+
+
+async def test_a_backgrounded_capability_reply_is_still_spoken_exactly_once(app, config,
+                                                                            monkeypatch):
+    """Nor should it affect background-task delivery, which never streams
+    speech during execution and relies entirely on _respond() at the end —
+    exactly the case the guard must leave alone. A long-running capability
+    legitimately speaks *two different* things (an immediate acknowledgement,
+    then the result once it's ready) — that's not the duplicate-speech bug;
+    the point here is that the final result itself isn't also duplicated."""
+    from jarvis.voice.manager import VoiceManager
+
+    config.voice.enabled = True
+    manager = VoiceManager(config, app.bus, app.telemetry)
+    manager.tts = _RecordingTTS()
+    app.orchestrator.voice = manager
+
+    async def fake_run(args, ctx):
+        return ToolResult(data={"findings": []}, summary="Nothing wrong found.")
+
+    monkeypatch.setattr(app.deps.registry.get("run_diagnostics"), "run", fake_run)
+    monkeypatch.setattr(app.deps.registry.get("run_diagnostics").spec, "requires_macos", False)
+
+    await app.ask("why is my mac slow?")
+    await settle(app)
+    await asyncio.sleep(0.1)
+
+    healthy = [s for s in manager.tts.spoken if "wrong" in s.lower() or "healthy" in s.lower()
+              or "nothing" in s.lower()]
+    assert len(healthy) == 1, \
+        f"the final result should be spoken exactly once, got {manager.tts.spoken!r}"
+
+
+async def test_open_bbc_co_uk_executes_the_browser_action_exactly_once(app, monkeypatch):
+    """The tool's own run() — the one place the side effect actually
+    happens — must be called exactly once for one quick-matched request."""
+    calls: list[dict] = []
+
+    async def open_once(args, ctx):
+        calls.append(dict(args))
+        return ToolResult(data={"url": "https://bbc.co.uk"}, summary="Opening bbc.co.uk.")
+
+    tool = app.deps.registry.get("browse_to")
+    monkeypatch.setattr(tool, "run", open_once)
+    monkeypatch.setattr(tool.spec, "requires_macos", False)
+
+    result = await app.ask("Open BBC.co.uk.")
+
+    assert result.decision.name == "browse_to"
+    assert len(calls) == 1, f"browse_to.run() was called {len(calls)} times: {calls!r}"
+
+
+async def test_open_safari_executes_the_launch_exactly_once(app, monkeypatch):
+    calls: list[dict] = []
+
+    async def open_once(args, ctx):
+        calls.append(dict(args))
+        return ToolResult(data={"application": "Safari"}, summary="Opening Safari.")
+
+    tool = app.deps.registry.get("open_application")
+    monkeypatch.setattr(tool, "run", open_once)
+    monkeypatch.setattr(tool.spec, "requires_macos", False)
+
+    result = await app.ask("Open Safari.")
+
+    assert result.decision.name == "open_application"
+    assert len(calls) == 1, f"open_application.run() was called {len(calls)} times: {calls!r}"
+
+
+async def test_contextual_open_the_second_one_executes_at_most_once(app, brain, monkeypatch):
+    """"Open the second one." resolving to a real tool call — the F2 fix
+    (falling through to the semantic path instead of a literal quick match)
+    must not itself introduce any new way to run a tool twice."""
+    from jarvis.capabilities.base import Response
+
+    sources = [{"index": 1, "title": "First result", "url": "https://one.example"},
+              {"index": 2, "title": "Second result", "url": "https://two.example"}]
+
+    async def investigation(request):
+        return Response(text="Two sources.", data={"sources": sources})
+
+    monkeypatch.setattr(app.capabilities["research"], "handle", investigation)
+    await app.ask("research dog pictures")
+    await settle(app)
+
+    calls: list[dict] = []
+
+    async def open_once(args, ctx):
+        calls.append(dict(args))
+        return ToolResult(data={"url": "https://two.example"}, summary="Opening it.")
+
+    tool = app.deps.registry.get("browse_to")
+    monkeypatch.setattr(tool, "run", open_once)
+    monkeypatch.setattr(tool.spec, "requires_macos", False)
+
+    brain.triage(mode="action", confidence=0.9, action_evidence=["open the second one"],
+                objective=None, requires_tools=True, reason="explicit request")
+    brain.understand(goal="open the second result", kind="navigate",
+                     references=[{"text": "the second one", "kind": "result"}])
+    brain.decide(action="tool_call", tool="browse_to", arguments={"url": "https://two.example"},
+                 reason="resolved from context")
+    await app.ask("Open the second one.")
+
+    assert len(calls) == 1, f"browse_to.run() was called {len(calls)} times: {calls!r}"

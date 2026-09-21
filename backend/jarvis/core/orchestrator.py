@@ -52,6 +52,7 @@ from .errors import Cancelled, ConfirmationDeclined, JarvisError
 from .events import AssistantState, EventType
 from .logging import get_logger
 from .personality import Personality, speakable
+from .tracing import current_turn_id, new_turn_id
 
 log = get_logger("jarvis.orchestrator")
 
@@ -118,6 +119,14 @@ class Orchestrator:
         if not text:
             return TurnResult("", "", RouteDecision(RouteKind.CONTROL, "noop"), 0.0)
 
+        # One id per logical request, current for the rest of this turn and
+        # for any background task it spawns (asyncio.create_task copies the
+        # current context) — see core/tracing.py. This is what lets a stage
+        # seen more than once for the same id be told apart from two
+        # genuinely separate requests, instead of guessing from timestamps.
+        turn_id = new_turn_id()
+        log.info("turn_id=%s stage=received source=%s text=%r", turn_id, source, text[:60])
+
         turn = self.deps.telemetry.mark("turn.total", source=source)
         bus = self.deps.bus
         bus.publish(EventType.TRANSCRIPT, text=text, final=True, source=source)
@@ -145,8 +154,8 @@ class Orchestrator:
                                      confidence=0.3, reason=f"router error: {exc}")
 
         bus.publish(EventType.ROUTE, **decision.as_dict())
-        log.info("route %s:%s via %s (%.1f ms) — %s", decision.kind, decision.name,
-                 decision.path, decision.latency_ms, text[:60])
+        log.info("turn_id=%s stage=route route=%s:%s via %s (%.1f ms) — %s", turn_id,
+                 decision.kind, decision.name, decision.path, decision.latency_ms, text[:60])
 
         try:
             result = await self._dispatch(text, decision, source)
@@ -175,13 +184,19 @@ class Orchestrator:
     # ------------------------------------------------------------------
     async def _dispatch(self, text: str, decision: RouteDecision, source: str) -> TurnResult:
         if decision.kind == RouteKind.CONTROL:
+            log.info("turn_id=%s stage=dispatch path=control", current_turn_id())
             return await self._handle_control(text, decision)
         if self._deterministic(decision):
             # A quick match already knows the answer. Sending it through a model
             # would cost seconds and learn nothing.
             if decision.kind == RouteKind.TOOL:
+                log.info("turn_id=%s stage=dispatch path=quick_tool tool=%s",
+                         current_turn_id(), decision.name)
                 return await self._handle_tool(text, decision)
+            log.info("turn_id=%s stage=dispatch path=quick_capability capability=%s",
+                     current_turn_id(), decision.name)
             return await self._handle_capability(text, decision)
+        log.info("turn_id=%s stage=dispatch path=agent", current_turn_id())
         return await self._handle_intelligently(text, decision)
 
     def _deterministic(self, decision: RouteDecision) -> bool:
@@ -338,16 +353,20 @@ class Orchestrator:
         from ..intelligence.schema import Objective
         from ..intelligence.verify import Verifier
 
+        turn_id = current_turn_id()
         target = str(decision.args.get("query") or decision.args.get("url") or "")
         objective = Objective(goal=target, targets=[target] if target else [])
+        log.info("turn_id=%s stage=verification_start tool=%s", turn_id, decision.name)
         verification = await Verifier(self.deps).verify(decision.name, decision.args, result,
                                                          objective, self.state)
+        log.info("turn_id=%s stage=verification_end tool=%s verified=%s skipped=%s",
+                 turn_id, decision.name, verification.verified, verification.skipped)
         if verification.verified or verification.skipped:
             return None
         if self._intelligence() is None:
             return None
-        log.info("quick match %s did not verify (%s); reconsidering", decision.name,
-                 verification.problem)
+        log.info("turn_id=%s quick match %s did not verify (%s); reconsidering",
+                 turn_id, decision.name, verification.problem)
         retry = RouteDecision(RouteKind.CAPABILITY, decision.name, decision.args,
                               confidence=0.4, path=RoutePath.FALLBACK,
                               reason=f"{decision.name} did not verify: {verification.problem}")
@@ -582,11 +601,27 @@ class Orchestrator:
                                                {"route": f"{decision.kind}:{decision.name}"})
             self.state.note_assistant(text)
 
-        if speak and spoken_text and self.voice is not None:
+        log.info("turn_id=%s stage=response_emit streamed=%s chars=%d",
+                 current_turn_id(), already_streamed, len(text))
+
+        if speak and spoken_text and self.voice is not None and not already_streamed:
             # Speaking is queued, never awaited: the turn is finished when the
             # answer exists, not when the sentence has finished playing. Barge-in
             # and "stop" drain the same queue.
+            #
+            # `not already_streamed` is load-bearing, not a style choice: a
+            # streamed answer (_stream_sink's emit()/flush(), used by every
+            # agent-routed reply) has already been queued for speech
+            # sentence-by-sentence as it was generated. Without this guard,
+            # every one of those replies was queued a second time here, in
+            # full, right after the first — a real macOS runtime report
+            # confirmed responses were audibly spoken twice. Enqueueing here
+            # is still correct, and still needed, for anything that was
+            # never streamed: quick-path tool replies and background-task
+            # delivery, neither of which sets already_streamed.
             self.voice.enqueue(spoken_text)
+        elif speak and spoken_text and already_streamed:
+            log.info("turn_id=%s stage=tts_skip reason=already_streamed", current_turn_id())
         if not keep_state:
             bus.emit_state(AssistantState.IDLE)
         return TurnResult(text, spoken_text, decision, 0.0, task_id=task_id, error=error)

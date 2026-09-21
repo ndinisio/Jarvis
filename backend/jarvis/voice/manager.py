@@ -24,6 +24,7 @@ from ..core.config import Config
 from ..core.events import AssistantState, EventBus, EventType
 from ..core.logging import get_logger
 from ..core.telemetry import Telemetry
+from ..core.tracing import current_turn_id
 from .audio import Microphone, record_utterance, to_int16_frame
 from .stt import build_stt
 from .tts import build_tts
@@ -66,6 +67,14 @@ class VoiceManager:
         self._conversation_until = 0.0
         self._status: dict[str, Any] = {}
         self._speaking = False
+        #: Serialises start(): probe() awaits several device checks, and two
+        #: overlapping calls (the automatic startup call and a user-triggered
+        #: "voice.start" arriving while it's still probing, say) could both
+        #: pass the "already listening" check before either had set
+        #: _listen_task, each then creating its own _listen_loop — two
+        #: capture/dispatch pipelines racing on the same microphone. The lock
+        #: makes the check-then-create atomic instead of racy.
+        self._start_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # status
@@ -110,20 +119,25 @@ class VoiceManager:
     async def start(self) -> bool:
         if not self._config.voice.enabled:
             return False
-        status = await self.probe()
-        if not status["microphone"]["ok"]:
-            self._emit_state(VoiceState.OFF, note=status["microphone"]["note"])
-            log.info("voice input unavailable: %s", status["microphone"]["note"])
-            return False
-        if not status["stt"]["ok"]:
-            self._emit_state(VoiceState.OFF, note=status["stt"]["note"])
-            log.info("speech recognition unavailable: %s", status["stt"]["note"])
-            return False
-        if self._listen_task and not self._listen_task.done():
+        async with self._start_lock:
+            # Checked first, inside the lock: a concurrent caller that
+            # arrives while this one is still awaiting probe() below blocks
+            # here until the first has either created _listen_task or given
+            # up, then sees the up-to-date result instead of racing it.
+            if self._listen_task and not self._listen_task.done():
+                return True
+            status = await self.probe()
+            if not status["microphone"]["ok"]:
+                self._emit_state(VoiceState.OFF, note=status["microphone"]["note"])
+                log.info("voice input unavailable: %s", status["microphone"]["note"])
+                return False
+            if not status["stt"]["ok"]:
+                self._emit_state(VoiceState.OFF, note=status["stt"]["note"])
+                log.info("speech recognition unavailable: %s", status["stt"]["note"])
+                return False
+            self._listen_task = asyncio.create_task(self._listen_loop(), name="jarvis-voice")
+            asyncio.create_task(self.stt.warmup())
             return True
-        self._listen_task = asyncio.create_task(self._listen_loop(), name="jarvis-voice")
-        asyncio.create_task(self.stt.warmup())
-        return True
 
     async def stop(self) -> None:
         if self._listen_task:
@@ -306,6 +320,12 @@ class VoiceManager:
         self._emit_state(VoiceState.SPEAKING)
         self._bus.emit_state(AssistantState.SPEAKING)
         self._bus.publish(EventType.SPEECH_START, text=text, engine=self.tts.name)
+        # Best-effort turn_id: correct when speak() is called directly within
+        # a turn (the wake acknowledgement, a quick-path reply); the queued
+        # (enqueue()) case logs its own, definitely-correct turn_id at the
+        # point of queueing instead, since a task drains the queue and may by
+        # then be processing an item queued by a later turn.
+        log.info("turn_id=%s stage=tts_start text=%r", current_turn_id(), text[:60])
         watch = self._telemetry.mark("voice.tts", chars=len(text))
         try:
             ok = await self.tts.speak(text)
@@ -316,12 +336,19 @@ class VoiceManager:
             self._emit_state(
                 VoiceState.WAITING_FOR_WAKE if self._listen_task else VoiceState.OFF
             )
+        log.info("turn_id=%s stage=tts_end text=%r ok=%s", current_turn_id(), text[:60], ok)
         return ok
 
     def enqueue(self, text: str) -> None:
         """Queue a sentence for speech without awaiting it (streaming replies)."""
         if not text.strip() or not self._config.voice.enabled:
             return
+        # Logged here, not in _drain_speech()/speak(): this call always runs
+        # synchronously inside the originating turn's context, so this is
+        # the one point that can log the *correct* turn_id for this specific
+        # piece of text, however many turns' worth of speech end up queued
+        # together.
+        log.info("turn_id=%s stage=tts_enqueue text=%r", current_turn_id(), text[:60])
         self._speech_queue.put_nowait(text)
         if self._speech_task is None or self._speech_task.done():
             self._speech_task = asyncio.create_task(self._drain_speech())
