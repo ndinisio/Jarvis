@@ -201,6 +201,28 @@ async def test_a_download_is_covered_by_the_task_grant(app, monkeypatch, tmp_pat
 
 # -- RunInstallerTool -----------------------------------------------------------
 
+def test_run_installer_confirmation_template_renders_a_human_prompt_not_a_shell_string():
+    """The whole point of confirmation_template (vs the generic
+    "{description} ({detail})" fallback every other tool gets): the user
+    sees something they recognise, not a raw shell invocation."""
+    from jarvis.tools.registry import _confirmation_text
+
+    prompt = _confirmation_text(RunInstallerTool.spec, {"path": "/Users/x/Downloads/py.pkg"})
+    assert prompt == ("Run the installer at /Users/x/Downloads/py.pkg? This changes your "
+                      "system and may ask for your password.")
+
+
+def test_confirmation_text_falls_back_when_the_template_cites_a_missing_argument():
+    """A template referencing a key that isn't in the call's arguments must
+    degrade to the generic phrasing rather than raising KeyError out of the
+    permission gate itself."""
+    from jarvis.tools.base import ToolSpec
+    from jarvis.tools.registry import _confirmation_text
+
+    spec = ToolSpec(name="x", description="Do a thing", confirmation_template="Run {missing_key}?")
+    assert _confirmation_text(spec, {"path": "/x"}) == "Do a thing (path=/x)"
+
+
 def test_run_installer_is_always_confirmed_individually():
     spec = RunInstallerTool.spec
     assert spec.always_confirm_individually is True

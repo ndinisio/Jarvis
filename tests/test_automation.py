@@ -317,3 +317,42 @@ async def test_a_milestone_boundary_is_narrated_when_voice_is_available(app, scr
     await AutomationCapability(app.deps).handle(_request(app, task, "find esp32 boards"))
     assert voice.spoken, "the milestone boundary should have been spoken"
     assert "search for boards" in voice.spoken[0]
+
+
+async def test_a_genuinely_slow_step_is_also_narrated_not_only_the_milestone(app, scripted,
+                                                                             monkeypatch):
+    """_take_step measures real elapsed time around the tool call and passes
+    it to ActionNarrator.maybe_narrate — this proves that wiring actually
+    fires for a step that really did run long, not just that
+    ActionNarrator's own throttle logic works in isolation (test_narration.py)."""
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]},
+                             "voice": {"enabled": True},
+                             "automation": {"narration_action_threshold_s": 0.05,
+                                            "narration_min_gap_s": 0.0}})
+    tool = app.deps.registry.get("search_web")
+
+    async def slow_run(args, ctx):
+        await asyncio.sleep(0.1)
+        return ToolResult(summary="Found some results.")
+
+    monkeypatch.setattr(tool, "run", slow_run)
+
+    class _FakeVoice:
+        def __init__(self):
+            self.spoken: list[str] = []
+
+        def enqueue(self, text):
+            self.spoken.append(text)
+
+    voice = _FakeVoice()
+    app.deps.voice = voice
+    scripted.script_decompose(["search for boards"])
+    scripted.script_step(action="tool_call", tool="search_web", arguments={"query": "esp32"})
+    scripted.script_step(action="complete", reason="done")
+    scripted.script_summary("Found some boards.")
+
+    task = app.deps.tasks.create("automation", "test")
+    await AutomationCapability(app.deps).handle(_request(app, task, "find esp32 boards"))
+    # Milestone boundary + the slow step itself, both narrated.
+    assert len(voice.spoken) >= 2
+    assert any("Found some results" in s for s in voice.spoken)

@@ -50,7 +50,8 @@ class Verifier:
         # check entirely — and click_element/type_text previously had no
         # real check at all, always falling through to the generic
         # skipped=True case at the bottom of this method.
-        if tool in {"click_element", "click_page_element", "type_text", "fill_page_field"}:
+        if tool in {"click_element", "click_page_element", "type_text", "fill_page_field",
+                    "submit_page_form"}:
             return self._verify_interaction(tool, result)
         if category == "browser" or tool in {"browse_to", "open_url", "get_current_page"}:
             return self._verify_navigation(arguments, result, objective, state)
@@ -176,6 +177,11 @@ class Verifier:
             return Verification(verified=True, confidence=0.8,
                                 evidence=f"the page confirmed filling “{filled}”" if filled
                                 else "the page confirmed the fill reached a real element")
+        if tool == "submit_page_form":
+            submitted = str(data.get("submitted") or "")
+            return Verification(verified=True, confidence=0.8,
+                                evidence=f"the page confirmed submitting “{submitted}”" if submitted
+                                else "the page confirmed the submit reached a real element")
         return Verification(verified=True, confidence=0.4, skipped=True,  # pragma: no cover
                             evidence="no cheap way to verify this action")
 

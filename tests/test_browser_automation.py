@@ -269,6 +269,30 @@ async def test_fill_page_field_reports_whether_it_also_submitted(app, ctx, monke
     assert "submitted" in outcome.summary.lower()
 
 
+async def test_submit_page_form_run_succeeds_and_reports_what_it_submitted(app, ctx, monkeypatch):
+    driver = _FakeDriver(action_result={"ok": True, "submitted": True,
+                                        "url": "https://x.example/results", "title": "Results"})
+    _install_fake_driver(monkeypatch, app.deps, driver)
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
+    outcome = await SubmitPageFormTool(app.deps).run(
+        {"handle": "jv3", "label": "Search", "browser": ""}, ctx
+    )
+    assert outcome.ok is True
+    assert outcome.data["submitted"] == "Search"
+    assert "Search" in outcome.summary
+
+
+async def test_submit_page_form_run_reports_a_stale_handle(app, ctx, monkeypatch):
+    driver = _FakeDriver(action_result={"ok": False, "reason": "stale handle"})
+    _install_fake_driver(monkeypatch, app.deps, driver)
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
+    outcome = await SubmitPageFormTool(app.deps).run(
+        {"handle": "jv3", "label": "Search", "browser": ""}, ctx
+    )
+    assert outcome.ok is False
+    assert "stale handle" in (outcome.error or "")
+
+
 async def test_submit_page_form_labelled_checkout_is_consequential_even_mid_task(app, ctx):
     """The safety net beyond "no checkout tool exists": a stray click on a
     checkout-labelled control must never be covered by a task grant."""

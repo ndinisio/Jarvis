@@ -61,6 +61,49 @@ async def test_find_elements_targets_a_named_app_and_window_when_given():
     assert "first application process whose frontmost is true" not in script
 
 
+async def test_click_element_run_forwards_app_and_window_index_from_its_args(app, ctx, monkeypatch):
+    """The private _find_elements/_click_at_index helpers are tested
+    directly above with app=/window_index= kwargs — this confirms the
+    argument-extraction glue in ClickElementTool.run() itself (args.get
+    ("app"), args.get("window_index")) actually wires real call args
+    through to them, not just that the helpers work in isolation."""
+    controller = app.deps.controller
+    scripts = []
+
+    async def fake_osascript(script, language="AppleScript", timeout=25.0):
+        scripts.append(script)
+        return ShellResult(0, "CLICKED:Inbox|", "")
+
+    monkeypatch.setattr(controller, "osascript", fake_osascript)
+    # An explicit index goes straight to _click_at_index (one round trip);
+    # see test_click_element_with_an_explicit_index_skips_the_search above
+    # for that behaviour in isolation — this test is specifically about
+    # app/window_index reaching the generated script.
+    outcome = await ClickElementTool(app.deps).run(
+        {"label": "Inbox", "index": 0, "app": "Mail", "window_index": 1}, ctx
+    )
+    assert outcome.ok is True
+    assert 'application process "Mail"' in scripts[-1]
+    assert "window 1" in scripts[-1]
+
+
+async def test_wait_for_element_run_forwards_app_and_window_index_from_its_args(app, ctx, monkeypatch):
+    controller = app.deps.controller
+    scripts = []
+
+    async def fake_osascript(script, language="AppleScript", timeout=25.0):
+        scripts.append(script)
+        return ShellResult(0, "FOUND:button|Continue|", "")
+
+    monkeypatch.setattr(controller, "osascript", fake_osascript)
+    outcome = await WaitForElementTool(app.deps).run(
+        {"label": "Continue", "timeout_s": 5, "app": "Installer", "window_index": 1}, ctx
+    )
+    assert outcome.ok is True
+    assert 'application process "Installer"' in scripts[-1]
+    assert "window 1" in scripts[-1]
+
+
 async def test_click_at_index_parses_clicked_and_badindex():
     clicked = _FakeController(stdout="CLICKED:Search|Search the site")
     assert await _click_at_index(clicked, "Search", 0) == "CLICKED:Search|Search the site"
@@ -137,6 +180,34 @@ async def test_click_element_reports_not_found(app, ctx, monkeypatch):
     assert outcome.wrong_tool is True
 
 
+async def test_click_element_run_reports_noapp_nowindow_and_error(app, ctx, monkeypatch):
+    tool = ClickElementTool(app.deps)
+
+    monkeypatch.setattr(app.deps.controller, "osascript", _const_osascript("NOAPP"))
+    outcome = await tool.run({"label": "x", "app": "Nonexistent"}, ctx)
+    assert outcome.ok is False and "doesn't appear to be running" in outcome.summary
+
+    monkeypatch.setattr(app.deps.controller, "osascript", _const_osascript("NOWINDOW"))
+    outcome = await tool.run({"label": "x"}, ctx)
+    assert outcome.ok is False and "no window open" in outcome.summary
+
+    monkeypatch.setattr(app.deps.controller, "osascript", _const_osascript("", ok=False))
+    outcome = await tool.run({"label": "x"}, ctx)
+    assert outcome.ok is False and "Accessibility permission" in outcome.summary
+
+
+async def test_wait_for_element_run_reports_noapp_and_error(app, ctx, monkeypatch):
+    tool = WaitForElementTool(app.deps)
+
+    monkeypatch.setattr(app.deps.controller, "osascript", _const_osascript("NOAPP"))
+    outcome = await tool.run({"label": "x", "app": "Nonexistent"}, ctx)
+    assert outcome.ok is False and "doesn't appear to be running" in outcome.summary
+
+    monkeypatch.setattr(app.deps.controller, "osascript", _const_osascript("", ok=False))
+    outcome = await tool.run({"label": "x", "timeout_s": 1}, ctx)
+    assert outcome.ok is False and "Accessibility permission" in outcome.summary
+
+
 def _scripted_osascript(controller, responses):
     async def _inner(script, language="AppleScript", timeout=25.0):
         return ShellResult(0, next(responses), "")
@@ -187,6 +258,14 @@ async def test_scroll_maps_directions_to_the_right_key_codes(app, ctx, monkeypat
     scripts.clear()
     await tool.run({"direction": "top"}, ctx)
     assert len(scripts) == 1 and "key code 115" in scripts[-1]  # home
+
+    scripts.clear()
+    await tool.run({"direction": "up", "amount": 2}, ctx)
+    assert len(scripts) == 2 and "key code 116" in scripts[-1]  # pageup
+
+    scripts.clear()
+    await tool.run({"direction": "bottom"}, ctx)
+    assert len(scripts) == 1 and "key code 119" in scripts[-1]  # end
 
 
 async def test_scroll_rejects_an_unknown_direction(app, ctx):
@@ -260,3 +339,58 @@ async def test_verifier_trusts_a_confirmed_web_click_more_than_a_native_one(app)
         ToolResult(data={"clicked": "Search", "url": "https://x.example"}, summary="Clicked."),
         Objective(goal="click"), ConversationState())
     assert web.confidence > native.confidence
+
+
+async def test_verifier_covers_type_text_and_fill_page_field(app):
+    """Both tools previously fell through to the generic always-skipped
+    fallback (confidence 0.4, skipped=True unconditionally) — confirm each
+    now gets real evidence-based confidence when the tool reported where
+    it landed, and an honest skip (not a false failure) when it didn't."""
+    from jarvis.intelligence.schema import Objective
+    from jarvis.intelligence.state import ConversationState
+    from jarvis.intelligence.verify import Verifier
+    from jarvis.tools.base import ToolResult
+
+    verifier = Verifier(app.deps)
+    typed = await verifier.verify(
+        "type_text", {"text": "hello"},
+        ToolResult(data={"text": "hello", "application": "Safari"}, summary="Typed."),
+        Objective(goal="type"), ConversationState())
+    assert typed.verified is True and typed.skipped is False and typed.confidence > 0.4
+
+    typed_blank = await verifier.verify(
+        "type_text", {"text": "hello"},
+        ToolResult(data={"text": "hello", "application": ""}, summary="Typed."),
+        Objective(goal="type"), ConversationState())
+    assert typed_blank.verified is True and typed_blank.skipped is True
+
+    filled = await verifier.verify(
+        "fill_page_field", {"handle": "jv2", "label": "Search", "text": "esp32"},
+        ToolResult(data={"filled": "Search", "url": "https://x.example"}, summary="Typed."),
+        Objective(goal="fill"), ConversationState())
+    assert filled.verified is True and filled.skipped is False and filled.confidence > 0.4
+
+
+async def test_verifier_covers_submit_page_form_instead_of_falling_through_to_navigation(app):
+    """Regression for a real bug: submit_page_form shares category="browser"
+    with the navigation tools, and was missing from the interaction-tool
+    dispatch despite the code's own comment claiming it was covered — so a
+    successful form submission fell through to _verify_navigation, whose
+    title/URL token-matching against the objective could report a genuine
+    success as "not verified"."""
+    from jarvis.intelligence.schema import Objective
+    from jarvis.intelligence.state import ConversationState
+    from jarvis.intelligence.verify import Verifier
+    from jarvis.tools.base import ToolResult
+
+    verifier = Verifier(app.deps)
+    verdict = await verifier.verify(
+        "submit_page_form", {"handle": "jv3", "label": "Search"},
+        ToolResult(data={"submitted": "Search", "url": "https://x.example/results",
+                         "title": "Totally unrelated page title"}, summary="Submitted."),
+        Objective(goal="search for something specific the title won't mention"),
+        ConversationState())
+    assert verdict.verified is True
+    assert verdict.skipped is False
+    assert verdict.confidence > 0.4
+    assert "submitted" in verdict.evidence.lower() or "submit" in verdict.evidence.lower()

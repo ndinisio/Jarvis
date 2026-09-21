@@ -52,6 +52,19 @@ def test_personality_respects_a_custom_honorific(config):
     assert "sir" not in " ".join(personality.wake_response() for _ in range(8)).lower()
 
 
+def test_automation_acknowledgements_come_from_their_own_kind_specific_list(config):
+    """acknowledgement() applies probabilistic honorific substitution
+    (Personality._apply_honorific), so the returned text won't always
+    match an AUTOMATION_ACKS entry verbatim — check for phrasing unique to
+    that list (never present in the generic ACKNOWLEDGEMENTS list) instead
+    of exact membership."""
+    personality = Personality(config)
+    replies = [personality.acknowledgement(long_running=True, kind="automation")
+              for _ in range(12)]
+    assert all(any(word in reply for word in ("narrate", "posted", "talk you through"))
+              for reply in replies), replies
+
+
 def test_system_prompt_carries_identity_and_context(config):
     personality = Personality(config)
     prompt = personality.system_prompt("Known preferences:\n- tea over coffee")

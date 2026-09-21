@@ -1617,3 +1617,93 @@ async def test_stop_cancels_a_handed_off_automation_task(app, brain, monkeypatch
     await app.ask("stop")
     await asyncio.sleep(0.2)
     assert cancelled.is_set()
+
+
+async def test_no_utterance_is_spoken_twice_across_a_full_automation_turn(app, brain, fake_provider,
+                                                                          monkeypatch):
+    """End-to-end proof against the exact bug class fixed earlier this
+    session (a streamed reply re-enqueued in full — see
+    orchestrator.py's _respond `already_streamed` guard and its comment
+    about a response being "audibly spoken twice"): drive a real
+    app.ask() through triage -> understanding -> the agent handoff ->
+    the orchestrator's background machinery -> a real
+    AutomationCapability.handle() call (not a directly-constructed one),
+    with a fake voice manager wired into both Deps.voice and
+    Orchestrator.voice exactly as core/app.py wires the real one, and
+    assert every utterance the fake voice records is spoken exactly once.
+    """
+    class _FakeVoice:
+        def __init__(self):
+            self.spoken: list[str] = []
+
+        def enqueue(self, text):
+            self.spoken.append(text)
+
+        async def stop_speaking(self):
+            return False
+
+    voice = _FakeVoice()
+    app.deps.voice = voice
+    app.orchestrator.voice = voice
+    app.config.voice.enabled = True  # ActionNarrator checks this live; avoid a config_store
+                                     # .update() here since that rebuilds the registry and
+                                     # would discard the tool stub installed below.
+
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]},
+                             "automation": {"narration_min_gap_s": 0.0}})
+
+    calls = _stub_tool(app, monkeypatch, "browse_to",
+                       ToolResult(data={"url": "https://x.example"}, summary="Opened it."))
+
+    decompose_q = [json.dumps({"milestones": ["open the site"]})]
+    step_q = [json.dumps({"action": "tool_call", "tool": "browse_to",
+                          "arguments": {"url": "https://x.example"}, "reason": "go there"}),
+             json.dumps({"action": "complete", "reason": "done"})]
+    summary_q = ["Opened the site for you."]
+    brain_reply = brain._reply  # the Brain's own router, for triage/understanding
+
+    def combined_router(messages, kwargs):
+        text = " ".join(m.content for m in messages)
+        if "break a task into milestones" in text:
+            return decompose_q.pop(0) if decompose_q else None
+        if "choose the next action for one part of a larger task" in text:
+            return step_q.pop(0) if step_q else json.dumps({"action": "give_up", "reason": "x"})
+        if "report back plainly" in text:
+            return summary_q.pop(0) if summary_q else None
+        return brain_reply(messages, kwargs)
+
+    fake_provider.router = combined_router
+    brain.understand(goal="open x.example", kind="automation", complexity=Complexity.MULTI_STEP,
+                     needs_tools=True)
+
+    result = await app.ask("open x.example please, step by step")
+    assert result.task_id
+    await settle(app)
+
+    assert len(calls) == 1, "the tool itself must not be invoked more than once"
+    assert voice.spoken, "narration/delivery should have spoken something"
+    assert len(voice.spoken) == len(set(voice.spoken)), (
+        f"an utterance was spoken more than once: {voice.spoken}")
+    # The final summary is the one utterance that must appear, and appear
+    # only via the single _deliver_background -> _respond call path.
+    assert voice.spoken.count("Opened the site for you.") == 1
+
+
+async def test_download_file_works_as_a_standalone_tool_through_the_small_loop(app, brain,
+                                                                               monkeypatch):
+    """download_file doesn't need the automation capability for a simple,
+    single-step "download this" request — it's an ordinary tool reachable
+    through the small agent loop like any other (see its module docstring:
+    "a user could ask 'download the latest Python installer' today via the
+    small agent loop calling download_file directly as a single tool call,
+    no capability needed")."""
+    calls = _stub_tool(app, monkeypatch, "download_file",
+                       ToolResult(data={"path": "/tmp/python.pkg", "bytes": 100},
+                                  summary="Downloaded python.pkg (100 bytes)."))
+    brain.understand(goal="download the python installer", kind="download",
+                     complexity=Complexity.SIMPLE, needs_tools=True)
+    brain.decide(action="tool_call", tool="download_file",
+                 arguments={"url": "https://python.org/installer.pkg"}, reason="download it")
+    await app.ask("download the latest python installer")
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://python.org/installer.pkg"

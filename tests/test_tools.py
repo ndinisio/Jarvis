@@ -32,6 +32,72 @@ def test_tool_names_are_unique_and_registered(app):
         assert expected in names
 
 
+def test_automation_flag_disables_every_new_tool_registration(app):
+    """caps.automation=False must disable page_tools, download_tools and
+    installer_tools together — not just the AutomationCapability that
+    consumes them (that's covered separately in test_intelligence.py's
+    test_automation_is_disabled_by_the_capability_flag)."""
+    automation_only_tools = {
+        "read_page_manifest", "click_page_element", "fill_page_field", "submit_page_form",
+        "download_file", "run_installer",
+    }
+    before = set(app.deps.registry.names())
+    assert automation_only_tools <= before, "sanity check: these must be registered by default"
+
+    app.config_store.update({"capabilities": {"automation": False}})
+    after = set(app.deps.registry.names())
+    assert not (automation_only_tools & after), (
+        f"still registered with automation off: {automation_only_tools & after}")
+    # Unrelated tools must be unaffected.
+    assert "browse_to" in after and "write_file" in after
+
+
+def test_automation_flag_also_removes_the_capability_itself(app):
+    """The same flag that hides the tools must also hide the capability
+    that would otherwise be left dangling with none of its tools
+    available — build_capabilities(deps) must not register it."""
+    assert "automation" in app.capabilities
+    app.config_store.update({"capabilities": {"automation": False}})
+    assert "automation" not in app.capabilities
+
+
+def test_page_tools_also_require_the_browser_flag(app):
+    """read_page_manifest etc. build on the same driver browse_to/
+    get_current_page use — they must not outlive caps.browser being off,
+    even with caps.automation still on."""
+    app.config_store.update({"capabilities": {"browser": False}})
+    names = set(app.deps.registry.names())
+    assert "browse_to" not in names
+    assert "read_page_manifest" not in names
+    assert "click_page_element" not in names
+
+
+def test_download_and_installer_tools_also_require_the_files_flag(app):
+    """download_file/run_installer are registered under the files-tools
+    block — caps.files=False must remove them too, even with
+    caps.automation still on, the same nesting page_tools has with
+    caps.browser."""
+    app.config_store.update({"capabilities": {"files": False}})
+    names = set(app.deps.registry.names())
+    assert "write_file" not in names
+    assert "download_file" not in names
+    assert "run_installer" not in names
+    # Automation-but-not-files-dependent tools must be unaffected.
+    assert "click_page_element" in names
+
+
+def test_native_interaction_additions_follow_the_screen_flag(app):
+    """wait_for_element/scroll/list_windows are registered alongside the
+    existing click_element/type_text under caps.screen, same as before —
+    not a new, separately-gated flag."""
+    for name in ("wait_for_element", "scroll", "list_windows"):
+        assert name in app.deps.registry.names()
+    app.config_store.update({"capabilities": {"screen": False}})
+    names = set(app.deps.registry.names())
+    for name in ("wait_for_element", "scroll", "list_windows", "click_element"):
+        assert name not in names
+
+
 def test_high_risk_tools_are_marked(app):
     send_email = app.deps.registry.get("send_email")
     delete_file = app.deps.registry.get("delete_file")
