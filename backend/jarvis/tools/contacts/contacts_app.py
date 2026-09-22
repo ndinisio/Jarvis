@@ -17,6 +17,10 @@ from ...core.errors import CapabilityUnavailable, ToolError
 
 FS = "\x1f"
 RS = "\x1e"
+#: Separates multiple values within one field (several emails/phones on one
+#: contact) — distinct from a comma, which can legitimately appear inside a
+#: phone number or note.
+IS = "\x1d"
 
 
 @dataclass(slots=True)
@@ -71,17 +75,18 @@ class AppleContactsBackend(ContactsBackend):
         script = f"""
         set fs to (ASCII character 31)
         set rs to (ASCII character 30)
+        set isep to (ASCII character 29)
         set output to ""
         tell application "Contacts"
             set matches to (every person whose name contains "{needle}")
             repeat with p in matches
                 set emailList to ""
                 repeat with e in emails of p
-                    set emailList to emailList & (value of e) & ","
+                    set emailList to emailList & (value of e) & isep
                 end repeat
                 set phoneList to ""
                 repeat with ph in phones of p
-                    set phoneList to phoneList & (value of ph) & ","
+                    set phoneList to phoneList & (value of ph) & isep
                 end repeat
                 set theCompany to ""
                 try
@@ -110,8 +115,8 @@ def _parse_contacts(raw: str) -> list[Contact]:
         parts = record.split(FS)
         if not parts or not parts[0].strip():
             continue
-        emails = [e for e in (parts[1].strip() if len(parts) > 1 else "").split(",") if e]
-        phones = [p for p in (parts[2].strip() if len(parts) > 2 else "").split(",") if p]
+        emails = [e for e in (parts[1].strip() if len(parts) > 1 else "").split(IS) if e]
+        phones = [p for p in (parts[2].strip() if len(parts) > 2 else "").split(IS) if p]
         contacts.append(Contact(
             name=parts[0].strip(),
             emails=emails,

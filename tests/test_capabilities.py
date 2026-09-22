@@ -219,12 +219,27 @@ async def test_complete_reminder_reports_when_not_found(app, monkeypatch):
 # --- contacts -----------------------------------------------------------------
 
 def test_contact_record_parsing():
-    raw = f"Tom Blake{FS}tom@example.com,{FS}555-1234,{FS}Acme{RS}"
+    IS = "\x1d"
+    raw = f"Tom Blake{FS}tom@example.com{IS}{FS}555-1234{IS}{FS}Acme{RS}"
     contacts = _parse_contacts(raw)
     assert len(contacts) == 1
     assert contacts[0].name == "Tom Blake"
     assert contacts[0].emails == ["tom@example.com"]
     assert contacts[0].phones == ["555-1234"]
+
+
+def test_contact_parsing_survives_a_comma_inside_a_value():
+    """A regression test: multiple emails/phones on one contact used to be
+    joined and split on a plain comma, so a phone number or note containing
+    a comma (e.g. "+1 555-1234, ext. 2") would corrupt parsing. Fixed by
+    using a dedicated separator distinct from any character real contact
+    data would plausibly contain."""
+    IS = "\x1d"
+    raw = (f"Tom Blake{FS}tom@example.com{IS}tom@work.example{IS}"
+          f"{FS}555-1234, ext. 2{IS}{FS}Acme{RS}")
+    contacts = _parse_contacts(raw)
+    assert contacts[0].emails == ["tom@example.com", "tom@work.example"]
+    assert contacts[0].phones == ["555-1234, ext. 2"]
 
 
 async def test_search_contacts_is_read_not_reasoned(app, fake_provider, monkeypatch):
@@ -268,6 +283,111 @@ def test_a_looked_up_contact_becomes_a_person_entity_for_reference_resolution(ap
     )
     people = app.orchestrator.state.entities_of("person")
     assert any(p.label == "Tom Blake" for p in people)
+
+
+async def test_list_reminders_filters_by_list_name(app, fake_provider, monkeypatch):
+    captured: dict = {}
+
+    async def list_reminders(self, list_name="", include_completed=False, limit=25):
+        captured["list_name"] = list_name
+        captured["include_completed"] = include_completed
+        return [Reminder(title="Buy milk", list_name="Groceries")] if list_name else []
+
+    monkeypatch.setattr(AppleRemindersBackend, "list_reminders", list_reminders)
+    monkeypatch.setattr(app.deps.registry.get("list_reminders").spec, "requires_macos", False)
+
+    result = await app.deps.registry.call("list_reminders", {"list": "Groceries"},
+                                          app.deps.tool_context())
+    assert result.ok
+    assert captured["list_name"] == "Groceries"
+    assert captured["include_completed"] is False
+    assert "Groceries" in result.summary
+
+
+async def test_search_reminders_matches_title_and_notes(app, monkeypatch):
+    async def list_reminders(self, list_name="", include_completed=False, limit=25):
+        return [Reminder(title="Buy milk", notes="2%"), Reminder(title="Call Ada", notes="")]
+
+    monkeypatch.setattr(AppleRemindersBackend, "list_reminders", list_reminders)
+    monkeypatch.setattr(app.deps.registry.get("search_reminders").spec, "requires_macos", False)
+
+    result = await app.deps.registry.call("search_reminders", {"query": "milk"},
+                                          app.deps.tool_context())
+    assert result.ok
+    assert "1 matching reminder" in result.summary
+    assert result.data["reminders"][0]["title"] == "Buy milk"
+
+
+async def test_create_reminder_tool_reports_what_it_added(app, monkeypatch):
+    async def create_reminder(self, reminder, list_name=""):
+        return True
+
+    monkeypatch.setattr(AppleRemindersBackend, "create_reminder", create_reminder)
+    monkeypatch.setattr(app.deps.registry.get("create_reminder").spec, "requires_macos", False)
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
+
+    result = await app.deps.registry.call(
+        "create_reminder", {"title": "Buy milk", "due": "2026-05-05T09:00"},
+        app.deps.tool_context(),
+    )
+    assert result.ok
+    assert "Buy milk" in result.summary
+    assert result.data["title"] == "Buy milk"
+
+
+async def test_reminders_capability_completes_by_deterministic_keyword(app, fake_provider,
+                                                                       monkeypatch):
+    """"done"/"complete"/"finished" routes straight to complete_reminder without
+    a full tool-selection model call — mirrors CalendarCapability's own
+    deterministic shortcuts for "today"/"tomorrow"/"week"."""
+    completed: list[str] = []
+
+    async def complete_reminder(self, title, list_name=""):
+        completed.append(title)
+        return True
+
+    monkeypatch.setattr(AppleRemindersBackend, "complete_reminder", complete_reminder)
+    monkeypatch.setattr(app.deps.registry.get("complete_reminder").spec, "requires_macos", False)
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
+    fake_provider.json_responses.append('{"title": "Buy milk"}')
+
+    capability = app.capabilities["reminders"]
+    response = await capability.handle(
+        Request(text="mark buy milk as done", ctx=app.deps.tool_context())
+    )
+    assert completed == ["Buy milk"]
+    assert "Buy milk" in response.text
+
+
+async def test_reminders_capability_creates_by_deterministic_keyword(app, fake_provider,
+                                                                     monkeypatch):
+    async def create_reminder(self, reminder, list_name=""):
+        return True
+
+    monkeypatch.setattr(AppleRemindersBackend, "create_reminder", create_reminder)
+    monkeypatch.setattr(app.deps.registry.get("create_reminder").spec, "requires_macos", False)
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
+    fake_provider.json_responses.append('{"title": "Call mum", "due": "", "notes": ""}')
+
+    capability = app.capabilities["reminders"]
+    response = await capability.handle(
+        Request(text="remind me to call mum", ctx=app.deps.tool_context())
+    )
+    assert "Call mum" in response.text
+
+
+async def test_contacts_capability_answers_through_the_plan_path(app, fake_provider, monkeypatch):
+    async def search(self, query, limit=10):
+        return [Contact(name="Tom Blake", emails=["tom@example.com"], phones=[])]
+
+    monkeypatch.setattr(AppleContactsBackend, "search", search)
+    monkeypatch.setattr(app.deps.registry.get("search_contacts").spec, "requires_macos", False)
+    fake_provider.json_responses.append('{"tool": "search_contacts", "args": {"query": "Tom"}}')
+
+    capability = app.capabilities["contacts"]
+    response = await capability.handle(Request(text="what's Tom's email?", ctx=app.deps.tool_context()))
+    assert "Tom Blake" in response.text
+    assert "tom@example.com" in response.text
 
 
 # --- screen -----------------------------------------------------------------
