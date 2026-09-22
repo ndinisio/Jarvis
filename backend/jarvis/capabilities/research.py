@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -112,16 +113,27 @@ class ResearchCapability(Capability):
 
         pages: list[Page] = []
         semaphore = asyncio.Semaphore(4)
+        # Shared, mutable, and safe under asyncio's cooperative scheduling:
+        # every read() checks-then-decrements this in one synchronous block
+        # with no `await` in between, so concurrent reads under the
+        # semaphore above can't race past the budget.
+        js_budget = [conf.max_js_fallbacks if self._js_fallback_available(conf) else 0]
 
         async def read(result: SearchResult) -> Page | None:
             async with semaphore:
                 if request.ctx.cancelled():
                     return None
                 step(f"Reading {_domain(result.url)}…", phase="read")
-                return await fetch_page(
+                page = await fetch_page(
                     result.url, timeout=conf.per_request_timeout_s,
                     user_agent=conf.user_agent, max_chars=conf.max_page_chars,
                 )
+                if self._page_is_thin(page, conf) and js_budget[0] > 0:
+                    js_budget[0] -= 1
+                    step(f"{_domain(result.url)} needs a browser to render — opening it…",
+                        phase="read")
+                    page = await self._render_with_browser(result.url, page, conf)
+                return page
 
         fetched = await asyncio.gather(*(read(r) for r in chosen), return_exceptions=True)
         for item in fetched:
@@ -157,6 +169,43 @@ class ResearchCapability(Capability):
             },
             data={"sources": [s.as_dict() for s in sources]},
         )
+
+    # -- JS-heavy pages: a real browser as a second attempt, not the default -
+    def _js_fallback_available(self, conf) -> bool:
+        return (conf.js_fallback_enabled and self.deps.config.capabilities.browser
+                and self.deps.controller.is_macos)
+
+    @staticmethod
+    def _page_is_thin(page: Page, conf) -> bool:
+        return page.ok and len(page.text.strip()) < conf.thin_page_chars
+
+    async def _render_with_browser(self, url: str, original: Page, conf) -> Page:
+        """The static fetch came back too thin to be useful — often a sign
+        the page needs JavaScript to render its real content. There's no
+        way to run that JS invisibly through the existing AppleScript
+        bridge (see tools/browser/tools.py), so this opens a real, visible
+        tab, same trade-off CurrentPageTool already accepts for the
+        opposite fallback direction (browser JS unavailable -> static
+        fetch). Never worse than the static result: anything short of a
+        clear improvement, or any failure along the way, returns *original*
+        unchanged."""
+        from ..tools.browser.tools import detect_browser, driver_for
+
+        try:
+            name = await detect_browser(self.deps)
+            driver = driver_for(self.deps.controller, name)
+            if not await driver.open(url):
+                return original
+            text = await _wait_for_rendered_text(driver, conf.thin_page_chars,
+                                                 max_wait_s=conf.js_render_max_wait_s,
+                                                 poll_s=conf.js_render_poll_s)
+        except Exception as exc:
+            log.debug("browser JS fallback failed for %s: %s", url, exc)
+            return original
+        if len(text.strip()) <= len(original.text.strip()):
+            return original
+        return Page(url=url, title=original.title, text=text[:conf.max_page_chars],
+                   status=original.status, content_type=original.content_type)
 
     # -- steps -------------------------------------------------------------
     async def _plan_queries(self, query: str) -> list[str]:
@@ -260,6 +309,22 @@ class ResearchCapability(Capability):
         except OSError as exc:
             log.debug("could not save research report: %s", exc)
             return None
+
+
+async def _wait_for_rendered_text(driver, threshold: int, max_wait_s: float = 6.0,
+                                  poll_s: float = 0.6) -> str:
+    """A freshly opened tab hasn't necessarily finished running its own JS
+    yet — reading immediately would risk the same "loading…" shell the
+    static fetch already produced, defeating the point. Polls rather than
+    a fixed sleep, the same "wait until ready, don't guess a delay"
+    approach WaitForElementTool already uses elsewhere in this package."""
+    deadline = time.monotonic() + max_wait_s
+    text = ""
+    while True:
+        text = await driver.page_text()
+        if len(text.strip()) >= threshold or time.monotonic() >= deadline:
+            return text
+        await asyncio.sleep(poll_s)
 
 
 def _dedupe(results: list[SearchResult]) -> list[SearchResult]:

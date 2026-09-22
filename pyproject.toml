@@ -20,6 +20,12 @@ voice = [
     "faster-whisper>=1.0.0",
     "openwakeword>=0.6.0",
 ]
+# Genuine scroll-wheel event synthesis (tools/interaction/scroll_quartz.py).
+# macOS only, and optional — ScrollTool falls back to its key-based path
+# without it.
+scroll = [
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

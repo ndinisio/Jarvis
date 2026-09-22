@@ -220,6 +220,21 @@ class ResearchConfig(BaseModel):
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
         "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
     )
+    #: A page whose static fetch comes back this thin (often a sign it needs
+    #: JavaScript to render) gets a second attempt via a real browser
+    #: instead — see capabilities/research.py. Off entirely if
+    #: capabilities.browser is off, or on a non-macOS host.
+    js_fallback_enabled: bool = True
+    thin_page_chars: int = 200
+    #: The JS fallback opens a real, visible browser tab — there is no way
+    #: to run page JavaScript invisibly through the existing AppleScript
+    #: bridge (see tools/browser/tools.py). This bounds how many tabs one
+    #: research turn can open, however many results looked thin.
+    max_js_fallbacks: int = 2
+    #: How long to keep polling a freshly opened tab for its JS to finish
+    #: rendering before giving up and using whatever text is there.
+    js_render_max_wait_s: float = 6.0
+    js_render_poll_s: float = 0.6
 
 
 class MemoryConfig(BaseModel):

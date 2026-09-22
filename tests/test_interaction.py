@@ -273,6 +273,92 @@ async def test_scroll_rejects_an_unknown_direction(app, ctx):
     assert outcome.ok is False
 
 
+async def test_scroll_uses_the_scroll_wheel_path_when_quartz_is_available_and_never_touches_osascript(
+    app, ctx, monkeypatch
+):
+    from jarvis.tools.interaction import scroll_quartz
+
+    calls = []
+
+    async def fake_osascript(script, language="AppleScript", timeout=25.0):
+        calls.append(script)
+        return ShellResult(0, "", "")
+
+    monkeypatch.setattr(app.deps.controller, "osascript", fake_osascript)
+    monkeypatch.setattr(scroll_quartz, "available", lambda: True)
+    monkeypatch.setattr(scroll_quartz, "scroll", lambda direction, amount: True)
+
+    outcome = await ScrollTool(app.deps).run({"direction": "down", "amount": 5}, ctx)
+    assert outcome.ok is True
+    assert outcome.data["method"] == "scroll_wheel"
+    assert calls == []  # the key-based path must not have run at all
+
+
+async def test_scroll_falls_back_to_keys_when_quartz_is_unavailable(app, ctx, monkeypatch):
+    from jarvis.tools.interaction import scroll_quartz
+
+    scripts = []
+
+    async def fake_osascript(script, language="AppleScript", timeout=25.0):
+        scripts.append(script)
+        return ShellResult(0, "", "")
+
+    monkeypatch.setattr(app.deps.controller, "osascript", fake_osascript)
+    monkeypatch.setattr(scroll_quartz, "available", lambda: False)
+
+    outcome = await ScrollTool(app.deps).run({"direction": "down", "amount": 2}, ctx)
+    assert outcome.ok is True
+    assert outcome.data["method"] == "key"
+    assert len(scripts) == 2
+
+
+async def test_scroll_falls_back_to_keys_when_quartz_is_available_but_posting_fails(
+    app, ctx, monkeypatch
+):
+    """Quartz being importable doesn't guarantee the post actually worked —
+    e.g. the process lacks the Accessibility/Input Monitoring grant real
+    scroll-event posting needs. That must still fall through to the
+    key-based path rather than silently reporting success."""
+    from jarvis.tools.interaction import scroll_quartz
+
+    scripts = []
+
+    async def fake_osascript(script, language="AppleScript", timeout=25.0):
+        scripts.append(script)
+        return ShellResult(0, "", "")
+
+    monkeypatch.setattr(app.deps.controller, "osascript", fake_osascript)
+    monkeypatch.setattr(scroll_quartz, "available", lambda: True)
+    monkeypatch.setattr(scroll_quartz, "scroll", lambda direction, amount: False)
+
+    outcome = await ScrollTool(app.deps).run({"direction": "up", "amount": 1}, ctx)
+    assert outcome.ok is True
+    assert outcome.data["method"] == "key"
+    assert len(scripts) == 1
+
+
+async def test_scroll_top_and_bottom_never_use_the_scroll_wheel_path(app, ctx, monkeypatch):
+    """Jumping to an edge is keyboard navigation (Home/End), not a scroll
+    gesture — top/bottom must never even ask whether Quartz is available."""
+    from jarvis.tools.interaction import scroll_quartz
+
+    asked = []
+
+    def spying_available():
+        asked.append(True)
+        return True
+
+    async def fake_osascript(script, language="AppleScript", timeout=25.0):
+        return ShellResult(0, "", "")
+
+    monkeypatch.setattr(app.deps.controller, "osascript", fake_osascript)
+    monkeypatch.setattr(scroll_quartz, "available", spying_available)
+
+    await ScrollTool(app.deps).run({"direction": "top"}, ctx)
+    await ScrollTool(app.deps).run({"direction": "bottom"}, ctx)
+    assert asked == []
+
+
 # -- ListWindowsTool -----------------------------------------------------------
 
 async def test_list_windows_parses_the_window_list(app, ctx, monkeypatch):

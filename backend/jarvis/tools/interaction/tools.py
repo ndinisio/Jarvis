@@ -342,11 +342,10 @@ class ScrollTool(Tool):
         examples=["scroll down", "scroll to the top of the page", "page down"],
     )
 
-    #: v1 is key-based (reuses the existing Page Up/Down/Home/End codes).
-    #: Genuine scroll-wheel events need CGEventCreateScrollWheelEvent, a
-    #: PyObjC/Quartz dependency this repo doesn't have yet — a reasonable
-    #: follow-up if key-based scrolling proves insufficient against a real
-    #: app, not a v1 blocker.
+    #: "top"/"bottom" jump to an edge — a keyboard-navigation concept, not a
+    #: scroll gesture, so they always use Home/End. "up"/"down" try a real
+    #: scroll-wheel event first (see scroll_quartz.py) and fall back to
+    #: Page Up/Down when that's unavailable or fails.
     _DIRECTIONS = {"up": "pageup", "down": "pagedown", "top": "home", "bottom": "end"}
 
     def __init__(self, deps):
@@ -358,13 +357,27 @@ class ScrollTool(Tool):
         if key is None:
             return ToolResult.failure(f"I don't know the scroll direction “{direction}”.")
         repeats = 1 if direction in ("top", "bottom") else max(1, min(int(args.get("amount") or 1), 20))
+
+        if direction in ("up", "down"):
+            from . import scroll_quartz
+
+            if scroll_quartz.available():
+                posted = await asyncio.to_thread(scroll_quartz.scroll, direction, repeats)
+                if posted:
+                    return ToolResult(
+                        data={"direction": direction, "amount": repeats, "method": "scroll_wheel"},
+                        summary=f"Scrolled {direction}.",
+                    )
+                # Quartz is installed but posting failed for some reason —
+                # the key-based path below is still worth trying.
+
         code = KEY_CODES[key]
         for _ in range(repeats):
             result = await self._deps.controller.osascript(
                 f'tell application "System Events" to key code {code}', timeout=10.0)
             if not result.ok:
                 return ToolResult.failure(_PERMISSION_HINT, detail=result.output)
-        return ToolResult(data={"direction": direction, "amount": repeats},
+        return ToolResult(data={"direction": direction, "amount": repeats, "method": "key"},
                           summary=f"Scrolled {direction}.")
 
 

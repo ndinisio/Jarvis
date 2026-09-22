@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 from jarvis.capabilities.base import Request
-from jarvis.capabilities.research import _dedupe, _relevant_excerpt
+from jarvis.capabilities.research import (
+    ResearchCapability,
+    _dedupe,
+    _relevant_excerpt,
+    _wait_for_rendered_text,
+)
 from jarvis.tools.web.extract import Page, extract_readable
 from jarvis.tools.web.search import SearchResult, _parse_duckduckgo, search_url
 
@@ -171,3 +176,245 @@ async def test_fetch_page_handles_network_failure(app, ctx, monkeypatch):
     result = await app.deps.registry.call("fetch_page", {"url": "https://example.com"}, ctx)
     assert result.ok is False
     assert "couldn't read" in result.summary
+
+
+# -- the JS-heavy-page browser fallback (v2.4) ----------------------------------
+
+class _FakeDriver:
+    def __init__(self, texts: list[str]):
+        self._texts = list(texts)
+        self.opened: list[str] = []
+        self.open_returns = True
+
+    async def open(self, url: str) -> bool:
+        self.opened.append(url)
+        return self.open_returns
+
+    async def page_text(self) -> str:
+        if len(self._texts) > 1:
+            return self._texts.pop(0)
+        return self._texts[0] if self._texts else ""
+
+
+def test_page_is_thin_only_for_a_short_ok_page(app):
+    capability = ResearchCapability(app.deps)
+    conf = app.config.research
+    assert capability._page_is_thin(Page(url="x", text="short", status=200), conf) is True
+    assert capability._page_is_thin(Page(url="x", text="x" * 500, status=200), conf) is False
+    # An error page is never "thin" in the sense that a browser could help —
+    # ok is False, so it's excluded outright, not routed into a fallback.
+    assert capability._page_is_thin(Page(url="x", text="", status=0, error="timed out"),
+                                    conf) is False
+
+
+def test_js_fallback_available_requires_the_flag_the_capability_flag_and_macos(app, monkeypatch):
+    capability = ResearchCapability(app.deps)
+    conf = app.config.research
+
+    monkeypatch.setattr(app.controller, "is_macos", True)
+    assert capability._js_fallback_available(conf) is True
+
+    monkeypatch.setattr(app.controller, "is_macos", False)
+    assert capability._js_fallback_available(conf) is False
+
+
+async def test_js_fallback_available_is_false_when_the_browser_capability_is_off(app, monkeypatch):
+    monkeypatch.setattr(app.controller, "is_macos", True)
+    app.config_store.update({"capabilities": {"browser": False}})
+    capability = ResearchCapability(app.deps)  # the config just changed; build fresh
+    assert capability._js_fallback_available(app.config.research) is False
+
+
+async def test_wait_for_rendered_text_returns_as_soon_as_the_threshold_is_met():
+    driver = _FakeDriver(["", "short", "this is now long enough to clear the threshold check"])
+    text = await _wait_for_rendered_text(driver, threshold=20, max_wait_s=5, poll_s=0.01)
+    assert "long enough" in text
+
+
+async def test_wait_for_rendered_text_gives_up_after_the_timeout():
+    driver = _FakeDriver([""])
+    text = await _wait_for_rendered_text(driver, threshold=1000, max_wait_s=0.05, poll_s=0.01)
+    assert text == ""
+
+
+async def test_render_with_browser_returns_the_original_page_if_opening_fails(app):
+    capability = ResearchCapability(app.deps)
+    original = Page(url="https://x.example", text="thin", status=200)
+    driver = _FakeDriver(["plenty of rendered content, well past any thin-page threshold"])
+    driver.open_returns = False
+
+    import jarvis.tools.browser.tools as browser_tools
+
+    async def fake_detect_browser(deps):
+        return "Safari"
+
+    def fake_driver_for(controller, name):
+        return driver
+
+    orig_detect, orig_driver_for = browser_tools.detect_browser, browser_tools.driver_for
+    browser_tools.detect_browser = fake_detect_browser
+    browser_tools.driver_for = fake_driver_for
+    try:
+        result = await capability._render_with_browser("https://x.example", original,
+                                                        app.config.research)
+    finally:
+        browser_tools.detect_browser, browser_tools.driver_for = orig_detect, orig_driver_for
+    assert result is original
+
+
+async def test_render_with_browser_keeps_the_original_when_the_render_is_not_better(app):
+    app.config_store.update({"research": {"js_render_max_wait_s": 0.05, "js_render_poll_s": 0.01}})
+    capability = ResearchCapability(app.deps)
+    original = Page(url="https://x.example", text="a" * 300, status=200)  # not actually thin
+    driver = _FakeDriver(["shorter"])  # worse than the original
+
+    import jarvis.tools.browser.tools as browser_tools
+
+    async def fake_detect_browser(deps):
+        return "Safari"
+
+    def fake_driver_for(controller, name):
+        return driver
+
+    orig_detect, orig_driver_for = browser_tools.detect_browser, browser_tools.driver_for
+    browser_tools.detect_browser = fake_detect_browser
+    browser_tools.driver_for = fake_driver_for
+    try:
+        result = await capability._render_with_browser("https://x.example", original,
+                                                        app.config.research)
+    finally:
+        browser_tools.detect_browser, browser_tools.driver_for = orig_detect, orig_driver_for
+    assert result is original
+
+
+async def test_thin_pages_get_a_browser_fallback_and_substantial_pages_do_not(
+    app, fake_provider, monkeypatch
+):
+    import jarvis.capabilities.research as module
+    import jarvis.tools.browser.tools as browser_tools
+
+    async def fake_search(self, query, limit=None):
+        return [
+            SearchResult("Thin SPA", "https://spa.example.com/", "A snippet"),
+            SearchResult("Full article", "https://article.example.com/", "Another snippet"),
+        ]
+
+    async def fake_fetch(url, **kwargs):
+        if "spa" in url:
+            return Page(url=url, title="Thin SPA", text="Loading…", status=200)
+        return Page(url=url, title="Full article", text="A" * 500, status=200)
+
+    monkeypatch.setattr(module.WebSearch, "search", fake_search)
+    monkeypatch.setattr(module, "fetch_page", fake_fetch)
+    monkeypatch.setattr(app.controller, "is_macos", True)
+    app.config_store.update({"research": {"js_render_max_wait_s": 0.05, "js_render_poll_s": 0.01}})
+
+    driver = _FakeDriver(["The real rendered content, now well past the thin-page threshold."])
+
+    async def fake_detect_browser(deps):
+        return "Safari"
+
+    def fake_driver_for(controller, name):
+        return driver
+
+    monkeypatch.setattr(browser_tools, "detect_browser", fake_detect_browser)
+    monkeypatch.setattr(browser_tools, "driver_for", fake_driver_for)
+
+    fake_provider.json_responses.append('{"queries": ["test"]}')
+    fake_provider.responses.append("A synthesised report [1][2].")
+
+    capability = app.capabilities["research"]
+    task = app.tasks.create("research", "test")
+    request = Request(text="research something", args={"query": "something"},
+                      ctx=app.deps.tool_context(task=task), task=task)
+    response = await capability.handle(request)
+
+    assert driver.opened == ["https://spa.example.com/"], (
+        "only the thin page should have gotten the browser fallback")
+    messages = [step["message"] for step in task.steps]
+    assert any("needs a browser" in m for m in messages)
+    assert response.error is None
+
+
+async def test_the_js_fallback_budget_bounds_how_many_tabs_open_per_turn(
+    app, fake_provider, monkeypatch
+):
+    """Every result is thin here — without a budget every one of them would
+    open a tab. max_js_fallbacks (default 2) must cap that."""
+    import jarvis.capabilities.research as module
+    import jarvis.tools.browser.tools as browser_tools
+
+    async def fake_search(self, query, limit=None):
+        return [SearchResult(f"Thin {i}", f"https://spa{i}.example.com/", "snippet")
+               for i in range(4)]
+
+    async def fake_fetch(url, **kwargs):
+        return Page(url=url, title="Thin", text="Loading…", status=200)
+
+    monkeypatch.setattr(module.WebSearch, "search", fake_search)
+    monkeypatch.setattr(module, "fetch_page", fake_fetch)
+    monkeypatch.setattr(app.controller, "is_macos", True)
+    app.config_store.update({"research": {"js_render_max_wait_s": 0.05, "js_render_poll_s": 0.01}})
+
+    opened: list[str] = []
+
+    class _CountingDriver(_FakeDriver):
+        async def open(self, url):
+            opened.append(url)
+            return await super().open(url)
+
+    def fake_driver_for(controller, name):
+        return _CountingDriver(["still thin, never clears the threshold"])
+
+    async def fake_detect_browser(deps):
+        return "Safari"
+
+    monkeypatch.setattr(browser_tools, "detect_browser", fake_detect_browser)
+    monkeypatch.setattr(browser_tools, "driver_for", fake_driver_for)
+
+    fake_provider.json_responses.append('{"queries": ["test"]}')
+    fake_provider.responses.append("A report.")
+
+    capability = app.capabilities["research"]
+    task = app.tasks.create("research", "test")
+    request = Request(text="research something", args={"query": "something"},
+                      ctx=app.deps.tool_context(task=task), task=task)
+    await capability.handle(request)
+
+    assert len(opened) == app.config.research.max_js_fallbacks == 2
+
+
+async def test_js_fallback_never_triggers_on_a_non_macos_host_even_with_a_thin_page(
+    app, fake_provider, monkeypatch
+):
+    """The default state of this dev environment: no macOS, so the existing,
+    fully-static research behaviour must be completely unchanged."""
+    import jarvis.capabilities.research as module
+    import jarvis.tools.browser.tools as browser_tools
+
+    async def fake_search(self, query, limit=None):
+        return [SearchResult("Thin SPA", "https://spa.example.com/", "A snippet")]
+
+    async def fake_fetch(url, **kwargs):
+        return Page(url=url, title="Thin SPA", text="Loading…", status=200)
+
+    monkeypatch.setattr(module.WebSearch, "search", fake_search)
+    monkeypatch.setattr(module, "fetch_page", fake_fetch)
+    assert app.controller.is_macos is False  # this environment, unmodified
+
+    opened: list[str] = []
+
+    def fake_driver_for(controller, name):
+        raise AssertionError("the browser fallback must never be attempted off macOS")
+
+    monkeypatch.setattr(browser_tools, "driver_for", fake_driver_for)
+
+    fake_provider.json_responses.append('{"queries": ["test"]}')
+    fake_provider.responses.append("A report.")
+
+    capability = app.capabilities["research"]
+    task = app.tasks.create("research", "test")
+    request = Request(text="research something", args={"query": "something"},
+                      ctx=app.deps.tool_context(task=task), task=task)
+    await capability.handle(request)
+    assert opened == []
