@@ -53,9 +53,19 @@ def available() -> bool:
 
 def scroll(direction: str, amount: int) -> bool:
     """Synchronous — call via ``asyncio.to_thread``. *direction* is "up" or
-    "down" only. Returns ``False`` (never raises) if Quartz isn't
-    importable, the direction is unrecognised, or posting the event
-    failed, so the caller can fall back to the key-based path."""
+    "down" only.
+
+    Returns ``True`` the moment even one event has been posted
+    successfully — deliberately, not only when every one of *amount*
+    succeeds. ``ScrollTool`` falls back to the key-based path whenever
+    this returns ``False``, and a failure partway through the loop (the
+    first event posts, a later one raises) would otherwise mean *some*
+    scrolling already happened before the fallback then scrolled again on
+    top of it — the same double-action failure shape a real macOS runtime
+    report once found in speech output (see core/orchestrator.py's
+    ``_respond`` `already_streamed` guard). Returns ``False`` (never
+    raises) only when nothing was posted at all: Quartz isn't importable,
+    the direction is unrecognised, or even the first post failed."""
     try:
         import Quartz
     except ImportError:
@@ -63,16 +73,17 @@ def scroll(direction: str, amount: int) -> bool:
     sign = _SIGN.get(direction)
     if sign is None:
         return False
-    try:
-        for _ in range(max(1, amount)):
+    posted_any = False
+    for _ in range(max(1, amount)):
+        try:
             event = Quartz.CGEventCreateScrollWheelEvent(
                 None, Quartz.kCGScrollEventUnitLine, 1, sign * _LINES_PER_EVENT,
             )
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
-            # Consecutive events posted with no gap at all can coalesce
-            # into a single scroll in some apps; a small pause keeps each
-            # one distinct.
-            time.sleep(0.02)
-        return True
-    except Exception:
-        return False
+        except Exception:
+            break
+        posted_any = True
+        # Consecutive events posted with no gap at all can coalesce into a
+        # single scroll in some apps; a small pause keeps each one distinct.
+        time.sleep(0.02)
+    return posted_any

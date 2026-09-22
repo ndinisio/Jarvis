@@ -405,7 +405,15 @@ async def test_js_fallback_never_triggers_on_a_non_macos_host_even_with_a_thin_p
     opened: list[str] = []
 
     def fake_driver_for(controller, name):
-        raise AssertionError("the browser fallback must never be attempted off macOS")
+        # Recording the call, rather than raising, is deliberate:
+        # _render_with_browser wraps its own body in a broad
+        # `except Exception` (never worse than the static result on any
+        # failure), which would silently swallow a raise here and let
+        # this test pass even if the macOS guard were broken — proven by
+        # reverting it locally and confirming this exact test then fails
+        # to catch that regression while a raising version doesn't.
+        opened.append("driver_for was called")
+        raise AssertionError("unreachable in this test — driver_for should never run")
 
     monkeypatch.setattr(browser_tools, "driver_for", fake_driver_for)
 
@@ -417,4 +425,51 @@ async def test_js_fallback_never_triggers_on_a_non_macos_host_even_with_a_thin_p
     request = Request(text="research something", args={"query": "something"},
                       ctx=app.deps.tool_context(task=task), task=task)
     await capability.handle(request)
+    assert opened == []
+
+
+async def test_a_stop_mid_fetch_prevents_a_new_tab_even_though_the_fetch_already_finished(
+    app, fake_provider, monkeypatch
+):
+    """fetch_page() can run for several seconds — long enough for a "stop"
+    to land while it's in flight. A real bug this closes: skipping the
+    fetch itself once cancelled is one thing, but opening a *new, visible*
+    browser tab immediately afterwards — because the already-in-flight
+    fetch came back thin — would be a materially worse surprise than an
+    invisible network call quietly finishing, which this codebase already
+    tolerates elsewhere. The fetch stub below sets cancel_event itself,
+    simulating "stop" arriving mid-fetch rather than before it."""
+    import jarvis.capabilities.research as module
+    import jarvis.tools.browser.tools as browser_tools
+    from jarvis.core.errors import Cancelled
+
+    task_holder: dict = {}
+    opened: list[str] = []
+
+    async def fake_search(self, query, limit=None):
+        return [SearchResult("Thin SPA", "https://spa.example.com/", "A snippet")]
+
+    async def fake_fetch(url, **kwargs):
+        task_holder["task"].cancel_event.set()  # "stop" arrives mid-fetch
+        return Page(url=url, title="Thin SPA", text="Loading…", status=200)
+
+    def fake_driver_for(controller, name):
+        opened.append("driver_for was called")
+        raise AssertionError("unreachable — a stop already landed before this point")
+
+    monkeypatch.setattr(module.WebSearch, "search", fake_search)
+    monkeypatch.setattr(module, "fetch_page", fake_fetch)
+    monkeypatch.setattr(app.controller, "is_macos", True)
+    monkeypatch.setattr(browser_tools, "driver_for", fake_driver_for)
+
+    fake_provider.json_responses.append('{"queries": ["test"]}')
+
+    capability = app.capabilities["research"]
+    task = app.tasks.create("research", "test")
+    task_holder["task"] = task
+    request = Request(text="research something", args={"query": "something"},
+                      ctx=app.deps.tool_context(task=task), task=task)
+
+    with pytest.raises(Cancelled):
+        await capability.handle(request)
     assert opened == []

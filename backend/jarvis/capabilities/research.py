@@ -128,7 +128,17 @@ class ResearchCapability(Capability):
                     result.url, timeout=conf.per_request_timeout_s,
                     user_agent=conf.user_agent, max_chars=conf.max_page_chars,
                 )
-                if self._page_is_thin(page, conf) and js_budget[0] > 0:
+                # request.ctx.cancelled() is re-checked here rather than
+                # trusted from the guard at the top of read(): fetch_page()
+                # above can run for several seconds, long enough for a
+                # "stop" to land while it's in flight. Skipping the fetch
+                # itself once cancelled is one thing; opening a new,
+                # visible browser tab afterwards — a much more disruptive
+                # side effect than a network call quietly finishing — is
+                # worth this extra check even though the static fetch
+                # already happened either way.
+                if (self._page_is_thin(page, conf) and js_budget[0] > 0
+                        and not request.ctx.cancelled()):
                     js_budget[0] -= 1
                     step(f"{_domain(result.url)} needs a browser to render — opening it…",
                         phase="read")

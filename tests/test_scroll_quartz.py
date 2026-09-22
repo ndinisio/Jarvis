@@ -22,16 +22,19 @@ class _FakeQuartz:
     kCGScrollEventUnitLine = "line"
     kCGHIDEventTap = "hid"
 
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, fail_after: int | None = None):
         self.calls: list[tuple] = []
         self.posted: list[object] = []
         self._fail = fail
+        self._fail_after = fail_after
 
     def CGEventCreateScrollWheelEvent(self, source, units, wheel_count, wheel1):
         self.calls.append((source, units, wheel_count, wheel1))
         return ("event", wheel1)
 
     def CGEventPost(self, tap, event):
+        if self._fail_after is not None and len(self.posted) >= self._fail_after:
+            raise RuntimeError("posting failed partway through")
         if self._fail:
             raise RuntimeError("posting failed")
         self.posted.append((tap, event))
@@ -106,3 +109,39 @@ def test_scroll_treats_a_non_positive_amount_as_one_event():
     sys.modules["Quartz"] = fake
     scroll_quartz.scroll("down", 0)
     assert len(fake.calls) == 1
+
+
+def test_scroll_returns_true_if_even_one_event_posted_before_a_later_failure():
+    """A real bug this closes: the first implementation returned False for
+    *any* failure in the loop, even one that happened after several events
+    had already posted successfully. ScrollTool falls back to the
+    key-based path whenever scroll() returns False — so that would have
+    meant some scroll-wheel events already fired, and then the key-based
+    fallback scrolled again on top of them: a double action, the same
+    failure shape as the double-TTS bug this session already fixed once
+    in orchestrator.py's _respond. Posting some events and then hitting a
+    real failure must still report success, so the caller does not retry
+    with a different mechanism."""
+    fake = _FakeQuartz(fail_after=2)
+    sys.modules["Quartz"] = fake
+    result = scroll_quartz.scroll("down", 5)
+    assert result is True
+    assert len(fake.posted) == 2  # exactly the ones that succeeded before the failure
+
+
+def test_scroll_returns_false_only_when_nothing_posted_at_all():
+    fake = _FakeQuartz(fail_after=0)  # fails on the very first attempt
+    sys.modules["Quartz"] = fake
+    assert scroll_quartz.scroll("down", 5) is False
+    assert fake.posted == []
+
+
+def test_scroll_stops_trying_after_the_first_failure_rather_than_continuing():
+    """Once a post fails, retrying the remaining repeats risks the same
+    failure mode again for no benefit — one partial scroll is a better
+    outcome than repeatedly hammering a call that just failed."""
+    fake = _FakeQuartz(fail_after=1)
+    sys.modules["Quartz"] = fake
+    scroll_quartz.scroll("down", 5)
+    assert len(fake.calls) == 2  # the one that succeeded, and the one that failed
+    assert len(fake.posted) == 1
