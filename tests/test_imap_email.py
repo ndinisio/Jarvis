@@ -157,6 +157,39 @@ def test_plain_text_extracts_from_a_multipart_message_and_skips_attachments():
     assert _plain_text(message) == "Hello from the body."
 
 
+def test_plain_text_finds_the_body_inside_a_realistic_nested_structure():
+    """The common real-world shape for a message with an attachment is
+    multipart/mixed(attachment, multipart/alternative(plain, html)) — a
+    nested multipart, with the attachment listed *before* the actual body
+    in tree order. A shallow "first text/plain part" search would need
+    message.walk()'s recursive traversal to get this right rather than
+    only checking message.get_payload()'s immediate top-level parts."""
+    outer = MIMEMultipart("mixed")
+    attachment = MIMEText("file contents", "plain")
+    attachment.add_header("Content-Disposition", "attachment", filename="report.txt")
+    outer.attach(attachment)
+
+    alternative = MIMEMultipart("alternative")
+    alternative.attach(MIMEText("This is the real body.", "plain", "utf-8"))
+    alternative.attach(MIMEText("<p>This is the real body.</p>", "html", "utf-8"))
+    outer.attach(alternative)
+
+    assert _plain_text(outer) == "This is the real body."
+
+
+def test_plain_text_skips_an_attachment_named_only_via_content_type():
+    """get_filename() recognises a name given either via Content-Disposition
+    or via the Content-Type "name=" parameter — a plain-text attachment
+    using the older, Content-Type-only convention must still be skipped."""
+    message = MIMEMultipart()
+    attachment = MIMEText("file contents", "plain")
+    attachment.set_param("name", "report.txt")
+    message.attach(attachment)
+    message.attach(MIMEText("The real body.", "plain", "utf-8"))
+
+    assert _plain_text(message) == "The real body."
+
+
 def test_plain_text_handles_a_non_multipart_plain_message():
     message = MIMEText("Just one part.", "plain", "utf-8")
     assert _plain_text(message) == "Just one part."
@@ -345,3 +378,38 @@ def test_mail_tool_picks_imap_and_clears_requires_macos_on_this_instance_only():
     # The class-level spec — shared by every other CheckEmailTool built
     # while a provider="apple" config is in effect — must be untouched.
     assert CheckEmailTool.spec.requires_macos is True
+
+
+# -- end-to-end: the real capability, the real registry, a live config switch ----
+
+async def test_check_email_works_end_to_end_with_imap_configured(app, fake_provider, monkeypatch):
+    """Everything up to this point tests ImapMailBackend or _MailTool in
+    isolation. This drives a real app.config_store.update() (which rebuilds
+    the whole tool registry and capability set — core/app.py's
+    _on_config_change) and then the real EmailCapability.handle(), on a
+    host where IS_MACOS is False. If requires_macos had NOT actually been
+    cleared for the IMAP-backed tool, ToolRegistry.call() would refuse the
+    call outright ("That only works on macOS") before ever reaching the
+    backend — so this is also the strongest proof available here that the
+    override genuinely takes effect through the real config pipeline, not
+    only in the narrower _MailTool unit test above."""
+    from jarvis.capabilities.base import Request
+
+    monkeypatch.setattr("jarvis.tools.email.imap_backend.imaplib.IMAP4_SSL", _FakeImap)
+    _FakeImap.messages = {
+        1: _msg("Invoice overdue", "Please pay by Friday", seen=False),
+        2: _msg("Lunch?", "Fancy a sandwich", seen=False),
+    }
+    fake_provider.responses.append("Two messages: an overdue invoice, and a lunch invite.")
+
+    app.config_store.update({"email": {
+        "provider": "imap", "imap_host": "imap.example.com", "smtp_host": "smtp.example.com",
+        "username": "me@example.com", "password": "hunter2",
+    }})
+
+    capability = app.capabilities["email"]
+    response = await capability.handle(
+        Request(text="check my email", args={"intent": "check"}, ctx=app.deps.tool_context())
+    )
+    assert "2 new messages" in response.spoken
+    assert "invoice" in response.text.lower()
