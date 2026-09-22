@@ -201,6 +201,9 @@ class CapabilitiesConfig(BaseModel):
     #: Multi-step app/web operation — page interaction, downloads, installers,
     #: and the automation capability itself. Off turns all of it off at once.
     automation: bool = True
+    reminders: bool = True
+    #: Read-only lookup — JARVIS never creates or edits a contact.
+    contacts: bool = True
 
 
 class ResearchConfig(BaseModel):

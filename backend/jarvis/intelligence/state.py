@@ -280,6 +280,16 @@ class ConversationState:
                 self.last_file = path
                 self.add_entity("file", path, label=path.rsplit("/", 1)[-1], source=tool)
 
+        if category == "contacts":
+            contacts = payload.get("contacts")
+            if isinstance(contacts, list):
+                for contact in contacts:
+                    name = str(contact.get("name") or "")
+                    if name:
+                        self.add_entity("person", name, label=name, source=tool,
+                                        extra={"emails": contact.get("emails", []),
+                                              "phones": contact.get("phones", [])})
+
         if category == "system" and isinstance(payload.get("processes"), list):
             for process in payload["processes"][:6]:
                 name = str(process.get("name", ""))

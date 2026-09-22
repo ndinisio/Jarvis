@@ -200,12 +200,14 @@ def build_registry(deps) -> ToolRegistry:
     from .browser.tools import browser_tools
     from .calendar.tools import calendar_tools
     from .clipboard.tools import clipboard_tools
+    from .contacts.tools import contacts_tools
     from .downloads.installer import installer_tools
     from .downloads.tools import download_tools
     from .email.tools import email_tools
     from .files.tools import file_tools
     from .interaction.tools import interaction_tools
     from .macos.tools import macos_tools
+    from .reminders.tools import reminders_tools
     from .screen.tools import screen_tools
     from .system.tools import system_tools
     from .web.tools import web_tools
@@ -238,5 +240,9 @@ def build_registry(deps) -> ToolRegistry:
         registry.register_all(email_tools(deps))
     if caps.calendar:
         registry.register_all(calendar_tools(deps))
+    if caps.reminders:
+        registry.register_all(reminders_tools(deps))
+    if caps.contacts:
+        registry.register_all(contacts_tools(deps))
     log.info("registered %d tools: %s", len(registry.names()), ", ".join(registry.names()))
     return registry

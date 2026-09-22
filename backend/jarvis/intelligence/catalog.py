@@ -231,6 +231,7 @@ def _derive_returns(spec: ToolSpec) -> str:
         "browser": "page url, title and text",
         "email": "messages with sender, subject and preview",
         "calendar": "events with times and titles",
+        "reminders": "reminders with a title, due date and list",
         "files": "file contents or a listing",
         "research": "sources with titles, urls and extracts",
         "screen": "a description of what is on screen",

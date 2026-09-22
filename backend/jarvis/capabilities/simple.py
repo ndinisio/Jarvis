@@ -154,3 +154,64 @@ class CalendarCapability(ToolPlanCapability):
         if not data or not data.get("title") or not data.get("start"):
             return {"tool": "read_calendar", "args": {"range": "today"}}
         return {"tool": "create_calendar_event", "args": data}
+
+
+class RemindersCapability(ToolPlanCapability):
+    name = "reminders"
+    description = "Reminders: listing, searching, creating and completing them."
+    tools = ("list_reminders", "search_reminders", "create_reminder", "complete_reminder")
+    default_tool = "list_reminders"
+
+    async def plan(self, request: Request) -> dict[str, Any]:
+        lowered = request.text.lower()
+        if any(word in lowered for word in ("done", "complete", "finished", "check off")):
+            return await self._plan_complete(request)
+        if any(word in lowered for word in ("remind me", "add a reminder", "new reminder")):
+            return await self._plan_create(request)
+        return await super().plan(request)
+
+    async def _plan_complete(self, request: Request) -> dict[str, Any]:
+        from ..models.base import ChatMessage
+
+        try:
+            data = await self.models.complete_json(
+                Slot.FAST,
+                [ChatMessage("system", "Extract the reminder title to mark done. JSON only."),
+                 ChatMessage("user", f'Request: "{request.text}"\n\n'
+                                     'Reply: {"title": "..."}')],
+                max_tokens=80,
+            )
+        except Exception:
+            data = None
+        if not data or not data.get("title"):
+            return {"tool": "list_reminders", "args": {}}
+        return {"tool": "complete_reminder", "args": {"title": data["title"]}}
+
+    async def _plan_create(self, request: Request) -> dict[str, Any]:
+        from ..models.base import ChatMessage
+
+        prompt = (
+            'Extract a reminder from the request.\n'
+            f'Request: "{request.text}"\n\n'
+            'Reply with JSON only: {"title": "...", "due": "YYYY-MM-DDTHH:MM or empty", '
+            '"notes": ""}'
+        )
+        try:
+            data = await self.models.complete_json(
+                Slot.GENERAL,
+                [ChatMessage("system", "You extract structured reminders. JSON only."),
+                 ChatMessage("user", prompt)],
+                max_tokens=140,
+            )
+        except Exception:
+            data = None
+        if not data or not data.get("title"):
+            return {"tool": "list_reminders", "args": {}}
+        return {"tool": "create_reminder", "args": data}
+
+
+class ContactsCapability(ToolPlanCapability):
+    name = "contacts"
+    description = "Looking up a contact's email address or phone number."
+    tools = ("search_contacts",)
+    default_tool = "search_contacts"

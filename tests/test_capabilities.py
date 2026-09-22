@@ -13,6 +13,7 @@ from jarvis.tools.calendar.calendar_app import (
     _parse_applescript_date,
     _parse_events,
 )
+from jarvis.tools.contacts.contacts_app import AppleContactsBackend, Contact, _parse_contacts
 from jarvis.tools.email.mail_app import (
     AppleMailBackend,
     Draft,
@@ -21,6 +22,7 @@ from jarvis.tools.email.mail_app import (
     person_name,
     triage,
 )
+from jarvis.tools.reminders.reminders_app import AppleRemindersBackend, Reminder, _parse_reminders
 
 FS = "\x1f"
 RS = "\x1e"
@@ -153,6 +155,119 @@ async def test_calendar_today_is_read_not_reasoned(app, fake_provider, monkeypat
     assert "2 events today" in result.summary
     assert "Standup" in result.summary
     assert fake_provider.calls == []  # answered from the calendar, not a model
+
+
+# --- reminders ----------------------------------------------------------------
+
+def test_reminder_record_parsing():
+    raw = (f"Buy milk{FS}Monday, 5 May 2026 at 09:00:00{FS}2%{FS}Groceries{FS}false{RS}")
+    reminders = _parse_reminders(raw)
+    assert len(reminders) == 1
+    assert reminders[0].title == "Buy milk"
+    assert reminders[0].list_name == "Groceries"
+    assert reminders[0].completed is False
+
+
+async def test_list_reminders_is_read_not_reasoned(app, fake_provider, monkeypatch):
+    async def list_reminders(self, list_name="", include_completed=False, limit=25):
+        return [Reminder(title="Buy milk", list_name="Groceries"),
+                Reminder(title="Call Ada", list_name="Personal")]
+
+    monkeypatch.setattr(AppleRemindersBackend, "list_reminders", list_reminders)
+    monkeypatch.setattr(app.deps.registry.get("list_reminders").spec, "requires_macos", False)
+
+    result = await app.deps.registry.call("list_reminders", {}, app.deps.tool_context())
+    assert result.ok
+    assert "2 reminders" in result.summary
+    assert "Buy milk" in result.summary
+    assert fake_provider.calls == []  # answered from Reminders, not a model
+
+
+async def test_create_reminder_script_is_well_formed(app):
+    backend = AppleRemindersBackend(app.controller)
+    captured: dict = {}
+
+    async def capture(script, timeout=60.0):
+        captured["script"] = script
+        return "ok"
+
+    backend._script = capture
+    reminder = Reminder(title='Buy "milk"', due="2026-05-05T09:00", notes="2%")
+    await backend.create_reminder(reminder, "Groceries")
+
+    script = captured["script"]
+    assert "make new reminder with properties" in script
+    assert '\\"milk\\"' in script
+    assert 'if (name of lst) is "Groceries"' in script
+    assert "set time of dueDate to 32400" in script   # 09:00 in seconds
+
+
+async def test_complete_reminder_reports_when_not_found(app, monkeypatch):
+    async def complete_reminder(self, title, list_name=""):
+        return False
+
+    monkeypatch.setattr(AppleRemindersBackend, "complete_reminder", complete_reminder)
+    monkeypatch.setattr(app.deps.registry.get("complete_reminder").spec, "requires_macos", False)
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
+
+    result = await app.deps.registry.call("complete_reminder", {"title": "Nonexistent"},
+                                          app.deps.tool_context())
+    assert not result.ok
+    assert "couldn't find" in result.summary.lower()
+
+
+# --- contacts -----------------------------------------------------------------
+
+def test_contact_record_parsing():
+    raw = f"Tom Blake{FS}tom@example.com,{FS}555-1234,{FS}Acme{RS}"
+    contacts = _parse_contacts(raw)
+    assert len(contacts) == 1
+    assert contacts[0].name == "Tom Blake"
+    assert contacts[0].emails == ["tom@example.com"]
+    assert contacts[0].phones == ["555-1234"]
+
+
+async def test_search_contacts_is_read_not_reasoned(app, fake_provider, monkeypatch):
+    async def search(self, query, limit=10):
+        return [Contact(name="Tom Blake", emails=["tom@example.com"], phones=["555-1234"])]
+
+    monkeypatch.setattr(AppleContactsBackend, "search", search)
+    monkeypatch.setattr(app.deps.registry.get("search_contacts").spec, "requires_macos", False)
+
+    result = await app.deps.registry.call("search_contacts", {"query": "Tom"},
+                                          app.deps.tool_context())
+    assert result.ok
+    assert "Tom Blake" in result.summary
+    assert "tom@example.com" in result.summary
+    assert fake_provider.calls == []  # answered from Contacts, not a model
+
+
+async def test_search_contacts_with_no_match_says_so(app, monkeypatch):
+    async def search(self, query, limit=10):
+        return []
+
+    monkeypatch.setattr(AppleContactsBackend, "search", search)
+    monkeypatch.setattr(app.deps.registry.get("search_contacts").spec, "requires_macos", False)
+
+    result = await app.deps.registry.call("search_contacts", {"query": "Nobody"},
+                                          app.deps.tool_context())
+    assert result.ok
+    assert "don't have a contact" in result.summary.lower()
+
+
+def test_a_looked_up_contact_becomes_a_person_entity_for_reference_resolution(app):
+    """Feeds intelligence/entities.py's reference resolver, via the same
+    generic ConversationState._absorb dispatch email already uses — no
+    change to the resolver itself was needed, only teaching state.py to
+    recognise the "contacts" category (see docs/extending.md's own
+    "context for free" note)."""
+    app.orchestrator.state.note_observation(
+        "search_contacts", {"query": "brother"}, True, "Tom Blake — tom@example.com",
+        {"contacts": [{"name": "Tom Blake", "emails": ["tom@example.com"], "phones": []}]},
+        "contacts",
+    )
+    people = app.orchestrator.state.entities_of("person")
+    assert any(p.label == "Tom Blake" for p in people)
 
 
 # --- screen -----------------------------------------------------------------

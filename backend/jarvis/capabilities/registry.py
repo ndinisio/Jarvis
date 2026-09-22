@@ -14,7 +14,9 @@ from .simple import (
     BrowserCapability,
     CalendarCapability,
     ClipboardCapability,
+    ContactsCapability,
     FilesCapability,
+    RemindersCapability,
     ScreenCapability,
     SystemCapability,
 )
@@ -44,6 +46,10 @@ def build_capabilities(deps) -> dict[str, Capability]:
         capabilities.append(EmailCapability(deps))
     if caps.calendar:
         capabilities.append(CalendarCapability(deps))
+    if caps.reminders:
+        capabilities.append(RemindersCapability(deps))
+    if caps.contacts:
+        capabilities.append(ContactsCapability(deps))
     if caps.automation:
         capabilities.append(AutomationCapability(deps))
     return {capability.name: capability for capability in capabilities}
