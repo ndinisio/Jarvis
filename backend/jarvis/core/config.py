@@ -205,6 +205,12 @@ class CapabilitiesConfig(BaseModel):
     #: Read-only lookup — JARVIS never creates or edits a contact.
     contacts: bool = True
     messages: bool = True
+    #: Off by default, unlike every flag above — the only tool in this
+    #: package that runs something JARVIS cannot see the contents of (a
+    #: user-authored Shortcut, which could be anything). The per-call
+    #: confirmation is real, but exposing the surface at all is worth
+    #: requiring an explicit, conscious opt-in first.
+    homekit: bool = False
 
 
 class ResearchConfig(BaseModel):

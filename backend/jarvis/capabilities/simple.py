@@ -259,3 +259,46 @@ class MessagesCapability(ToolPlanCapability):
         if not data or not data.get("recipient") or not data.get("body"):
             return {"tool": "read_messages", "args": {}}
         return {"tool": "send_message", "args": data}
+
+
+class HomeKitCapability(ToolPlanCapability):
+    name = "homekit"
+    description = "Controlling HomeKit accessories and scenes by running a named Shortcut."
+    tools = ("list_home_shortcuts", "run_home_shortcut")
+    default_tool = "list_home_shortcuts"
+
+    async def plan(self, request: Request) -> dict[str, Any]:
+        # Discovering what's actually available before asking the model to
+        # pick is the whole point here — guessing a plausible-sounding name
+        # blindly would almost never match a real, user-authored Shortcut,
+        # and this capability has no way to invent one that works.
+        listing = await self.call_tool("list_home_shortcuts", {}, request.ctx)
+        names = (listing.data or {}).get("shortcuts", []) if listing.ok else []
+        if not names:
+            return {"tool": "list_home_shortcuts", "args": {}}
+
+        from ..models.base import ChatMessage
+
+        prompt = (
+            "Which Shortcut, if any, matches the request? Only ever answer with a name "
+            "copied verbatim from the list below — never invent one.\n\n"
+            "Available Shortcuts:\n" + "\n".join(f"- {n}" for n in names) + "\n\n"
+            f'Request: "{request.text}"\n\n'
+            'Reply with JSON only: {"name": "<exact name from the list, or empty if none match>"}'
+        )
+        try:
+            data = await self.models.complete_json(
+                Slot.FAST,
+                [ChatMessage("system", "You match a request to one Shortcut name. JSON only."),
+                 ChatMessage("user", prompt)],
+                max_tokens=100,
+            )
+        except Exception:
+            data = None
+        name = str(data.get("name", "")).strip() if isinstance(data, dict) else ""
+        # A name the model didn't actually copy from the list is treated
+        # exactly like no match — never run a hallucinated name, even by
+        # accident.
+        if not name or name not in names:
+            return {"tool": "list_home_shortcuts", "args": {}}
+        return {"tool": "run_home_shortcut", "args": {"name": name}}

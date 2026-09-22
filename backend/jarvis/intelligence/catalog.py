@@ -233,6 +233,9 @@ def _derive_returns(spec: ToolSpec) -> str:
         "calendar": "events with times and titles",
         "reminders": "reminders with a title, due date and list",
         "messages": "text messages with sender, text and date",
+        # ListHomeShortcutsTool sets its own explicit `returns`; this
+        # fallback only actually applies to run_home_shortcut.
+        "homekit": "whether the Shortcut ran successfully",
         "files": "file contents or a listing",
         "research": "sources with titles, urls and extracts",
         "screen": "a description of what is on screen",

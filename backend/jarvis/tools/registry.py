@@ -205,6 +205,7 @@ def build_registry(deps) -> ToolRegistry:
     from .downloads.tools import download_tools
     from .email.tools import email_tools
     from .files.tools import file_tools
+    from .homekit.tools import homekit_tools
     from .interaction.tools import interaction_tools
     from .macos.tools import macos_tools
     from .messages.tools import messages_tools
@@ -247,5 +248,7 @@ def build_registry(deps) -> ToolRegistry:
         registry.register_all(contacts_tools(deps))
     if caps.messages:
         registry.register_all(messages_tools(deps))
+    if caps.homekit:
+        registry.register_all(homekit_tools(deps))
     log.info("registered %d tools: %s", len(registry.names()), ", ".join(registry.names()))
     return registry
