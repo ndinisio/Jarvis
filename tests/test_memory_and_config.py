@@ -102,6 +102,39 @@ def test_config_persists_without_secrets(tmp_path):
     assert written["models"]["providers"]["openai"]["api_key"] == ""
 
 
+def test_config_persists_without_the_imap_password(tmp_path):
+    config = Config(workspace=str(tmp_path / "ws"))
+    config.email.password = "hunter2"
+    store = ConfigStore(config, tmp_path / "config.json")
+    store.save()
+    written = json.loads((tmp_path / "config.json").read_text())
+    assert written["email"]["password"] == ""
+
+
+def test_email_env_overrides_load_the_password_from_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_EMAIL_IMAP_HOST", "imap.example.com")
+    monkeypatch.setenv("JARVIS_EMAIL_USERNAME", "me@example.com")
+    monkeypatch.setenv("JARVIS_EMAIL_PASSWORD", "hunter2")
+    config = load_config(tmp_path / "missing.json")
+    assert config.email.imap_host == "imap.example.com"
+    assert config.email.username == "me@example.com"
+    assert config.email.password == "hunter2"
+
+
+def test_a_numeric_or_boolean_looking_password_is_never_type_coerced(monkeypatch, tmp_path):
+    """_env_overlay()'s generic type-coercion path (_coerce) turns "123456"
+    into an int and "true" into a bool for ordinary settings — a password
+    that happens to look numeric or boolean-ish must stay a literal string,
+    or the wrong credential is sent to the server."""
+    monkeypatch.setenv("JARVIS_EMAIL_PASSWORD", "123456")
+    config = load_config(tmp_path / "missing.json")
+    assert config.email.password == "123456"
+
+    monkeypatch.setenv("JARVIS_EMAIL_USERNAME", "true")
+    config = load_config(tmp_path / "missing.json")
+    assert config.email.username == "true"
+
+
 def test_config_update_is_deep_merged(config_store):
     config_store.update({"voice": {"wake_word": "computer"}})
     config = config_store.current

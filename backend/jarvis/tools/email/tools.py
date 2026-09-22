@@ -7,17 +7,27 @@ explicit confirmation from the user — no model output can bypass that.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...security.permissions import RiskLevel
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
+from .imap_backend import ImapMailBackend
 from .mail_app import AppleMailBackend, Draft, person_name, triage
 
 
 class _MailTool(Tool):
     def __init__(self, deps):
         self._deps = deps
-        self.backend = AppleMailBackend(deps.controller)
+        if deps.config.email.provider == "imap":
+            self.backend = ImapMailBackend(deps.config.email)
+            # Unlike Mail.app, an IMAP/SMTP server has nothing to do with
+            # macOS — this must not stay True or every email tool would be
+            # refused outright on any other platform (tools/registry.py:
+            # ToolRegistry.call() rejects a requires_macos tool on sight).
+            self.spec = replace(self.spec, requires_macos=False)
+        else:
+            self.backend = AppleMailBackend(deps.controller)
 
 
 class CheckEmailTool(_MailTool):

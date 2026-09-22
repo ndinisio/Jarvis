@@ -289,6 +289,39 @@ class UIConfig(BaseModel):
     reduced_motion: bool = False
 
 
+class EmailConfig(BaseModel):
+    """Which mail backend the email tools drive.
+
+    "apple" (the default) is ``AppleMailBackend`` — Mail.app via
+    AppleScript, macOS only. "imap" is ``ImapMailBackend`` instead — a real
+    IMAP/SMTP server, which works on any platform and covers an account
+    that isn't (or can't be) in Apple Mail. Gmail and Outlook/Microsoft 365
+    have both largely moved off plain password auth for IMAP/SMTP in favour
+    of OAuth; an App Password (still free, still plain-password IMAP under
+    the hood) covers Gmail, and this backend doesn't yet do a full OAuth
+    flow for accounts that require one.
+
+    The password is never a config field the way everything above it is —
+    it comes from the ``JARVIS_EMAIL_PASSWORD`` environment variable only,
+    exactly like a model provider's ``api_key`` (see
+    ``ConfigStore.save()``, which strips both the same way before writing
+    to disk).
+    """
+
+    provider: Literal["apple", "imap"] = "apple"
+    imap_host: str = ""
+    imap_port: int = 993
+    smtp_host: str = ""
+    smtp_port: int = 587
+    username: str = ""
+    password: str = ""
+    #: IMAP mailbox names for drafts/sent aren't standardised — Gmail's
+    #: differ from most other providers' plain "Drafts"/"Sent" — so these
+    #: are configurable rather than hard-coded.
+    drafts_mailbox: str = "Drafts"
+    sent_mailbox: str = "Sent"
+
+
 class Config(BaseModel):
     workspace: str = "~/JARVIS"
     log_level: str = "INFO"
@@ -299,6 +332,7 @@ class Config(BaseModel):
     security: SecurityConfig = SecurityConfig()
     capabilities: CapabilitiesConfig = CapabilitiesConfig()
     research: ResearchConfig = ResearchConfig()
+    email: EmailConfig = EmailConfig()
     memory: MemoryConfig = MemoryConfig()
     intelligence: IntelligenceConfig = IntelligenceConfig()
     automation: AutomationConfig = AutomationConfig()
@@ -370,6 +404,10 @@ _ENV_MAP: dict[str, tuple[str, ...]] = {
     "BRAVE_API_KEY": ("research", "brave_api_key"),
     "SEARXNG_URL": ("research", "searxng_url"),
     "DEVELOPER_MODE": ("ui", "developer_mode"),
+    "EMAIL_IMAP_HOST": ("email", "imap_host"),
+    "EMAIL_SMTP_HOST": ("email", "smtp_host"),
+    "EMAIL_USERNAME": ("email", "username"),
+    "EMAIL_PASSWORD": ("email", "password"),
 }
 
 
@@ -412,8 +450,12 @@ def _env_overlay() -> dict:
     for suffix, path in _ENV_MAP.items():
         raw = os.environ.get(_ENV_PREFIX + suffix)
         if raw not in (None, ""):
-            # api keys / urls stay strings even if they look numeric
-            value = raw if suffix.endswith(("API_KEY", "URL", "MODEL", "HOST")) else _coerce(raw)
+            # api keys / urls / credentials stay strings even if they look
+            # numeric or boolean-ish — a password of "123456" or "true"
+            # must never be silently coerced to an int or a bool.
+            value = (raw if suffix.endswith(("API_KEY", "URL", "MODEL", "HOST", "PASSWORD",
+                                             "USERNAME"))
+                    else _coerce(raw))
             if suffix == "PORT":
                 value = int(raw)
             _set_path(overlay, path, value)
@@ -473,6 +515,7 @@ class ConfigStore:
                 if provider.get("api_key"):
                     provider["api_key"] = ""
             data.get("research", {})["brave_api_key"] = ""
+            data.get("email", {})["password"] = ""
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
