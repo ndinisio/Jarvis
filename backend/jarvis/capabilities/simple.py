@@ -7,6 +7,7 @@ different phrasing there.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..models.registry import Slot
@@ -215,3 +216,46 @@ class ContactsCapability(ToolPlanCapability):
     description = "Looking up a contact's email address or phone number."
     tools = ("search_contacts",)
     default_tool = "search_contacts"
+
+
+#: A bare "send"/"text" as a verb is already a strong, near-unambiguous
+#: signal of intent to send once routing has already put the turn in this
+#: capability — requiring a literal " to " as well missed ordinary phrasing
+#: like "send Tom a text saying I'm running late" (no "to" at all). Neither
+#: word appears in an ordinary read request ("check my messages", "any new
+#: texts?" — plural, so the word boundary excludes it — "what does this
+#: message mean"), so the plain verb alone stays safe.
+_SEND_PATTERN = re.compile(r"\b(send|text)\b")
+
+
+class MessagesCapability(ToolPlanCapability):
+    name = "messages"
+    description = "Reading recent texts/iMessages and sending one (always confirms first)."
+    tools = ("read_messages", "search_messages", "send_message")
+    default_tool = "read_messages"
+
+    async def plan(self, request: Request) -> dict[str, Any]:
+        if _SEND_PATTERN.search(request.text.lower()):
+            return await self._plan_send(request)
+        return await super().plan(request)
+
+    async def _plan_send(self, request: Request) -> dict[str, Any]:
+        from ..models.base import ChatMessage
+
+        prompt = (
+            "Extract who to text and what to say from the request.\n"
+            f'Request: "{request.text}"\n\n'
+            'Reply with JSON only: {"recipient": "phone number, email or name", "body": "..."}'
+        )
+        try:
+            data = await self.models.complete_json(
+                Slot.GENERAL,
+                [ChatMessage("system", "You extract a message recipient and body. JSON only."),
+                 ChatMessage("user", prompt)],
+                max_tokens=140,
+            )
+        except Exception:
+            data = None
+        if not data or not data.get("recipient") or not data.get("body"):
+            return {"tool": "read_messages", "args": {}}
+        return {"tool": "send_message", "args": data}

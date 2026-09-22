@@ -204,6 +204,7 @@ class CapabilitiesConfig(BaseModel):
     reminders: bool = True
     #: Read-only lookup — JARVIS never creates or edits a contact.
     contacts: bool = True
+    messages: bool = True
 
 
 class ResearchConfig(BaseModel):

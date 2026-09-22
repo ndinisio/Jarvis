@@ -207,6 +207,7 @@ def build_registry(deps) -> ToolRegistry:
     from .files.tools import file_tools
     from .interaction.tools import interaction_tools
     from .macos.tools import macos_tools
+    from .messages.tools import messages_tools
     from .reminders.tools import reminders_tools
     from .screen.tools import screen_tools
     from .system.tools import system_tools
@@ -244,5 +245,7 @@ def build_registry(deps) -> ToolRegistry:
         registry.register_all(reminders_tools(deps))
     if caps.contacts:
         registry.register_all(contacts_tools(deps))
+    if caps.messages:
+        registry.register_all(messages_tools(deps))
     log.info("registered %d tools: %s", len(registry.names()), ", ".join(registry.names()))
     return registry
