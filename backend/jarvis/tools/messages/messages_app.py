@@ -101,8 +101,8 @@ class AppleMessagesBackend(MessagesBackend):
     async def search(self, query: str, limit: int = 10) -> list[Message]:
         rows = await asyncio.to_thread(
             self._query,
-            _SELECT + " AND message.text LIKE ? ORDER BY message.date DESC LIMIT ?",
-            (f"%{query}%", limit),
+            _SELECT + " AND message.text LIKE ? ESCAPE '\\' ORDER BY message.date DESC LIMIT ?",
+            (f"%{_escape_like(query)}%", limit),
         )
         return [_row_to_message(row) for row in rows]
 
@@ -148,6 +148,16 @@ WHERE message.text IS NOT NULL AND message.text != ''
 
 def _esc(text: str) -> str:
     return (text or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _escape_like(text: str) -> str:
+    """Reminders/Calendar filter matches in Python, so a plain substring
+    check is enough there; search() filters in SQL instead (chat.db can be
+    far larger than a reminders list), which means "%" and "_" in the
+    user's own search phrase would otherwise be read as SQL LIKE wildcards
+    rather than literal characters — "100% done" silently becoming a much
+    broader, wrong match instead of the phrase actually typed."""
+    return (text or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _row_to_message(row: tuple) -> Message:

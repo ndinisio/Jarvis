@@ -48,10 +48,13 @@ def _build_chat_db(path: Path) -> None:
             (2, "No worries, see you soon", 725000100000000000, 1, None),
             (3, "Don't forget the milk", 700000000, 0, 2),   # legacy seconds-scale
             (4, None, 725000200000000000, 0, 1),             # rich-text only, no plain text
+            (5, "Battery at 100% now", 725000300000000000, 0, 1),
+            (6, "Wrong number, please stop", 725000400000000000, 0, 2),
+            (7, "Room 100 is free", 725000500000000000, 0, 1),
         ],
     )
     conn.executemany("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
-                     [(1, 1), (1, 2), (1, 3)])
+                     [(1, 1), (1, 2), (1, 3), (1, 5), (1, 6), (1, 7)])
     conn.commit()
     conn.close()
 
@@ -90,7 +93,7 @@ async def test_recent_orders_newest_first_and_skips_rich_text_only_rows(backend)
     messages = await backend.recent(limit=10)
     # Row 4 (text is NULL) must never appear.
     assert all(m.text for m in messages)
-    assert [m.id for m in messages] == ["2", "1", "3"]  # newest date first
+    assert [m.id for m in messages] == ["7", "6", "5", "2", "1", "3"]  # newest date first
 
 
 async def test_recent_maps_is_from_me_and_the_sender_handle(backend):
@@ -104,6 +107,33 @@ async def test_search_matches_message_text_only(backend):
     hits = await backend.search("milk")
     assert [m.id for m in hits] == ["3"]
     assert (await backend.search("nonexistent-phrase")) == []
+
+
+async def test_search_treats_a_literal_percent_sign_as_literal(backend):
+    """Reminders/Calendar filter matches in Python, so a plain substring
+    check is naturally literal; search() filters in SQL instead (chat.db
+    can be far larger than a reminders list), which means "%" in the query
+    needs explicit escaping or it's read as a SQL LIKE wildcard. Row 5
+    ("Battery at 100% now") contains the literal phrase "100%"; row 7
+    ("Room 100 is free") contains "100" but not "100%" — without escaping,
+    the trailing "%" in the query is just a wildcard and "100%" behaves
+    exactly like searching "100", wrongly pulling row 7 in too. Verified
+    empirically before writing this: an unescaped LIKE '%100%%' really
+    does match both rows, and the escaped, correct version matches only
+    row 5."""
+    hits = await backend.search("100%")
+    assert [m.id for m in hits] == ["5"]
+
+
+async def test_search_treats_a_literal_underscore_as_literal(backend):
+    """Same concern as the "%" case, for SQL LIKE's other wildcard: "_"
+    matches exactly one arbitrary character unless escaped. Row 6's text
+    is "Wrong number, please stop" — a single space sits between "wrong"
+    and "number", which an unescaped "_" wildcard would match, wrongly
+    pulling this row into a search for the literal string "wrong_number"
+    (an actual underscore, which appears nowhere in the fixture)."""
+    hits = await backend.search("wrong_number")
+    assert hits == []
 
 
 async def test_reading_an_inaccessible_database_reports_full_disk_access(app, tmp_path):
