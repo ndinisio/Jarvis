@@ -24,6 +24,7 @@ from ..tools.macos.controller import MacOSController
 from ..tools.registry import build_registry
 from ..tools.system.diagnostics import Diagnostics
 from ..tools.system.info import SystemInfo
+from ..vision.watcher import ScreenWatcher
 from ..voice.manager import VoiceManager
 from .config import ConfigStore, create_store
 from .deps import Deps
@@ -83,6 +84,11 @@ class JarvisApp:
         # long-running work (see core/narration.py) reaches it through here.
         self.deps.voice = self.voice
 
+        # Off by default (capabilities.screen_awareness) — see vision/watcher.py.
+        # Construction is cheap and side-effect free; start()/stop() below are
+        # what actually gate on the config flag.
+        self.screen_watcher = ScreenWatcher(self.deps)
+
         self.orchestrator = Orchestrator(
             self.deps, self.router, self.capabilities, self.personality, self.voice
         )
@@ -103,6 +109,8 @@ class JarvisApp:
             await self.voice.probe()
             if self.config.voice.enabled:
                 asyncio.create_task(self.voice.start())
+        if self.config.capabilities.screen_awareness and self.config.security.allow_screen_capture:
+            asyncio.create_task(self.screen_watcher.start())
         # Warm the fast model so the first real request isn't the cold one.
         asyncio.create_task(self._warmup())
 
@@ -130,6 +138,7 @@ class JarvisApp:
         if self.voice is not None:
             await self.voice.stop_speaking()
             await self.voice.stop()
+        await self.screen_watcher.stop()
         await self.tasks.shutdown()
         await self.models.close()
         self.memory.close()
@@ -156,6 +165,7 @@ class JarvisApp:
         config.ensure_workspace()
         if self.voice is not None:
             self.voice.reconfigure(config)
+        self.screen_watcher.reconfigure(config)
         self.bus.publish(EventType.CONFIG, config=_public_config(config))
 
     # ------------------------------------------------------------------

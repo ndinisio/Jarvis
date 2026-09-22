@@ -439,6 +439,59 @@ async def test_screen_analysis_without_a_vision_model(app, fake_provider, monkey
     assert result.display["image"]
 
 
+async def test_watch_screen_only_registered_when_screen_awareness_is_on(app):
+    from jarvis.security.permissions import RiskLevel
+
+    assert app.deps.registry.get("watch_screen") is None
+    app.config_store.update({"capabilities": {"screen_awareness": True}})
+    try:
+        tool = app.deps.registry.get("watch_screen")
+        assert tool is not None
+        assert tool.spec.risk == RiskLevel.LOW
+        assert tool.spec.category == "screen"
+    finally:
+        # Enabling the flag above also live-starts app.screen_watcher (see
+        # core/app.py's _on_config_change wiring); stop it explicitly rather
+        # than relying on the fire-and-forget stop the flag flip below
+        # schedules, so nothing is still pending when the test ends.
+        await app.screen_watcher.stop()
+
+    app.config_store.update({"capabilities": {"screen_awareness": False}})
+    assert app.deps.registry.get("watch_screen") is None
+
+
+async def test_watch_screen_uses_the_screen_watch_slot_and_stays_quiet(
+    app, fake_provider, monkeypatch, tmp_path
+):
+    """watch_screen must never populate `display` (nothing pops up in the UI
+    for the background watcher, unlike analyse_screen) but must still resolve
+    through Slot.SCREEN_WATCH — which, unconfigured, defers to Slot.VISION —
+    rather than being hard-coded to Slot.VISION directly."""
+    from pathlib import Path
+
+    async def fake_capture(self, path=None, **kwargs):
+        target = Path(path) if path else tmp_path / "shot.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_tiny_png())
+        return target
+
+    monkeypatch.setattr(app.controller.__class__, "capture_screen", fake_capture)
+    app.config_store.update({"capabilities": {"screen_awareness": True}})
+    fake_provider.responses.append("Nothing new — still the code editor.")
+
+    try:
+        result = await app.deps.registry.call("watch_screen", {}, app.deps.tool_context())
+        assert result.ok
+        assert "code editor" in result.summary
+        assert result.display is None
+        assert fake_provider.calls[-1]["messages"][-1].images
+    finally:
+        # Enabling the flag above also live-starts app.screen_watcher (see
+        # core/app.py's _on_config_change wiring) — stop it so it doesn't
+        # keep polling in the background past this test.
+        await app.screen_watcher.stop()
+
+
 # --- diagnostics ------------------------------------------------------------
 
 async def test_diagnostics_separates_observation_from_inference(app, fake_provider, monkeypatch):

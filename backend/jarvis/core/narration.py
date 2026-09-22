@@ -5,7 +5,9 @@ something and then heard nothing for half a minute. :class:`ActionNarrator`
 turns the same per-step activity text a background task already produces
 (see ``tasks/manager.py: TaskManager.step``) into short spoken lines,
 reusing the existing speech queue (``voice/manager.py: VoiceManager.enqueue``)
-rather than building a second pipeline.
+rather than building a second pipeline. The background screen watcher
+(``vision/watcher.py``) reuses it too, for its own optional narration —
+see ``conf_attr`` below.
 
 Two triggers, both throttled by one shared minimum gap so a slow step right
 after a milestone announcement never talks over it:
@@ -29,13 +31,18 @@ log = get_logger("jarvis.narration")
 
 
 class ActionNarrator:
-    def __init__(self, deps):
+    def __init__(self, deps, *, conf_attr: str = "automation"):
+        """*conf_attr* names the ``Config`` field holding this narrator's own
+        ``narration_min_gap_s`` (and, for :meth:`maybe_narrate`,
+        ``narration_action_threshold_s``) — ``AutomationConfig`` by default,
+        so every existing call site is unaffected."""
         self._deps = deps
+        self._conf_attr = conf_attr
         self._last_spoken = 0.0
 
     @property
     def _conf(self):
-        return self._deps.config.automation
+        return getattr(self._deps.config, self._conf_attr)
 
     def _voice(self):
         voice = getattr(self._deps, "voice", None)

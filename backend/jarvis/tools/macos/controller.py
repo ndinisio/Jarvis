@@ -272,7 +272,7 @@ class MacOSController:
             if interactive:
                 argv.append("-i")
             elif window:
-                argv += ["-o", "-l", await self._frontmost_window_id()]
+                argv += ["-o", "-l", await self.frontmost_window_id()]
             if display is not None:
                 argv += ["-D", str(display)]
             argv.append(str(target))
@@ -295,7 +295,7 @@ class MacOSController:
             detail="no screencapture/grim/scrot binary found",
         )
 
-    async def _frontmost_window_id(self) -> str:
+    async def frontmost_window_id(self) -> str:
         result = await self.osascript(
             'tell application "System Events" to tell (first application process whose frontmost '
             "is true) to return value of attribute \"AXWindowNumber\" of front window"

@@ -68,6 +68,12 @@ class ModelsConfig(BaseModel):
     general: ModelSlotConfig = ModelSlotConfig(model="llama3.1:8b", max_tokens=900, timeout_s=120.0)
     #: Vision model: screen understanding.
     vision: ModelSlotConfig = ModelSlotConfig(model="llava:7b", max_tokens=600, timeout_s=180.0)
+    #: Cheap, frequent captures for the background screen watcher (see
+    #: ScreenAwarenessConfig). Left empty it defers to ``vision``, so nothing
+    #: has to be installed for it to work; set a small/fast model here (e.g.
+    #: ``moondream``) to keep the watcher's frequent calls cheap without
+    #: touching on-demand `analyse_screen` quality.
+    screen_watch: ModelSlotConfig = ModelSlotConfig(model="", max_tokens=300, timeout_s=30.0)
     #: Deliberate model: understanding, planning, tool choice, verification and
     #: repair. Left empty it defers to ``general``, so JARVIS is intelligent out
     #: of the box; set a model here to give the agentic loop a stronger brain
@@ -104,6 +110,7 @@ class ModelsConfig(BaseModel):
                 "llama3.2:3b",
             ],
             "specialist": [],
+            "screen_watch": [],
         }
     )
 
@@ -185,7 +192,11 @@ class SecurityConfig(BaseModel):
     )
     #: Never transmit clipboard contents to a remote provider without asking.
     clipboard_remote_guard: bool = True
-    #: Screen capture is on demand only. There is no continuous-capture mode.
+    #: Screen capture is on demand by default. A separate, off-by-default
+    #: ``capabilities.screen_awareness`` setting enables a throttled
+    #: background watcher (see ScreenAwarenessConfig) — a cheap constant poll
+    #: gating occasional, cooldown-limited vision-model calls, never literal
+    #: continuous inference.
     allow_screen_capture: bool = True
 
 
@@ -211,6 +222,13 @@ class CapabilitiesConfig(BaseModel):
     #: confirmation is real, but exposing the surface at all is worth
     #: requiring an explicit, conscious opt-in first.
     homekit: bool = False
+    #: Off by default, for a stronger version of the same reason as
+    #: ``homekit`` above: a background watcher that polls what app/window is
+    #: frontmost and occasionally looks at the screen unprompted operates
+    #: continuously and invisibly over the single most sensitive surface on
+    #: the machine. See ScreenAwarenessConfig for its tuning. Requires
+    #: ``screen`` to also be on.
+    screen_awareness: bool = False
 
 
 class ResearchConfig(BaseModel):
@@ -303,6 +321,30 @@ class AutomationConfig(BaseModel):
     max_download_mb: int = 2048
 
 
+class ScreenAwarenessConfig(BaseModel):
+    """The background screen watcher (``capabilities.screen_awareness``).
+
+    Deliberately two independent throttles: the cheap frontmost-app/window
+    poll runs constantly at ``poll_interval_s``, but it only ever *gates* the
+    real vision-model call, which is separately rate-limited by
+    ``min_vision_interval_s`` — so rapid app-switching (Cmd-Tab cycling)
+    can't fire a vision call per switch.
+    """
+
+    #: How often the cheap (app name, window id) signal is polled.
+    poll_interval_s: float = 2.0
+    #: Minimum gap between two actual vision-model calls, regardless of how
+    #: often the cheap signal changes in between.
+    min_vision_interval_s: float = 8.0
+    #: Off by default — the watcher's core job is silently keeping
+    #: ConversationState.screen fresh; this additionally speaks a short line
+    #: (via the same narration machinery long-running tasks use) whenever a
+    #: watch capture completes.
+    narrate: bool = False
+    #: Minimum gap between two spoken narration lines.
+    narration_min_gap_s: float = 20.0
+
+
 class UIConfig(BaseModel):
     developer_mode: bool = False
     show_telemetry: bool = True
@@ -357,6 +399,7 @@ class Config(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     intelligence: IntelligenceConfig = IntelligenceConfig()
     automation: AutomationConfig = AutomationConfig()
+    screen_awareness: ScreenAwarenessConfig = ScreenAwarenessConfig()
     ui: UIConfig = UIConfig()
     #: Set once the first-run walkthrough has been completed.
     onboarding_complete: bool = False

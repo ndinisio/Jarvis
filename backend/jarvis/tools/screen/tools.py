@@ -1,9 +1,17 @@
 """Screen capture and visual understanding.
 
-Capture is strictly on demand. There is no polling loop, no background
-screenshot timer and no silent upload: a capture happens only because a tool
-call asked for one, the image is written into the workspace, and the same image
-is shown in the UI so the user sees exactly what JARVIS saw.
+Capture is on demand by default: `capture_screen`/`analyse_screen` only ever
+run because a tool call asked for one, the image is written into the
+workspace, and the same image is shown in the UI so the user sees exactly
+what JARVIS saw. `watch_screen` is the one exception — it exists for the
+background screen watcher (`vision/watcher.py`, gated behind the
+off-by-default `capabilities.screen_awareness`), which polls a cheap signal
+constantly but only calls `watch_screen` — a real capture and a real
+vision-model call — when that signal changes, and even then no more often
+than `ScreenAwarenessConfig.min_vision_interval_s`. It deliberately shows
+nothing in the UI and never uploads an image anywhere new; it just keeps
+`ConversationState.screen` fresh via the same tool-result plumbing every
+other tool uses.
 """
 
 from __future__ import annotations
@@ -94,17 +102,8 @@ class AnalyseScreenTool(Tool):
         ctx.report("Analysing the image…", tool="analyse_screen")
 
         question = args.get("question") or "Describe what is on this screen."
-        prompt = (
-            "You are looking at a screenshot of the user's Mac. Answer precisely and briefly. "
-            "Read any visible text exactly. If the question can't be answered from the image, "
-            "say so plainly.\n\nQuestion: " + question
-        )
-        messages = [
-            ChatMessage("system", "You describe screenshots factually and concisely."),
-            ChatMessage("user", prompt, images=[capture["base64"]]),
-        ]
         try:
-            completion = await self._deps.models.complete(Slot.VISION, messages)
+            completion = await _describe_capture(self._deps, capture, question, Slot.VISION)
         except ModelUnavailable as exc:
             return ToolResult(
                 ok=False,
@@ -120,6 +119,69 @@ class AnalyseScreenTool(Tool):
             summary=answer,
             display={"kind": "image", "title": "Screen analysis", "image": capture["data_url"],
                      "path": str(capture["path"]), "text": answer},
+        )
+
+
+async def _describe_capture(deps, capture: dict[str, Any], question: str, slot: str):
+    """Ask a vision-capable slot about a capture. Raises ModelUnavailable if none is ready."""
+    prompt = (
+        "You are looking at a screenshot of the user's Mac. Answer precisely and briefly. "
+        "Read any visible text exactly. If the question can't be answered from the image, "
+        "say so plainly.\n\nQuestion: " + question
+    )
+    messages = [
+        ChatMessage("system", "You describe screenshots factually and concisely."),
+        ChatMessage("user", prompt, images=[capture["base64"]]),
+    ]
+    return await deps.models.complete(slot, messages)
+
+
+_WATCH_PROMPT = (
+    "Briefly describe what's changed on screen and flag anything that plainly needs the "
+    "user's attention (an error, a finished download, a blocking dialog)."
+)
+
+
+class WatchScreenTool(Tool):
+    """Internal tool for the background screen watcher (see vision/watcher.py).
+
+    Not offered to the planner/model shortlist — the watcher calls it
+    directly through the registry, which is what gets its result absorbed
+    into ConversationState.screen for free (see intelligence/state.py:
+    attach()/_absorb(), category == "screen"). Deliberately no `display`
+    payload: unlike analyse_screen, this never shows an image in the UI —
+    the watcher's whole point is to stay silent unless narration is
+    separately enabled.
+    """
+
+    spec = ToolSpec(
+        name="watch_screen",
+        description="Capture the screen and briefly note what changed, for the background watcher",
+        parameters={"type": "object", "properties": {}},
+        risk=RiskLevel.LOW,
+        category="screen",
+        expected_ms=3000,
+    )
+
+    def __init__(self, deps):
+        self._deps = deps
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if not self._deps.config.security.allow_screen_capture:
+            return ToolResult.failure("Screen capture is disabled in the configuration.")
+        capture = await capture_to_workspace(self._deps, ctx, "full")
+        ctx.raise_if_cancelled()
+        try:
+            completion = await _describe_capture(self._deps, capture, _WATCH_PROMPT, Slot.SCREEN_WATCH)
+        except ModelUnavailable as exc:
+            return ToolResult.failure(
+                "The screen watcher's vision model isn't available.",
+                detail=exc.detail or exc.user_message,
+            )
+        answer = completion.text.strip()
+        return ToolResult(
+            data={"answer": answer, "path": str(capture["path"]), "model": completion.model},
+            summary=answer,
         )
 
 
@@ -170,4 +232,7 @@ def _png_size(data: bytes) -> tuple[int, int]:
 
 
 def screen_tools(deps) -> list[Tool]:
-    return [CaptureScreenTool(deps), AnalyseScreenTool(deps)]
+    tools: list[Tool] = [CaptureScreenTool(deps), AnalyseScreenTool(deps)]
+    if deps.config.capabilities.screen_awareness:
+        tools.append(WatchScreenTool(deps))
+    return tools

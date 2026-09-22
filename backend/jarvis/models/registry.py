@@ -49,6 +49,11 @@ class Slot:
     REASONING = "reasoning"
     VISION = "vision"
     SPECIALIST = "specialist"
+    #: Frequent, cheap background captures for the screen watcher — separate
+    #: from VISION so a background poll never has to share cost/quality
+    #: tradeoffs with on-demand `analyse_screen`. Defers to VISION when
+    #: unconfigured, so a fresh install works unchanged.
+    SCREEN_WATCH = "screen_watch"
 
 
 #: Where a slot with no model of its own sends its work. Followed transitively,
@@ -56,6 +61,7 @@ class Slot:
 SLOT_DEFERS_TO = {
     Slot.REASONING: Slot.GENERAL,
     Slot.SPECIALIST: Slot.REASONING,
+    Slot.SCREEN_WATCH: Slot.VISION,
 }
 
 
@@ -346,7 +352,7 @@ def _heuristic_pick(slot: str, installed: list[str]) -> str | None:
     usable = [m for m in installed if not _is_embedding(m)]
     if not usable:
         return None
-    if slot == Slot.VISION:
+    if slot in (Slot.VISION, Slot.SCREEN_WATCH):
         vision = [m for m in usable if _is_vision(m)]
         return sorted(vision, key=_size_rank)[0] if vision else None
     chat = [m for m in usable if not _is_vision(m)] or usable

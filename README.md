@@ -701,9 +701,14 @@ the model is never the thing that decides whether to ask you.
 * **The clipboard is treated as sensitive.** Credential-shaped contents are
   shown on screen but never read aloud, and never sent to a remote provider
   while `clipboard_remote_guard` is on.
-* **Screen capture is on demand only.** There is no polling loop and no
-  background capture. Captures are written to `~/JARVIS/captures` and shown in
-  the interface so you always see what JARVIS saw.
+* **Screen capture is on demand by default.** Captures are written to
+  `~/JARVIS/captures` and shown in the interface so you always see what
+  JARVIS saw. A separate, off-by-default setting
+  (`capabilities.screen_awareness`) enables a background watcher: a cheap
+  constant poll of which app/window is frontmost that only ever gates
+  occasional, cooldown-limited vision-model calls — never literally
+  continuous inference, and never shown in the interface unless you ask or
+  turn on its own narration toggle.
 * **Confirmations time out.** No answer within 90 seconds means no.
 
 Details: [`docs/security.md`](docs/security.md).
@@ -1007,7 +1012,9 @@ won't be reachable this way.
   becomes a question.
 * Email is Apple Mail only (the `MailBackend` interface is there for IMAP).
 * Research reads static HTML; it doesn't run JavaScript-heavy pages.
-* Vision is single-screenshot; no continuous monitoring (by design).
+* Vision is single-screenshot on demand by default; an off-by-default
+  background watcher (`capabilities.screen_awareness`) adds throttled,
+  change-gated screen awareness — see the screen-capture note above.
 * The interface is a local web app served by the backend, not a signed `.app`.
 * `openwakeword` only ships pretrained models for a few phrases. "Jarvis" is one
   of them; a custom wake word needs the Whisper wake engine or a trained model.

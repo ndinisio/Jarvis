@@ -32,6 +32,23 @@ def test_heuristic_picks_by_size_and_kind():
     assert _heuristic_pick(Slot.VISION, ["llama3.1:8b"]) is None
 
 
+def test_heuristic_treats_screen_watch_as_a_vision_slot():
+    """A misconfigured/uninstalled models.screen_watch.model must still fall
+    back to a vision-capable model, not the chat-model heuristic — the same
+    guarantee Slot.VISION itself gets."""
+    installed = ["llama3.1:8b", "qwen2.5:1.5b", "llava:7b", "nomic-embed-text"]
+    assert _heuristic_pick(Slot.SCREEN_WATCH, installed) == "llava:7b"
+    assert _heuristic_pick(Slot.SCREEN_WATCH, ["llama3.1:8b"]) is None
+
+
+def test_screen_watch_slot_defers_to_vision_when_unconfigured(app):
+    assert app.config.models.screen_watch.model == ""
+    assert app.models.effective_slot(Slot.SCREEN_WATCH) == Slot.VISION
+
+    app.config.models.screen_watch.model = "moondream"
+    assert app.models.effective_slot(Slot.SCREEN_WATCH) == Slot.SCREEN_WATCH
+
+
 async def test_slot_resolution_substitutes_missing_models(app, fake_provider):
     fake_provider._models = ["qwen2.5:1.5b", "qwen2.5:7b"]
     app.models._catalog.clear()
