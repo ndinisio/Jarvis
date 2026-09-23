@@ -379,8 +379,6 @@ button { cursor: pointer; }
 /* --- reasoning ------------------------------------------------------------ */
 
 .reason { margin-bottom: 12px; border-color: rgba(95, 211, 243, 0.22); }
-.reason[data-done='true'] { border-color: var(--line); }
-.reason__cost { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); }
 .reason__objective { margin: 0; font-size: 12.5px; line-height: 1.45; }
 .reason__context {
   margin: 4px 0 0; font-family: var(--mono); font-size: 10px; color: var(--text-faint);

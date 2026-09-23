@@ -167,7 +167,6 @@ async def test_start_asks_once_then_probes_screen_recording_permission(app, monk
 
     assert await watcher.start() is True
     assert watcher.running is True
-    assert watcher._consented is True
     await watcher.stop()
     assert watcher.running is False
 
@@ -244,3 +243,128 @@ async def test_reconfigure_starts_and_stops_the_watcher_live(app, monkeypatch):
     app.config_store.update({"capabilities": {"screen_awareness": False}})
     await asyncio.sleep(0.05)
     assert app.screen_watcher.running is False
+
+
+# -- verification round: race conditions, gating, consent -------------------
+
+async def test_consent_is_never_cached_locally(app, monkeypatch):
+    """_consent() must always defer to the permission broker rather than a
+    local flag — a local cache would drift from a revoked session grant
+    (PermissionBroker.revoke_session_grants()) with no way to reach it."""
+    app.config.capabilities.screen_awareness = True
+    calls = []
+
+    async def require(*args, **kwargs):
+        calls.append(1)
+        return True
+
+    monkeypatch.setattr(app.deps.permissions, "require", require)
+    watcher = ScreenWatcher(app.deps)
+
+    assert await watcher._consent() is True
+    assert await watcher._consent() is True
+    assert len(calls) == 2, "each call must reach the broker — nothing short-circuits locally"
+
+
+async def test_start_refuses_if_config_changes_during_a_slow_consent(app, monkeypatch):
+    """A config flip to screen_awareness=False that lands while start() is
+    still awaiting a live confirmation must stop the loop from being created
+    at all — not merely go undetected until some later, unrelated config
+    write happens to call reconfigure() again."""
+    app.config.capabilities.screen_awareness = True
+
+    async def require(*args, **kwargs):
+        # Simulate the config changing while the (slow, real-world) consent
+        # prompt is still pending — exactly the window the bug lived in.
+        app.config.capabilities.screen_awareness = False
+        return True
+
+    async def check_permission(kind):
+        return True, "ok"
+
+    monkeypatch.setattr(app.deps.permissions, "require", require)
+    monkeypatch.setattr(app.deps.controller, "check_permission", check_permission)
+    watcher = ScreenWatcher(app.deps)
+
+    assert await watcher.start() is False
+    assert watcher.running is False
+
+
+async def test_stop_is_serialized_with_a_concurrent_start(app, monkeypatch):
+    """stop() must share start()'s lock — otherwise a stop() and a start()
+    scheduled back-to-back by two rapid reconfigure() calls can race, with
+    stop() clearing a _watch_task a slightly-later start() just created."""
+    app.config.capabilities.screen_awareness = True
+    app.config.security.auto_approve = ["low", "medium"]
+    app.config.screen_awareness.poll_interval_s = 100.0
+
+    async def check_permission(kind):
+        await asyncio.sleep(0)  # force a genuine interleave, as in the start()x2 test above
+        return True, "ok"
+
+    monkeypatch.setattr(app.deps.controller, "check_permission", check_permission)
+    watcher = ScreenWatcher(app.deps)
+
+    await asyncio.gather(watcher.start(), watcher.stop())
+    # Whichever order the two actually resolved in, a stop() that was
+    # explicitly requested must win — the watcher must not be left running.
+    assert watcher.running is False
+
+
+async def test_refuses_to_run_when_screen_capability_is_off(app, monkeypatch):
+    """screen_awareness=True with capabilities.screen=False must not run —
+    watch_screen is never registered in that combination (screen_tools()
+    only registers it when caps.screen is also on), so a running watcher
+    would silently no-op on every capture forever."""
+    app.config.capabilities.screen_awareness = True
+    app.config.capabilities.screen = False
+    app.config.security.auto_approve = ["low", "medium"]
+
+    async def check_permission(kind):
+        return True, "ok"
+
+    monkeypatch.setattr(app.deps.controller, "check_permission", check_permission)
+    watcher = ScreenWatcher(app.deps)
+
+    assert await watcher.start() is False
+    assert watcher.running is False
+
+
+async def test_reconfigure_should_run_requires_the_screen_capability_too(app):
+    app.config.capabilities.screen_awareness = True
+    app.config.capabilities.screen = False
+    assert ScreenWatcher._should_run(app.config) is False
+
+    app.config.capabilities.screen = True
+    assert ScreenWatcher._should_run(app.config) is True
+
+
+async def test_first_capture_is_not_suppressed_by_a_low_monotonic_clock(app, monkeypatch):
+    """_last_vision_call must start as None, not 0.0 — a 0.0 sentinel would
+    read as "just called" on a host where time.monotonic() starts near
+    zero (e.g. a freshly booted container), silently dropping the very
+    first legitimate capture after startup."""
+    import time as time_module
+
+    monkeypatch.setattr(time_module, "monotonic", lambda: 0.001)
+    signal = _signal(app, monkeypatch)
+    calls = _enable_and_stub_watch_screen(app, monkeypatch)
+    watcher = ScreenWatcher(app.deps)
+    assert watcher._last_vision_call is None
+
+    signal.app, signal.window = "Safari", "1"
+    await watcher._poll_once()
+    assert len(calls) == 1, "the first capture must not be treated as still in cooldown"
+
+
+async def test_screen_awareness_config_has_the_narration_threshold_field(app):
+    """ActionNarrator.maybe_narrate() reads narration_action_threshold_s
+    unconditionally — ScreenAwarenessConfig must define it (even though
+    ScreenWatcher only ever calls .phase() today) or any future
+    .maybe_narrate() call against conf_attr="screen_awareness" would raise
+    AttributeError."""
+    from jarvis.core.narration import ActionNarrator
+
+    assert hasattr(app.config.screen_awareness, "narration_action_threshold_s")
+    narrator = ActionNarrator(app.deps, conf_attr="screen_awareness")
+    assert narrator.maybe_narrate("test", expected_ms=0, elapsed_ms=0) in (True, False)

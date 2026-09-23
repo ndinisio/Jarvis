@@ -153,6 +153,21 @@ class KokoroTTS(TTSEngine):
         self.lang = lang
         self._model: Any = None
         self._load_lock = asyncio.Lock()
+        #: Serialises speak() the same way MacSayTTS._lock does — without it,
+        #: two overlapping calls (e.g. the /api/voice/speak route firing
+        #: while a streamed reply is mid-drain) would each spawn a worker
+        #: thread writing the same self._stream, and stop() could see one
+        #: thread's cleanup clear it while the other is still playing.
+        self._speak_lock = asyncio.Lock()
+        #: True for the whole span of one speak() call — synthesis and
+        #: playback both — so stop() can report "yes, something was
+        #: interrupted" even during synthesis, before self._stream exists.
+        self._speaking = False
+        #: Checked right after synthesis finishes and again immediately
+        #: before opening the output stream — the closest this gets to
+        #: barge-in during synthesis without a cancellation hook into
+        #: kokoro-onnx's own (CPU-bound, non-async) inference call.
+        self._stop_requested = False
         #: The in-flight sounddevice output stream, if any — stop() aborts it
         #: from whatever thread called stop(), which is what sounddevice's
         #: stream objects are meant to support.
@@ -163,9 +178,13 @@ class KokoroTTS(TTSEngine):
             import kokoro_onnx  # noqa: F401
         except ImportError:
             return False, 'kokoro-onnx isn\'t installed (pip install -e ".[kokoro]")'
-        if not self.model_path or not Path(self.model_path).exists():
+        try:
+            import sounddevice  # noqa: F401
+        except ImportError:
+            return False, 'sounddevice isn\'t installed (pip install -e ".[voice]")'
+        if not self.model_path or not Path(self.model_path).is_file():
             return False, "kokoro_model_path isn't set to a downloaded .onnx model"
-        if not self.voices_path or not Path(self.voices_path).exists():
+        if not self.voices_path or not Path(self.voices_path).is_file():
             return False, "kokoro_voices_path isn't set to a downloaded voices file"
         return True, "ok"
 
@@ -195,25 +214,44 @@ class KokoroTTS(TTSEngine):
         text = (text or "").strip()
         if not text:
             return False
-        await self.warmup()
-        if self._model is None:
-            return False
-        try:
-            samples, sample_rate = await asyncio.to_thread(
-                self._model.create, text, voice=self.voice, speed=self.speed, lang=self.lang,
-            )
-        except Exception as exc:
-            log.warning("kokoro synthesis failed: %s", exc)
-            return False
-        try:
-            await asyncio.to_thread(self._play_blocking, samples, sample_rate)
-        except asyncio.CancelledError:
-            await self.stop()
-            raise
-        except Exception as exc:
-            log.debug("kokoro playback ended early: %s", exc)
-            return False
-        return True
+        async with self._speak_lock:
+            self._speaking = True
+            self._stop_requested = False
+            try:
+                try:
+                    await self.warmup()
+                except Exception as exc:
+                    # A broken model file must fail this one speak() call,
+                    # not propagate: uncaught, this would surface only via
+                    # VoiceManager's wake-ack path straight into
+                    # _listen_loop()'s outer handler, tearing down wake-word
+                    # detection and STT along with it — an outsized blast
+                    # radius for an isolated TTS problem.
+                    log.warning("kokoro model failed to load: %s", exc)
+                    return False
+                if self._model is None:
+                    return False
+                try:
+                    samples, sample_rate = await asyncio.to_thread(
+                        self._model.create, text, voice=self.voice, speed=self.speed,
+                        lang=self.lang,
+                    )
+                except Exception as exc:
+                    log.warning("kokoro synthesis failed: %s", exc)
+                    return False
+                if self._stop_requested:
+                    return False
+                try:
+                    await asyncio.to_thread(self._play_blocking, samples, sample_rate)
+                except asyncio.CancelledError:
+                    await self.stop()
+                    raise
+                except Exception as exc:
+                    log.debug("kokoro playback ended early: %s", exc)
+                    return False
+                return True
+            finally:
+                self._speaking = False
 
     def _play_blocking(self, samples: Any, sample_rate: int) -> None:
         """Runs in a worker thread. ``stop()`` aborts ``self._stream`` from
@@ -221,6 +259,8 @@ class KokoroTTS(TTSEngine):
         import numpy as np
         import sounddevice as sd
 
+        if self._stop_requested:
+            return
         stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32")
         self._stream = stream
         try:
@@ -233,12 +273,13 @@ class KokoroTTS(TTSEngine):
             self._stream = None
 
     async def stop(self) -> bool:
+        was_speaking = self._speaking
+        self._stop_requested = True
         stream = self._stream
-        if stream is None:
-            return False
-        with contextlib.suppress(Exception):
-            stream.abort()
-        return True
+        if stream is not None:
+            with contextlib.suppress(Exception):
+                stream.abort()
+        return was_speaking
 
 
 class BrowserTTS(TTSEngine):

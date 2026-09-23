@@ -10,6 +10,7 @@ const MAX_ACTIVITIES = 60
 const MAX_PANELS = 24
 const MAX_TRACES = 60
 const MAX_TRACE_ENTRIES = 80
+const MAX_FINISHED_TASKS = 20
 
 let counter = 0
 const nextId = () => `${Date.now().toString(36)}-${(counter++).toString(36)}`
@@ -202,7 +203,19 @@ export const useStore = create<StoreState>((set, get) => ({
       case EV.TASK_CREATED:
       case EV.TASK_UPDATED:
       case EV.TASK_FINISHED:
-        set((s) => ({ tasks: { ...s.tasks, [event.id]: event as unknown as Task } }))
+        // Unlike every other collection here, this had no cap at all —
+        // running/pending tasks are always kept (there are only ever a
+        // handful at once), but finished ones accumulate forever in a long
+        // session unless trimmed the same way messages/activities/panels
+        // already are.
+        set((s) => {
+          const tasks: Record<string, Task> = { ...s.tasks, [event.id]: event as unknown as Task }
+          const finished = Object.values(tasks)
+            .filter((t) => t.status !== 'running' && t.status !== 'pending')
+            .sort((a, b) => (b.finished ?? 0) - (a.finished ?? 0))
+          for (const stale of finished.slice(MAX_FINISHED_TASKS)) delete tasks[stale.id]
+          return { tasks }
+        })
         break
 
       case EV.VOICE_STATE:

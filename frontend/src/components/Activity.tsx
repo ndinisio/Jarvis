@@ -26,8 +26,15 @@ export function Activity({ send }: { send: (m: Record<string, unknown>) => boole
     .slice(0, 3)
   const lines = activities.slice(-6).reverse()
 
-  const hasReasoning = Boolean(reasoning && reasoning.objective)
-  const quiet = !hasReasoning && active.length === 0 && lines.length === 0 && recent.length === 0
+  // reasoning.done never goes back to null after a turn finishes — the only
+  // reset action, clearConversation(), is never actually called anywhere —
+  // so hasReasoning must exclude a *finished* trace itself, or the panel
+  // would stay in its "something's happening" state for the rest of the
+  // page's life after the very first turn. lines/recent are historical log
+  // entries, not "currently active" signals, so they're deliberately left
+  // out of quiet too — quiet means "nothing live right now", not "no history".
+  const hasReasoning = Boolean(reasoning && reasoning.objective && !reasoning.done)
+  const quiet = !hasReasoning && active.length === 0
 
   return (
     <section className="activity" data-quiet={quiet}>
@@ -39,13 +46,12 @@ export function Activity({ send }: { send: (m: Record<string, unknown>) => boole
       {quiet && <p className="activity__quiet">Ready.</p>}
 
       {hasReasoning && reasoning && (
-        <div className="reason" data-done={reasoning.done}>
-          {reasoning.done && reasoning.elapsedMs > 0 && (
-            <span className="reason__cost">
-              {reasoning.toolCalls} tool · {reasoning.modelCalls} model ·{' '}
-              {(reasoning.elapsedMs / 1000).toFixed(1)}s
-            </span>
-          )}
+        // hasReasoning already excludes a finished trace (see above), so
+        // this only ever renders mid-turn — the cost-summary this block
+        // used to show once done is gone with it; it never had a chance to
+        // render for more than an instant anyway, since done and the panel
+        // going quiet happen in the same store update.
+        <div className="reason">
           <p className="reason__objective">{reasoning.objective}</p>
           {reasoning.context && <p className="reason__context">{reasoning.context}</p>}
           {reasoning.steps.length > 0 && (

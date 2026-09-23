@@ -352,6 +352,12 @@ class ScreenAwarenessConfig(BaseModel):
     narrate: bool = False
     #: Minimum gap between two spoken narration lines.
     narration_min_gap_s: float = 20.0
+    #: Unused today — ScreenWatcher only ever calls ActionNarrator.phase(),
+    #: never .maybe_narrate() — but ActionNarrator's conf_attr generalisation
+    #: means any future .maybe_narrate() call against this config needs the
+    #: field to exist. 0.0 means "always eligible to narrate" (no minimum
+    #: slowness gate), which is a safe default given nothing reads it yet.
+    narration_action_threshold_s: float = 0.0
 
 
 class UIConfig(BaseModel):

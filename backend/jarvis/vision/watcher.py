@@ -44,20 +44,23 @@ class ScreenWatcher:
         #: _watch_task, each then starting its own loop.
         self._start_lock = asyncio.Lock()
         self._last_signal: tuple[str, str] | None = None
-        self._last_vision_call = 0.0
-        #: Asked for once per process; a "remember" answer also lands in the
-        #: permission broker's own session grants, so this is only ever a
-        #: fast path around re-asking after a decline earlier in the run.
-        self._consented = False
+        self._last_vision_call: float | None = None
 
     @property
     def running(self) -> bool:
         return self._watch_task is not None and not self._watch_task.done()
 
+    @staticmethod
+    def _should_run(config: Config) -> bool:
+        return bool(
+            config.capabilities.screen_awareness
+            and config.capabilities.screen
+            and config.security.allow_screen_capture
+        )
+
     # ------------------------------------------------------------------
     async def start(self) -> bool:
-        config = self._deps.config
-        if not (config.capabilities.screen_awareness and config.security.allow_screen_capture):
+        if not self._should_run(self._deps.config):
             return False
         async with self._start_lock:
             if self._watch_task and not self._watch_task.done():
@@ -73,15 +76,26 @@ class ScreenWatcher:
                             "System Settings → Privacy & Security, then try again.",
                 )
                 return False
+            # Config may have changed while the two awaits above were in
+            # flight — _consent() alone can wait up to
+            # security.confirmation_timeout_s (90s by default) for a live
+            # answer. Re-checking now, still under the lock, is what stops a
+            # start() that's no longer wanted from creating the loop anyway.
+            if not self._should_run(self._deps.config):
+                return False
             self._watch_task = asyncio.create_task(self._watch_loop(), name="jarvis-screen-watch")
             return True
 
     async def stop(self) -> None:
-        if self._watch_task:
-            self._watch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._watch_task
-            self._watch_task = None
+        # Shares start()'s lock so a stop() racing a start() that's mid-way
+        # through consent/permission checks is properly ordered rather than
+        # each mutating self._watch_task independently.
+        async with self._start_lock:
+            if self._watch_task:
+                self._watch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._watch_task
+                self._watch_task = None
 
     async def restart(self) -> bool:
         await self.stop()
@@ -94,7 +108,7 @@ class ScreenWatcher:
         from ``self._deps.config`` every iteration, so no restart is needed
         for those to take effect.
         """
-        should_run = config.capabilities.screen_awareness and config.security.allow_screen_capture
+        should_run = self._should_run(config)
         if should_run and not self.running:
             asyncio.create_task(self.start())
         elif not should_run and self.running:
@@ -102,8 +116,11 @@ class ScreenWatcher:
 
     # ------------------------------------------------------------------
     async def _consent(self) -> bool:
-        if self._consented:
-            return True
+        # No local cache here — permissions.require() already has its own
+        # session-grant fast path (security/permissions.py), which is the
+        # single source of truth a revoked grant actually reaches. A local
+        # "already consented" flag would drift from that the moment
+        # anything revokes the grant out from under it.
         conf = self._deps.config.screen_awareness
         summary = (
             "I'll start watching your screen in the background — a cheap check of which "
@@ -121,7 +138,6 @@ class ScreenWatcher:
             )
         except ConfirmationDeclined:
             return False
-        self._consented = True
         return True
 
     async def _watch_loop(self) -> None:
@@ -149,7 +165,8 @@ class ScreenWatcher:
         self._last_signal = signal
 
         now = time.monotonic()
-        if now - self._last_vision_call < self._deps.config.screen_awareness.min_vision_interval_s:
+        if (self._last_vision_call is not None
+                and now - self._last_vision_call < self._deps.config.screen_awareness.min_vision_interval_s):
             return
         self._last_vision_call = now
         await self._capture()

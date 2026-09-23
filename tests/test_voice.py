@@ -102,15 +102,26 @@ async def test_kokoro_reports_the_package_is_missing(config):
     assert "kokoro-onnx" in note and "installed" in note
 
 
+def _fake_kokoro_and_sounddevice(monkeypatch):
+    """available() now also checks sounddevice importability (a real gap
+    found in verification: following the tool's own printed install
+    instruction, `pip install -e ".[kokoro]"` alone, leaves sounddevice
+    missing and every call failing deep inside _play_blocking()). Tests that
+    exercise the path-existence checks need both faked so they reach that
+    logic instead of stopping at the sounddevice check."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "kokoro_onnx", types.ModuleType("kokoro_onnx"))
+    monkeypatch.setitem(sys.modules, "sounddevice", types.ModuleType("sounddevice"))
+
+
 async def test_kokoro_reports_missing_model_files(monkeypatch):
     """With the package importable but no model/voices path configured,
     available() must name which path is missing rather than failing deeper
     inside (e.g. when kokoro-onnx is installed for STT use elsewhere but the
     TTS model itself was never downloaded)."""
-    import sys
-    import types
-
-    monkeypatch.setitem(sys.modules, "kokoro_onnx", types.ModuleType("kokoro_onnx"))
+    _fake_kokoro_and_sounddevice(monkeypatch)
 
     engine = KokoroTTS()
     ok, note = await engine.available()
@@ -123,6 +134,159 @@ async def test_kokoro_reports_missing_model_files(monkeypatch):
     engine.model_path = __file__  # a real, existing file — good enough to pass the check
     ok, note = await engine.available()
     assert ok is False and "kokoro_voices_path" in note
+
+
+async def test_kokoro_reports_missing_sounddevice(monkeypatch):
+    """sounddevice genuinely isn't installed in this environment — confirms
+    available() catches it explicitly (with an actionable message) rather
+    than only failing later, deep inside _play_blocking() during a real
+    speak() call."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "kokoro_onnx", types.ModuleType("kokoro_onnx"))
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+
+    engine = KokoroTTS(model_path=__file__, voices_path=__file__)
+    ok, note = await engine.available()
+    assert ok is False and "sounddevice" in note
+
+
+async def test_kokoro_reports_a_directory_is_not_a_valid_model_path(monkeypatch):
+    """A directory passed as kokoro_model_path used to pass available()
+    (Path.exists() is true for directories too) and only broke later, deep
+    inside _load(). is_file() catches it here instead."""
+    from pathlib import Path
+
+    _fake_kokoro_and_sounddevice(monkeypatch)
+
+    engine = KokoroTTS(model_path=str(Path(__file__).parent), voices_path=__file__)
+    ok, note = await engine.available()
+    assert ok is False and "kokoro_model_path" in note
+
+
+async def test_kokoro_speak_calls_are_serialized(monkeypatch):
+    """Two overlapping speak() calls (e.g. the /api/voice/speak route firing
+    mid-drain of a streamed reply) must not interleave — without a lock,
+    each spawns a worker thread writing the same self._stream."""
+    import sys
+    import time as time_module
+    import types
+
+    order: list[str] = []
+
+    class FakeModel:
+        def create(self, text, voice=None, speed=None, lang=None):
+            order.append(f"synth-start:{text}")
+            time_module.sleep(0.02)
+            order.append(f"synth-end:{text}")
+            return [0.0, 0.0], 24000
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            order.append("stream-start")
+
+        def write(self, samples):
+            order.append("stream-write")
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+        def abort(self):  # pragma: no cover - not exercised in this test
+            pass
+
+    fake_sd = types.ModuleType("sounddevice")
+    fake_sd.OutputStream = lambda **kwargs: FakeStream(**kwargs)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+
+    engine = KokoroTTS()
+    engine._model = FakeModel()  # skip warmup/_load — not what this test is about
+
+    results = await asyncio.gather(engine.speak("first"), engine.speak("second"))
+    assert results == [True, True]
+    # If the lock is doing its job, the first call's entire synth→play
+    # sequence finishes before the second call's synthesis ever starts —
+    # never interleaved.
+    first_write = order.index("stream-write")
+    second_start = order.index("synth-start:second")
+    assert first_write < second_start, f"calls interleaved: {order}"
+
+
+async def test_kokoro_stop_during_synthesis_prevents_playback(monkeypatch):
+    """Barge-in during the (CPU-bound, potentially multi-second) synthesis
+    phase used to be a complete no-op — self._stream didn't exist yet, so
+    stop() saw nothing to interrupt and the utterance played out in full
+    once synthesis finished."""
+    import sys
+    import time as time_module
+    import types
+
+    played: list[str] = []
+
+    class FakeModel:
+        def create(self, text, voice=None, speed=None, lang=None):
+            time_module.sleep(0.05)
+            return [0.0], 24000
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            played.append("start")
+
+        def write(self, samples):
+            played.append("write")
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+        def abort(self):
+            pass
+
+    fake_sd = types.ModuleType("sounddevice")
+    fake_sd.OutputStream = lambda **kwargs: FakeStream(**kwargs)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+
+    engine = KokoroTTS()
+    engine._model = FakeModel()
+
+    speak_task = asyncio.create_task(engine.speak("hello"))
+    await asyncio.sleep(0.01)  # give speak() time to enter synthesis
+    assert engine._speaking is True
+
+    stopped = await engine.stop()
+    assert stopped is True, "stop() must report something was interrupted during synthesis"
+
+    result = await speak_task
+    assert result is False
+    assert played == [], "playback must never start once stop() fired during synthesis"
+
+
+async def test_kokoro_warmup_failure_does_not_propagate_out_of_speak(monkeypatch):
+    """An uncaught warmup() exception used to escape speak() entirely — via
+    the wake-ack path that's only caught by VoiceManager._listen_loop()'s
+    outer handler, tearing down the whole voice loop over an isolated TTS
+    problem (e.g. a corrupted model file)."""
+
+    async def broken_warmup():
+        raise RuntimeError("corrupted model file")
+
+    engine = KokoroTTS(model_path="/tmp/model.onnx", voices_path="/tmp/voices.bin")
+    monkeypatch.setattr(engine, "warmup", broken_warmup)
+
+    result = await engine.speak("hello")
+    assert result is False
+    assert engine._speaking is False
 
 
 async def test_null_engines_report_why_they_are_unavailable(config):
