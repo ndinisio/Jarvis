@@ -43,6 +43,12 @@ class ModelSlotConfig(BaseModel):
     temperature: float = 0.4
     max_tokens: int = 700
     timeout_s: float = 60.0
+    #: Context window in tokens (Ollama's ``num_ctx``). 0 leaves the server's
+    #: own default, which is small enough to silently cut the front off an
+    #: agent prompt that carries a page's elements.
+    num_ctx: int = 0
+    #: How long Ollama keeps the model loaded after a call.
+    keep_alive: str = "30m"
 
 
 class ProviderConfig(BaseModel):
@@ -63,9 +69,11 @@ class ModelsConfig(BaseModel):
         }
     )
     #: Small, very fast model: routing, classification, greetings, short rewrites.
-    fast: ModelSlotConfig = ModelSlotConfig(model="llama3.2:1b", max_tokens=200, timeout_s=20.0)
+    fast: ModelSlotConfig = ModelSlotConfig(model="llama3.2:1b", max_tokens=200, timeout_s=20.0,
+                                            num_ctx=4096)
     #: Capable model: conversation, reasoning, synthesis.
-    general: ModelSlotConfig = ModelSlotConfig(model="llama3.1:8b", max_tokens=900, timeout_s=120.0)
+    general: ModelSlotConfig = ModelSlotConfig(model="llama3.1:8b", max_tokens=900, timeout_s=120.0,
+                                               num_ctx=8192)
     #: Vision model: screen understanding.
     vision: ModelSlotConfig = ModelSlotConfig(model="llava:7b", max_tokens=600, timeout_s=180.0)
     #: Cheap, frequent captures for the background screen watcher (see
@@ -80,7 +88,7 @@ class ModelsConfig(BaseModel):
     #: than conversation needs. A longer timeout is deliberate — this slot is
     #: asked for structured output, which is worth waiting a little longer for.
     reasoning: ModelSlotConfig = ModelSlotConfig(
-        model="", temperature=0.1, max_tokens=700, timeout_s=90.0
+        model="", temperature=0.1, max_tokens=700, timeout_s=90.0, num_ctx=8192
     )
     #: Optional domain model (code, maths, a local fine-tune). Empty defers to
     #: ``reasoning``; nothing has to be installed for this slot to be asked for.
@@ -165,6 +173,18 @@ class PersonalityConfig(BaseModel):
 
 
 class SecurityConfig(BaseModel):
+    #: How much JARVIS asks while carrying out something you asked it to do.
+    #:
+    #: ``consequential_only`` — routine steps (opening, clicking, typing,
+    #: filling in a form, adding to a basket) just happen. Anything
+    #: consequential — paying or placing an order, sending, deleting,
+    #: installing, typing into a terminal — always asks first.
+    #: ``confirm_start`` — as above, but a multi-step task's plan is also
+    #: confirmed once before it starts, and routine steps outside a task ask.
+    #: ``confirm_each_step`` — every step that changes anything asks.
+    #:
+    #: HIGH-risk actions and privacy consents ask whatever this says.
+    autonomy: Literal["consequential_only", "confirm_start", "confirm_each_step"] = "consequential_only"
     #: Risk levels that execute without asking.
     auto_approve: list[str] = Field(default_factory=lambda: ["low"])
     #: Risk levels that always require an explicit confirmation.

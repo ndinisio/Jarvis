@@ -67,6 +67,9 @@ Current milestone: {milestone}
 What has happened so far:
 {observations}
 
+What you can see now:
+{view}
+
 Tools you may use:
 {tools}
 
@@ -76,6 +79,8 @@ Reply with JSON only, one of:
 {{"action": "give_up", "reason": "<why nothing more can be done here>"}}
 
 Rules:
+- On a web page, act on an element by the [handle] shown next to it under "What you can see now". Never make up a handle.
+- "What you can see now" is the page as it is after the last action; use it rather than reading the page again.
 - Use a tool only if it moves this milestone forward; the results above may already cover it.
 - "complete" once the milestone's own goal is actually satisfied, not merely attempted.
 - "give_up" rather than repeating a call that already failed the same way."""
@@ -90,6 +95,14 @@ What happened:
 {observations}
 
 Answer directly. Do not describe your process or mention tool names."""
+
+#: Web actions after which the loop looks at the page again by itself, so the
+#: next decision sees the page as it now is (and its element handles) without
+#: spending a step asking for it.
+_OBSERVE_AFTER = {"browse_to", "open_url", "click_page_element", "fill_page_field", "submit_page_form"}
+
+#: How much of the current view a step prompt carries.
+_VIEW_CHARS = 5000
 
 #: Curated per-capability tool set — deliberately not ToolCatalog.shortlist():
 #: that scoring runs once per turn and never re-scores as task state
@@ -133,22 +146,24 @@ class AutomationCapability(Capability):
 
         request.ctx.raise_if_cancelled()
         milestones = await self._decompose(goal)
-        try:
-            await self._confirm_start(goal, milestones)
-        except ConfirmationDeclined as exc:
-            # Unlike a tool call's decline (converted to a ToolResult by
-            # registry.py before it ever reaches a capability), this
-            # permissions.require() is called directly, and handle() runs
-            # inside a background Task — an uncaught raise here would be
-            # swallowed by TaskManager._run as a bare failure, leaving the
-            # user with silence after the "I'm on it" acknowledgement.
-            return Response(text=exc.user_message, spoken=exc.user_message)
+        if self.deps.config.security.autonomy == "confirm_start":
+            try:
+                await self._confirm_start(goal, milestones)
+            except ConfirmationDeclined as exc:
+                # Unlike a tool call's decline (converted to a ToolResult by
+                # registry.py before it ever reaches a capability), this
+                # permissions.require() is called directly, and handle() runs
+                # inside a background Task — an uncaught raise here would be
+                # swallowed by TaskManager._run as a bare failure, leaving the
+                # user with silence after the "I'm on it" acknowledgement.
+                return Response(text=exc.user_message, spoken=exc.user_message)
 
         task_id = request.ctx.task_id
         if task_id:
             self.deps.permissions.grant_task(task_id)
 
         findings: deque[str] = deque(maxlen=conf.findings_window)
+        view = _View()
         total_steps = 0
         try:
             for milestone in milestones:
@@ -163,7 +178,7 @@ class AutomationCapability(Capability):
                         )
                         break
                     request.ctx.raise_if_cancelled()
-                    finding, keep_going = await self._take_step(goal, milestone, findings,
+                    finding, keep_going = await self._take_step(goal, milestone, findings, view,
                                                                  request, task)
                     if finding:
                         findings.append(finding)
@@ -183,13 +198,13 @@ class AutomationCapability(Capability):
         )
 
     # -- one step of one milestone -------------------------------------------
-    async def _take_step(self, goal: str, milestone: str, findings: deque, request: Request,
-                         task) -> tuple[str | None, bool]:
+    async def _take_step(self, goal: str, milestone: str, findings: deque, view: _View,
+                         request: Request, task) -> tuple[str | None, bool]:
         """Returns ``(finding_to_record, keep_going)`` — ``keep_going`` is
         true only after an ordinary tool call that didn't get declined,
         which is what makes this a genuine repeat-until-done loop rather
         than one decision per milestone."""
-        decision = await self._decide_step(goal, milestone, findings)
+        decision = await self._decide_step(goal, milestone, findings, view)
         if decision is None:
             return f"couldn't decide how to continue: {milestone}", False
 
@@ -234,7 +249,25 @@ class AutomationCapability(Capability):
                   f"{'ok' if result.ok else 'failed'}: {message}")
         if not verification.verified:
             finding += f" (not verified: {verification.problem[:120]})"
+        await self._update_view(view, tool, result, request)
         return finding, True
+
+    async def _update_view(self, view: _View, tool: str, result, request: Request) -> None:
+        """Keep "what you can see now" current.
+
+        After a web action the page is looked at again straight away, so the
+        next decision sees the page as it now is — with the handles it needs
+        to act on it. Anything else that returned something worth seeing
+        (a page listing, search results, a screen description) becomes the
+        view as it is.
+        """
+        if tool in _OBSERVE_AFTER and result.ok and self.registry.get("read_page_manifest") is not None:
+            looked = await self.call_tool("read_page_manifest", {}, request.ctx)
+            if looked.ok and looked.observation:
+                view.text = looked.observation
+                return
+        if result.ok or not view.text:
+            view.text = result.for_model(_VIEW_CHARS)
 
     # -- model calls ----------------------------------------------------------
     async def _decompose(self, goal: str) -> list[str]:
@@ -255,11 +288,13 @@ class AutomationCapability(Capability):
                 return cleaned
         return [goal]
 
-    async def _decide_step(self, goal: str, milestone: str, findings: deque) -> dict[str, Any] | None:
+    async def _decide_step(self, goal: str, milestone: str, findings: deque,
+                           view: _View) -> dict[str, Any] | None:
         listing = self.registry.describe_for_model(ALL_AUTOMATION_TOOLS)
         prompt = STEP_PROMPT.format(
             goal=goal, milestone=milestone,
             observations="\n".join(f"- {f}" for f in findings) or "- nothing yet",
+            view=view.text[:_VIEW_CHARS] or "nothing yet — open a page or look at the screen first",
             tools=listing,
         )
         try:
@@ -321,6 +356,15 @@ class AutomationCapability(Capability):
         else:
             request.ctx.report(message, phase=milestone)
         self._narrator.maybe_narrate(message, expected_ms=expected_ms, elapsed_ms=elapsed_ms)
+
+
+class _View:
+    """The latest thing the loop has seen — one per task, never shared."""
+
+    __slots__ = ("text",)
+
+    def __init__(self) -> None:
+        self.text = ""
 
 
 def _short(arguments: dict) -> str:

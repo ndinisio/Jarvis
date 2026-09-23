@@ -679,6 +679,7 @@ file) override the file — see [`.env.example`](.env.example).
     "barge_in": true
   },
   "security": {
+    "autonomy": "consequential_only",   // or "confirm_start" / "confirm_each_step"
     "always_confirm": ["high"],
     "readable_roots": ["~/Documents", "~/Downloads", "~/Desktop"],
     "allow_shell": true
@@ -701,8 +702,19 @@ the model is never the thing that decides whether to ask you.
 | Risk | Examples | Default behaviour |
 | --- | --- | --- |
 | **LOW** | time, battery, storage, open an app, open a URL, read the clipboard, capture the screen | runs |
-| **MEDIUM** | write outside the workspace, move files, quit an app, create a calendar event, draft an email | asks |
+| **MEDIUM** | click, type, fill in a form, add to a basket, quit an app, create a calendar event, draft an email | runs when you asked for it (see `autonomy`) |
 | **HIGH** | **send email**, delete files, unlisted shell commands, anything destructive | always asks |
+
+**Autonomy** (`security.autonomy`) decides how much JARVIS asks while doing
+what you asked. The default, `consequential_only`, lets routine steps just
+happen and always asks before anything **consequential**: paying or placing
+an order, checking out, sending, deleting, installing, or typing into a
+terminal or password manager. What counts as consequential is judged on the
+real element a click will hit — its own text, id, link and form action —
+never on how the model described it, so a "Buy Now" button called "Add to
+basket" still asks. `confirm_start` also confirms a multi-step plan once
+before it runs; `confirm_each_step` asks before every step that changes
+anything.
 
 * **Sending email always requires confirmation.** The model can only ever create
   a *draft*; sending is a separate HIGH-risk tool. Saying "send it" opens the

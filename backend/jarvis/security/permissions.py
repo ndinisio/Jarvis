@@ -77,11 +77,19 @@ class PermissionBroker:
 
     # -- policy ------------------------------------------------------------
     def policy_for(self, risk: str) -> str:
-        """Return ``"allow"`` or ``"confirm"`` for a risk level."""
+        """Return ``"allow"`` or ``"confirm"`` for a *routine* action at *risk*.
+
+        Consequential actions and privacy consents never reach this — see
+        :meth:`require`. What's left is the everyday "you asked me to do
+        this, so I'm doing it" case, which the ``security.autonomy`` setting
+        governs for MEDIUM risk.
+        """
         security = self._config
         if risk in security.always_confirm:
             return "confirm"
         if risk in security.auto_approve:
+            return "allow"
+        if risk == RiskLevel.MEDIUM and security.autonomy == "consequential_only":
             return "allow"
         return "confirm" if RiskLevel.at_least(risk, RiskLevel.MEDIUM) else "allow"
 
@@ -102,6 +110,7 @@ class PermissionBroker:
         *,
         allow_session_grant: bool = True,
         consequential: bool = False,
+        consent: bool = False,
         task_id: str | None = None,
     ) -> bool:
         """Authorise *action*, asking the user when policy demands it.
@@ -119,14 +128,27 @@ class PermissionBroker:
         it anyway would defeat that. No current caller passes ``False``, but
         the check is written so a future one that does gets what it asked for.
 
+        *consent* marks a privacy consent (e.g. starting the background screen
+        watcher): autonomy never waves it through, but, unlike a
+        consequential action, the answer may be remembered for the session.
+
         Raises :class:`ConfirmationDeclined` if the user says no or does not
         answer within the configured window.
         """
         details = dict(details or {})
         details["offer_remember"] = not consequential
-        if self.policy_for(risk) == "allow":
+        security = self._config
+        # An explicit auto_approve setting is the user's own override and is
+        # honoured as written — for everything at that risk level.
+        if risk in security.auto_approve and risk not in security.always_confirm:
             return True
-        if not consequential and allow_session_grant:
+        # The autonomy default is not an override: it never waves through a
+        # consequential action or a privacy consent — agreeing to be watched
+        # is not a routine step of some other request.
+        if not consequential and not consent and self.policy_for(risk) == "allow":
+            return True
+        step_by_step = self._config.autonomy == "confirm_each_step" and not consent
+        if not consequential and allow_session_grant and not step_by_step:
             if task_id and task_id in self._task_grants:
                 log.debug("task grant %s covers %s", task_id, action)
                 return True
@@ -180,6 +202,21 @@ class PermissionBroker:
             action=confirmation.action,
         )
         return True
+
+    def withdraw(self, action: str, reason: str = "withdrawn") -> int:
+        """Take back any outstanding question about *action* — answered as
+        "no" — because whatever wanted it no longer does (e.g. the screen
+        watcher being switched off while its consent prompt is showing)."""
+        count = 0
+        for confirmation in [c for c in self._pending.values() if c.action == action]:
+            if confirmation.future and not confirmation.future.done():
+                confirmation.future.set_result((False, False))
+                count += 1
+            self._pending.pop(confirmation.id, None)
+            self._bus.publish(
+                EventType.CONFIRM_RESOLVED, id=confirmation.id, approved=False, reason=reason
+            )
+        return count
 
     def cancel_all(self, reason: str = "cancelled") -> int:
         count = 0

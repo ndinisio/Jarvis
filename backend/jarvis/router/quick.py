@@ -17,6 +17,16 @@ is the gate for this: a regex match whose argument isn't trustworthy is
 treated as no match at all, and the search continues (for a web destination,
 straight into the browser pattern below; for a bare reference, all the way
 through to Triage and reference resolution).
+
+**One request, one clause (v3.0).** The fast path is for single, complete
+commands. "Search for AirPods on Amazon and add them to my basket" contains
+a perfectly good "search for …" but is a two-step errand; answering it with a
+web search was the most common way JARVIS "misunderstood" people. A second
+clause ("… and add", "…, then open", "…; also…") means the request goes to the
+model that can plan it. Politeness ("could you…", "… for me please") is
+stripped before matching, so ordinary phrasing still gets the fast answer,
+and patterns for system facts are anchored, so "how much storage does the
+iPhone 16 have" is a question, not a request for this Mac's disk space.
 """
 
 from __future__ import annotations
@@ -95,10 +105,55 @@ _BARE_REFERENCE = re.compile(
 )
 
 
+#: Words that name a thing inside an app or on a page, never an app itself:
+#: "open a new tab", "open the downloads folder", "open my last email".
+_NOT_AN_APP = re.compile(
+    r"\b(?:tabs?|windows?|pages?|links?|folders?|files?|e-?mails?|documents?|things?|stuff|"
+    r"results?|websites?|site|url|whatever)\b"
+    r"|\bi (?:was|use|am|have|had|need|want)\b"
+    r"|\s(?:for|from|with|about|on|at)\s",
+    re.I,
+)
+
+
 def _is_concrete_app_name(match: re.Match) -> bool:
     """The safety gate behind every open/close/activate-application match."""
     name = (match.group("app") or "").strip()
-    return not _BARE_REFERENCE.match(name) and not _WEB_DESTINATION.match(name)
+    return (not _BARE_REFERENCE.match(name) and not _WEB_DESTINATION.match(name)
+            and not _NOT_AN_APP.search(name))
+
+
+#: Sites people name when they want a search done *there*, not on the web at
+#: large — "search for usb cables on amazon" is a shopping errand.
+_SITE = re.compile(
+    r"\b(?:on|at|in|from|via|using)\s+(?:the\s+)?(?:amazon|ebay|you ?tube|wikipedia|spotify|reddit|"
+    r"imdb|google maps|maps|netflix|etsy|twitter|facebook|instagram|tiktok|linkedin|github|argos|"
+    r"currys|john lewis|tesco|asos|skyscanner|booking\.com|airbnb|trainline|bbc|apple music)\b",
+    re.I,
+)
+
+
+def _is_plain_web_search(match: re.Match) -> bool:
+    return not _SITE.search(match.group("q") or "")
+
+
+def _names_a_file(match: re.Match) -> bool:
+    """A delete must name a file — "remove the kettle from my amazon basket"
+    matched the shape of "remove <path>" and nearly became delete_file."""
+    path = (match.group("path") or "").strip()
+    return (bool(re.search(r"\bfile\b", match.group(0), re.I))
+            or bool(re.search(r"\.[A-Za-z0-9]{1,6}$", path)) or "/" in path)
+
+
+def _is_a_fact_to_remember(match: re.Match) -> bool:
+    """"Remember to buy milk" is a reminder request, not a fact about the user."""
+    return not re.match(r"to\b", (match.group("text") or "").strip(), re.I)
+
+
+def _volume_step(match: re.Match) -> dict[str, Any]:
+    direction = next((g for g in match.groups() if g in {"up", "down"}), "up")
+    return {"intent": "volume_step", "direction": direction}
+
 
 COMMANDS: list[QuickCommand] = [
     # -- conversational control ------------------------------------------
@@ -117,15 +172,16 @@ COMMANDS: list[QuickCommand] = [
     _c(r"^\s*(?:no|nope|don'?t|cancel it|leave it)[.!]?\s*$", RouteKind.CONTROL, "decline"),
 
     # -- time & date -------------------------------------------------------
-    _c(r"^(?:what'?s |what is |tell me )?(?:the )?time(?: is it)?\??$|^what time is it\b.*$",
+    _c(r"^(?:what'?s |what is |tell me )?(?:the )?time(?: is it)?(?: now)?\??$|^what time is it\??$",
        RouteKind.TOOL, "get_time", {"field": "time"}),
-    _c(r"^(?:what'?s |what is )?(?:today'?s )?(?:the )?date\??$|^what day is it\b.*$|"
-       r"^what'?s the date\b.*$", RouteKind.TOOL, "get_time", {"field": "date"}),
+    _c(r"^(?:what'?s |what is )?(?:today'?s )?(?:the )?date(?: today)?\??$|^what day is it(?: today)?\??$|"
+       r"^what'?s the date today\??$", RouteKind.TOOL, "get_time", {"field": "date"}),
 
     # -- files (before applications, so "open the file X" isn't heard as an app)
     _c(r"^(?:delete|remove|bin|trash)\s+(?:the\s+)?(?:file\s+)?(?P<path>[\w .\-/]+?)"
        r"(?:\s+from\s+(?:my\s+)?(?:workspace|files))?[.!]?$",
-       RouteKind.TOOL, "delete_file", lambda m: {"path": m.group("path").strip()}),
+       RouteKind.TOOL, "delete_file", lambda m: {"path": m.group("path").strip()},
+       safe=_names_a_file),
     _c(r"^(?:read|open|show me|what'?s in)\s+(?:the\s+|my\s+)?(?:file|note)\s+"
        r"(?P<path>[\w .\-/]+?)[.!?]?$",
        RouteKind.TOOL, "read_file", lambda m: {"path": m.group("path").strip()}),
@@ -135,12 +191,13 @@ COMMANDS: list[QuickCommand] = [
 
     # -- applications ------------------------------------------------------
     # `safe=_is_concrete_app_name` on all three: a launch/close/focus target
-    # that looks like a web destination or a bare reference is not a
-    # deterministic argument, whatever the surrounding verb matched (V1.3 F2/F3).
-    _c(rf"^(?:please\s+)?(?:open|launch|start|run|fire up|bring up)\s+{_APP}{_TRAIL}",
+    # that looks like a web destination, a bare reference or a thing inside
+    # an app ("a new tab") is not a deterministic argument, whatever the
+    # surrounding verb matched (V1.3 F2/F3).
+    _c(rf"^(?:open|launch|start|run|fire up|bring up)\s+{_APP}{_TRAIL}",
        RouteKind.TOOL, "open_application", lambda m: {"name": m.group("app")},
        safe=_is_concrete_app_name),
-    _c(rf"^(?:please\s+)?(?:close|quit|exit|shut down|kill)\s+{_APP}{_TRAIL}",
+    _c(rf"^(?:close|quit|exit|shut down|kill)\s+{_APP}{_TRAIL}",
        RouteKind.TOOL, "close_application", lambda m: {"name": m.group("app")},
        safe=_is_concrete_app_name),
     _c(rf"^(?:switch to|focus|activate|bring)\s+{_APP}(?:\s+to the front)?{_TRAIL}",
@@ -157,7 +214,7 @@ COMMANDS: list[QuickCommand] = [
        RouteKind.TOOL, "browse_to", lambda m: {"url": m.group("url")}),
     _c(r"^(?:search (?:the web |the internet |online )?for|google|look up on the web|"
        r"web search(?: for)?)\s+(?P<q>.+?)[.!?]?$",
-       RouteKind.TOOL, "browse_to", lambda m: {"query": m.group("q")}),
+       RouteKind.TOOL, "browse_to", lambda m: {"query": m.group("q")}, safe=_is_plain_web_search),
     _c(r"^(?:what page am i on|what'?s this page|what am i reading)\??$",
        RouteKind.TOOL, "get_current_page", {"include_text": False}),
 
@@ -169,7 +226,7 @@ COMMANDS: list[QuickCommand] = [
        RouteKind.TOOL, "write_clipboard", lambda m: {"text": m.group("text")}),
 
     # -- screen ------------------------------------------------------------
-    _c(r"^(?:take|grab|capture)(?: a| the)? (?:screenshot|screen ?grab|screen capture)[.!]?$",
+    _c(r"^(?:take|grab|capture)(?: a| the)? (?:screenshot|screen ?shot|screen ?grab|screen capture)[.!]?$",
        RouteKind.TOOL, "capture_screen", {}),
     _c(r"^(?:what'?s on (?:my |the )?screen|what am i looking at|what do you see|"
        r"can you see (?:what i'?m doing|my screen|this)|look at (?:my |the )?screen|"
@@ -181,27 +238,38 @@ COMMANDS: list[QuickCommand] = [
        {"question": "There is an error or dialog on screen. Read it exactly and explain what it means."},
        0.97, True),
 
-    # -- system facts ------------------------------------------------------
-    _c(r"(?:how much (?:disk |storage |space )|storage (?:space )?(?:left|free|available)|"
-       r"disk space|free space|space (?:left|remaining))", RouteKind.TOOL, "get_storage", {}),
-    _c(r"(?:battery (?:level|percentage|percent|status|health)?|how'?s (?:my |the )?battery|"
-       r"how much battery|charge(?:d)? (?:level|is the battery))",
+    # -- system facts (anchored: a question about another device is chat) ----
+    _c(r"^(?:how much (?:disk |storage |free )?(?:space|storage)(?: do i have| have i got| is "
+       r"(?:left|free|available))?(?: left| free| available| remaining)?(?: on (?:my|this) "
+       r"(?:mac|computer|laptop|disk|drive))?|(?:what'?s|check) (?:my |the )?(?:disk space|storage|"
+       r"free space)(?: left)?|(?:storage|disk) (?:space )?(?:left|free|available)|disk space|"
+       r"free space|space (?:left|remaining))\??$", RouteKind.TOOL, "get_storage", {}),
+    _c(r"^(?:(?:what'?s|what is|check) (?:my |the )?battery(?: level| percentage| percent| status| health)?|"
+       r"how'?s (?:my |the )?battery(?: doing| looking)?|how much battery (?:do i have|have i got|"
+       r"is left|left)|battery(?: level| percentage| status)?|(?:what'?s|what is) (?:my |the )?"
+       r"charge(?: level)?|how charged is (?:my|the) (?:mac|laptop|battery))\??$",
        RouteKind.TOOL, "get_battery", {}),
-    _c(r"(?:how much (?:ram|memory)|memory (?:pressure|usage|used)|ram do i have)",
+    _c(r"^(?:how much (?:ram|memory) (?:do i have|have i got|is (?:free|used|in use|available))|"
+       r"(?:what'?s|check) (?:my |the )?(?:memory|ram)(?: usage| pressure)?|"
+       r"memory (?:pressure|usage|used)|how much ram)\??$",
        RouteKind.TOOL, "get_memory", {}),
-    _c(r"(?:what (?:chip|processor|cpu) (?:does this|do i)|which chip|what kind of mac)",
+    _c(r"^(?:what (?:chip|processor|cpu) (?:does this|do i)(?: mac)? (?:have|use|run)|"
+       r"which chip (?:is this|do i have)|what kind of mac (?:is this|do i have))\??$",
        RouteKind.TOOL, "get_system_info", {"field": "chip"}),
-    _c(r"(?:what (?:version of )?(?:macos|os|mac os)|which macos|macos version)",
+    _c(r"^(?:what (?:version of )?(?:macos|os|mac os)(?: version)? (?:am i (?:on|running)|is this|"
+       r"do i have)|which macos(?: version)?(?: am i on| is this)?|macos version)\??$",
        RouteKind.TOOL, "get_system_info", {"field": "os"}),
-    _c(r"(?:how long has (?:this|my) mac been (?:on|up)|what'?s (?:my |the )?uptime|system uptime)",
+    _c(r"^(?:how long has (?:this|my) mac been (?:on|up)|what'?s (?:my |the )?uptime|system uptime)\??$",
        RouteKind.TOOL, "get_system_info", {"field": "uptime"}),
     _c(r"^(?:system info(?:rmation)?|tell me about (?:this|my) mac|mac specs?|"
        r"what are my specs)\??$", RouteKind.TOOL, "get_system_info", {}),
-    _c(r"(?:cpu (?:usage|load)|what'?s using (?:my |the )?cpu|how busy is (?:my |the )?(?:cpu|mac))",
+    _c(r"^(?:(?:what'?s|check) (?:the |my )?cpu (?:usage|load)|cpu (?:usage|load)|"
+       r"what'?s using (?:my |the )?cpu|how busy is (?:my |the )?(?:cpu|mac))\??$",
        RouteKind.TOOL, "get_cpu", {}),
-    _c(r"(?:am i (?:online|connected)|what (?:wi-?fi|network) am i on|network status|"
-       r"is (?:the )?(?:internet|wifi|wi-fi) (?:working|up|on))", RouteKind.TOOL, "get_network", {}),
-    _c(r"^(?:what'?s (?:using|eating) (?:my |the )?(?:cpu|memory|ram)|"
+    _c(r"^(?:am i (?:online|connected)(?: to the internet)?|what (?:wi-?fi|network) am i "
+       r"(?:on|connected to)|network status|is (?:the |my )?(?:internet|wifi|wi-fi) "
+       r"(?:working|up|on|connected))\??$", RouteKind.TOOL, "get_network", {}),
+    _c(r"^(?:what'?s (?:using|eating) (?:my |the )?(?:memory|ram)|"
        r"(?:show|list) (?:me )?(?:the )?(?:top |heaviest )?processes)\??$",
        RouteKind.TOOL, "get_processes", {}),
 
@@ -210,37 +278,38 @@ COMMANDS: list[QuickCommand] = [
        RouteKind.TOOL, "set_volume", {"action": "mute"}),
     _c(r"^(?:unmute|restore sound)(?: the)?(?: sound| volume| audio)?[.!]?$",
        RouteKind.TOOL, "set_volume", {"action": "unmute"}),
-    _c(r"(?:set|turn|put) (?:the )?volume (?:to|at) (?P<level>\d{1,3})\s*(?:percent|%)?",
+    _c(r"^(?:set|turn|put) (?:the )?volume (?:to|at) (?P<level>\d{1,3})\s*(?:percent|per cent|%)?$",
        RouteKind.TOOL, "set_volume", lambda m: {"level": int(m.group("level")), "action": "set"}),
-    _c(r"(?:turn (?:the )?volume (?P<dir>up|down)|volume (?P<dir2>up|down))",
-       RouteKind.CAPABILITY, "system",
-       lambda m: {"intent": "volume_step",
-                  "direction": (m.group("dir") or m.group("dir2") or "up")}),
+    _c(r"^(?:turn (?:the )?volume (up|down)|volume (up|down)|turn (up|down) the volume|"
+       r"(?:crank|bump|pump|whack|turn) (?:the )?volume (up|down)(?: a bit| a little| a notch)?)$",
+       RouteKind.CAPABILITY, "system", _volume_step),
     _c(r"^(?:what'?s (?:the )?volume|how loud)\??$", RouteKind.TOOL, "set_volume",
        {"action": "get"}),
 
     # -- diagnostics -------------------------------------------------------
-    _c(r"(?:why is (?:my |this )?mac (?:so )?(?:slow|sluggish|laggy|freezing)|"
-       r"what'?s wrong with (?:my |this )?mac|diagnos(?:e|tics)|check (?:my |the )?system|"
-       r"is (?:something|anything) wrong with (?:my |this )?mac|health check)",
+    _c(r"^(?:why is (?:my |this )?mac (?:so )?(?:slow|sluggish|laggy|freezing|hot)|"
+       r"what'?s wrong with (?:my |this )?mac|run (?:a )?diagnostics?|diagnose (?:my |this )?mac|"
+       r"check (?:my |the )?system|is (?:something|anything) wrong with (?:my |this )?mac|"
+       r"(?:run a |do a )?health check)\??$",
        RouteKind.CAPABILITY, "diagnostics", {}, 0.95, True),
 
     # -- email -------------------------------------------------------------
-    _c(r"(?:check (?:my )?(?:e-?mail|mail|inbox)|any new (?:e-?mail|mail|messages)|"
-       r"do i have (?:any )?(?:new )?(?:e-?mail|mail)|read (?:my )?(?:e-?mail|mail))",
+    _c(r"^(?:check (?:my )?(?:e-?mails?|mails?|inbox)|any new (?:e-?mails?|mail|messages)|"
+       r"do i have (?:any )?(?:new )?(?:e-?mails?|mail)|read (?:my )?(?:e-?mails?|mail))\??$",
        RouteKind.CAPABILITY, "email", {"intent": "check"}, 0.96, True),
 
     # -- calendar ----------------------------------------------------------
-    _c(r"(?:what'?s on (?:today|my calendar|the calendar)|what'?s my schedule|"
-       r"what do i have (?:on )?today|my agenda|any meetings today|what'?s happening today)",
+    _c(r"^(?:what'?s on (?:today|my calendar|the calendar)(?: (?:today|to day|for today))?|"
+       r"what'?s my schedule(?: today)?|what do i have (?:on )?today|(?:what'?s )?my agenda"
+       r"(?: today| for today)?|any meetings today|what'?s happening today)\??$",
        RouteKind.TOOL, "read_calendar", {"range": "today"}, 0.96, True),
-    _c(r"(?:what'?s on tomorrow|tomorrow'?s schedule|what do i have tomorrow)",
+    _c(r"^(?:what'?s on tomorrow|tomorrow'?s schedule|what do i have (?:on )?tomorrow)\??$",
        RouteKind.TOOL, "read_calendar", {"range": "tomorrow"}, 0.96, True),
-    _c(r"(?:what'?s on this week|this week'?s schedule|what does my week look like)",
+    _c(r"^(?:what'?s on this week|this week'?s schedule|what does my week look like)\??$",
        RouteKind.TOOL, "read_calendar", {"range": "week"}, 0.96, True),
 
     # -- files & workspace -------------------------------------------------
-    _c(r"(?:what'?s in my workspace|list (?:my )?(?:workspace|files)|show me my files)",
+    _c(r"^(?:what'?s in my workspace|list (?:my )?(?:workspace|files)|show me my files)\??$",
        RouteKind.TOOL, "list_files", {}),
     _c(r"^(?:where is my workspace|workspace info(?:rmation)?)\??$",
        RouteKind.TOOL, "workspace_info", {}),
@@ -248,10 +317,11 @@ COMMANDS: list[QuickCommand] = [
        RouteKind.TOOL, "create_note", lambda m: {"content": m.group("text")}),
 
     # -- memory ------------------------------------------------------------
-    _c(r"(?:what do you (?:remember|know) about me|what'?s in your memory|"
-       r"what have you remembered)", RouteKind.CAPABILITY, "memory", {"intent": "recall"}),
+    _c(r"^(?:what do you (?:remember|know) about me|what'?s in your memory|"
+       r"what have you remembered)\??$", RouteKind.CAPABILITY, "memory", {"intent": "recall"}),
     _c(r"^(?:remember|note|keep in mind)(?: that)?\s+(?P<text>.+)$",
-       RouteKind.CAPABILITY, "memory", lambda m: {"intent": "remember", "text": m.group("text")}),
+       RouteKind.CAPABILITY, "memory", lambda m: {"intent": "remember", "text": m.group("text")},
+       safe=_is_a_fact_to_remember),
     _c(r"^forget(?: that| about)?\s*(?P<text>.*)$",
        RouteKind.CAPABILITY, "memory", lambda m: {"intent": "forget", "text": m.group("text")}),
 
@@ -259,6 +329,33 @@ COMMANDS: list[QuickCommand] = [
     _c(r"^(?:research|investigate|look into|dig into|find out about|compare)\s+(?P<q>.+)$",
        RouteKind.CAPABILITY, "research", lambda m: {"query": m.group("q")}, 0.95, True),
 ]
+
+#: Verbs that start a second instruction ("… and *add* it to my basket").
+_SECOND_VERB = (
+    r"open|launch|start|run|close|quit|exit|go|visit|navigate|search|google|look|find|add|put|buy|"
+    r"order|send|e-?mail|text|message|reply|forward|call|ring|remind|set|turn|switch|mute|unmute|"
+    r"play|pause|stop|skip|take|save|copy|paste|move|delete|remove|rename|create|make|write|read|"
+    r"check|tell|show|click|type|press|scroll|download|install|book|schedule|compare|research|"
+    r"summari[sz]e|describe|lock|share|upload|print|log|sign|register|fill|select|choose|pick|"
+    r"get|grab|bring|pull|pop|chuck|stick|drop|archive|translate|zip|empty|clear|connect|enable|"
+    r"disable|update|restart|record|draft|attach|bookmark|refresh|reload|zoom|sort|tidy|"
+    r"organi[sz]e|convert|resize|post|watch|listen|pin|star|mark|tick|see|explain|work out|"
+    r"calculate|use|let|keep|note|then"
+)
+_SECOND_QUESTION = r"what'?s|whats|what|how|when|where|who|which|why|is|are|do|does|did|can|could|will|would|if"
+
+#: A second clause: a joiner followed by a verb or a question word.
+_COMPOUND = re.compile(
+    rf"(?:,\s*|\s+)(?:and\s+then|and\s+also|then|also|and|after\s+that|afterwards|plus|before\s+that)"
+    rf"\s+(?:please\s+)?(?:{_SECOND_VERB}|{_SECOND_QUESTION})\b"
+    rf"|;\s*\w|,\s*(?:{_SECOND_VERB})\b",
+    re.I,
+)
+
+
+def is_compound(text: str) -> bool:
+    """Does *text* ask for more than one thing?"""
+    return bool(_COMPOUND.search(text or ""))
 
 
 class QuickCommands:
@@ -272,21 +369,31 @@ class QuickCommands:
         cleaned = _normalise(text)
         if not cleaned:
             return None
-        for command in self._commands:
-            found = command.pattern.search(cleaned)
-            if not found or not command.is_safe(found):
-                continue
-            decision = RouteDecision(
-                kind=command.kind,
-                name=command.name,
-                args=command.build(found),
-                confidence=command.confidence,
-                path=RoutePath.QUICK,
-                reason=f"matched /{command.pattern.pattern[:48]}/",
-                long_running=command.long_running,
-            )
-            decision.latency_ms = (time.perf_counter() - t0) * 1000.0
-            return decision
+        # One request, one clause: a second instruction needs a planner.
+        compound = is_compound(cleaned)
+        for index, candidate in enumerate(_variants(cleaned)):
+            for command in self._commands:
+                if compound and command.kind != RouteKind.CONTROL:
+                    continue
+                # Conversational controls ("send it", "yes") match only as
+                # said: "please send it" with nothing waiting is a request
+                # for the agent, not an approval.
+                if index and command.kind == RouteKind.CONTROL:
+                    continue
+                found = command.pattern.search(candidate)
+                if not found or not command.is_safe(found):
+                    continue
+                decision = RouteDecision(
+                    kind=command.kind,
+                    name=command.name,
+                    args=command.build(found),
+                    confidence=command.confidence,
+                    path=RoutePath.QUICK,
+                    reason=f"matched /{command.pattern.pattern[:48]}/",
+                    long_running=command.long_running,
+                )
+                decision.latency_ms = (time.perf_counter() - t0) * 1000.0
+                return decision
         return None
 
 
@@ -294,9 +401,35 @@ _FILLERS = re.compile(
     r"^(?:hey |ok |okay |hi )?jarvis[,: ]+|^(?:um|uh|er)\b[, ]*|\bplease\b\s*$", re.I
 )
 
+#: Ways of asking that don't change what's being asked.
+_POLITE_PREFIX = re.compile(
+    r"^(?:(?:hey |ok |okay |hi )?jarvis[,:]?\s+|please\s+|kindly\s+|just\s+|"
+    r"(?:can|could|would|will) you(?: please| just| quickly)?\s+|any chance you could\s+|"
+    r"i(?:'d| would) like you to\s+|i (?:want|need) you to\s+|go ahead and\s+)",
+    re.I,
+)
+_POLITE_SUFFIX = re.compile(
+    r"(?:[\s,]+(?:please|for me|real quick|quickly|thanks|thank you|right now|now|jarvis))+[\s.!?]*$",
+    re.I,
+)
+
 
 def _normalise(text: str) -> str:
     cleaned = (text or "").strip()
-    cleaned = _FILLERS.sub("", cleaned).strip()
+    cleaned = _FILLERS.sub("", cleaned).strip().rstrip(",").strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned
+
+
+def _variants(cleaned: str) -> list[str]:
+    """The request as said, then with the politeness taken off — tried in
+    that order, so a pattern that genuinely includes "can you" ("can you see
+    my screen") still matches as written."""
+    polite = cleaned
+    while True:
+        stripped = _POLITE_SUFFIX.sub("", _POLITE_PREFIX.sub("", polite)).strip()
+        stripped = re.sub(r"[.!?]+$", "", stripped).strip()
+        if stripped == polite:
+            break
+        polite = stripped
+    return [cleaned] if polite == cleaned or not polite else [cleaned, polite]

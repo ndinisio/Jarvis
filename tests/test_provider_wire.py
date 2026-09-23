@@ -208,3 +208,40 @@ async def test_anthropic_without_a_key_refuses_cleanly():
     assert await provider.available() is False
     with pytest.raises(ModelUnavailable):
         _ = [c async for c in provider.stream_chat([ChatMessage("user", "hi")], "claude")]
+
+
+# --- v3.0: runtime options and honest image types ------------------------------
+
+async def test_ollama_receives_the_context_window_and_keep_alive():
+    """Ollama's default context is small enough to silently cut the front
+    off an agent prompt carrying a page's elements; the slot's num_ctx must
+    reach the server."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, text=json.dumps({"message": {"content": "ok"}, "done": True}))
+
+    provider = _mount(OllamaProvider("http://ollama.test"), handler)
+    chunks = [c async for c in provider.stream_chat([ChatMessage("user", "hi")], "qwen3:8b",
+                                                    num_ctx=8192, keep_alive="1h")]
+    assert chunks == ["ok"]
+    assert seen["options"]["num_ctx"] == 8192
+    assert seen["keep_alive"] == "1h"
+    await provider.close()
+
+
+def test_image_media_type_is_read_from_the_bytes():
+    from jarvis.models.base import image_media_type
+
+    assert image_media_type("/9j/4AAQSkZJRgABAQ") == "image/jpeg"
+    assert image_media_type("iVBORw0KGgoAAAANSU") == "image/png"
+    assert image_media_type("R0lGODlhAQABAIAAAP") == "image/gif"
+
+
+async def test_the_router_passes_slot_runtime_options_only_to_providers_that_take_them(app, fake_provider):
+    """FakeProvider (like the hosted APIs) has no num_ctx knob — passing it
+    one must not happen; Ollama must get it."""
+    app.models._resolved.clear()
+    await app.models.complete("general", [ChatMessage("user", "hi")])
+    assert "num_ctx" not in fake_provider.calls[-1]["kwargs"]

@@ -212,6 +212,8 @@ class ModelRouter:
         )
         ttft: float | None = None
         chars = 0
+        runtime = ({"num_ctx": conf.num_ctx, "keep_alive": conf.keep_alive}
+                   if getattr(resolution.provider, "accepts_runtime_options", False) else {})
         try:
             async for delta in resolution.provider.stream_chat(
                 messages,
@@ -221,6 +223,7 @@ class ModelRouter:
                 json_mode=json_mode,
                 stop=stop,
                 timeout_s=conf.timeout_s if timeout_s is None else timeout_s,
+                **runtime,
             ):
                 if ttft is None:
                     ttft = watch.elapsed_ms

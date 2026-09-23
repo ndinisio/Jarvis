@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from ..core.errors import ModelTimeout, ModelUnavailable
-from .base import ChatMessage, ModelProvider
+from .base import ChatMessage, ModelProvider, image_media_type
 
 
 class OpenAICompatibleProvider(ModelProvider):
@@ -123,6 +123,6 @@ def _encode(message: ChatMessage) -> dict[str, Any]:
     parts: list[dict[str, Any]] = [{"type": "text", "text": message.content}]
     for image in message.images:
         parts.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}}
+            {"type": "image_url", "image_url": {"url": f"data:{image_media_type(image)};base64,{image}"}}
         )
     return {"role": message.role, "content": parts}

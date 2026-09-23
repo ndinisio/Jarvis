@@ -503,7 +503,7 @@ async def test_triage_action_with_sufficient_objective_skips_understanding(app, 
                           "confidence": "confident", "missing": []})
     brain.decide(action="tool_call", tool="open_application", arguments={"name": "Safari"},
                  reason="the user named it")
-    await app.ask("would you fire up Safari for me")
+    await app.ask("get Safari up on screen for me")
     assert desktop["opened"] == ["Safari"]
     assert brain.prompts("understand") == [], "a sufficient objective should skip Understanding"
 
@@ -1122,7 +1122,7 @@ async def test_the_trace_reports_stages_without_exposing_reasoning(app, brain, d
     brain.understand(goal="open Safari", kind="open application", targets=["Safari"])
     brain.decide(action="tool_call", tool="open_application", arguments={"name": "Safari"},
                  reason="the user named it")
-    await app.ask("would you open Safari for me")
+    await app.ask("get Safari up on screen for me")
 
     stages = [e.payload["stage"] for e in app.bus.history if e.type == "intelligence.trace"]
     assert {"intent", "decision", "result", "verify", "complete"} <= set(stages)
@@ -1739,7 +1739,8 @@ async def test_declining_the_automation_start_confirmation_still_gets_a_reply(
     app.orchestrator.voice = voice
     app.config.voice.enabled = True
 
-    app.config_store.update({"security": {"auto_approve": ["low"], "confirmation_timeout_s": 0.15}})
+    app.config_store.update({"security": {"auto_approve": ["low"], "confirmation_timeout_s": 0.15,
+                                          "autonomy": "confirm_start"}})
 
     calls = _stub_tool(app, monkeypatch, "browse_to",
                        ToolResult(data={"url": "https://x.example"}, summary="Opened it."))

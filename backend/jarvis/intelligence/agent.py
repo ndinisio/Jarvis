@@ -50,7 +50,7 @@ Details: kind={kind}; targets={targets}; constraints={constraints}
 {plan}
 What has happened so far this turn:
 {observations}
-
+{view}
 Tools you may use:
 {tools}
 
@@ -64,7 +64,8 @@ Rules:
 - Use a tool only if it moves the objective forward; the results above may already answer it.
 - Use information already gathered rather than fetching it again.
 - clarify only when you genuinely cannot proceed without the user.
-- respond when you can answer now. Answer from the results above, not from guesses."""
+- respond when you can answer now. Answer from the results above, not from guesses.
+- To act on a web page, use the [handle] shown next to an element in the last result. Never make up a handle."""
 
 FINAL_PROMPT = """Give the user the answer, in one or two sentences unless detail was asked for.
 
@@ -224,13 +225,17 @@ class IntelligenceAgent:
         findings: list[str] = []
         notes: list[str] = []
         stalled = False
+        #: The full model-facing view of the latest result (a page's elements,
+        #: a file's contents…) — findings are one line each; this is what the
+        #: next decision actually acts on.
+        view = ""
 
         for step in range(1, self.max_steps + 1):
             if ctx is not None and ctx.cancelled():
                 raise Cancelled()
             outcome.steps = step
 
-            decision = await self._decide(objective, plan, cards, findings + notes, state)
+            decision = await self._decide(objective, plan, cards, findings + notes, state, view)
             outcome.model_calls += 1
             if decision is None:
                 notes.append("no decision could be read from the model")
@@ -275,6 +280,8 @@ class IntelligenceAgent:
             finding_index = len(findings)
             findings.append(f"{tool}({_short(arguments)}) → "
                             f"{'ok' if result.ok else 'failed'}: {result.summary[:200]}")
+            if result.observation or result.ok:
+                view = result.for_model(4000)
             trace.result(step, tool, result)
             if result.display:
                 outcome.display = result.display
@@ -322,7 +329,7 @@ class IntelligenceAgent:
     # ------------------------------------------------------------------
     async def _decide(self, objective: Objective, plan: Plan | None,
                       cards: list[ToolCard], observations: list[str],
-                      state: ConversationState) -> AgentDecision | None:
+                      state: ConversationState, view: str = "") -> AgentDecision | None:
         prompt = DECISION_PROMPT.format(
             goal=objective.goal,
             kind=objective.kind,
@@ -331,6 +338,7 @@ class IntelligenceAgent:
             context=state.describe_for_model(include_turns=2) or "(no prior context)",
             plan=(f"\nPlan: {plan.summary()}\n" if plan else ""),
             observations="\n".join(f"- {o}" for o in observations) or "- nothing yet",
+            view=f"\nWhat the last result showed:\n{view}\n" if view else "",
             tools=self.catalog.render(cards),
         )
         try:

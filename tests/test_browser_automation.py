@@ -194,8 +194,14 @@ class _FakeDriver:
     async def can_execute_js(self):
         return self._js_ok
 
-    async def page_manifest(self, *, limit=60, roles=None):
+    async def run_js(self, script, *, timeout=20.0):
+        return "complete" if self._js_ok else ""
+
+    async def page_manifest(self, *, limit=60, roles=None, offset=0):
         return self._manifest
+
+    async def inspect_handle(self, handle):
+        return {"found": False}
 
     async def click_handle(self, handle):
         return self._action_result
@@ -301,3 +307,76 @@ async def test_submit_page_form_labelled_checkout_is_consequential_even_mid_task
     spec = SubmitPageFormTool(app.deps).spec
     assert consequence.classify("submit_page_form", {"label": "Proceed to Checkout"}, spec) is True
     assert consequence.classify("submit_page_form", {"label": "Search"}, spec) is False
+
+
+# -- v3.0: what the model sees of a page -------------------------------------
+
+def test_a_page_listing_shows_every_handle_the_model_needs():
+    from jarvis.tools.browser.observe import render_manifest
+
+    text = render_manifest({
+        "url": "https://www.amazon.co.uk/dp/B0MOUSEM185", "title": "Mouse", "total": 90, "offset": 0,
+        "elements": [
+            {"handle": "jv41", "role": "select", "text": "Colour", "options": ["Select", "Blue"],
+             "value": "Select"},
+            {"handle": "jv42", "role": "button", "text": "Add to Basket"},
+            {"handle": "jv7", "role": "checkbox", "text": "Gift wrap", "checked": False},
+            {"handle": "jv3", "role": "link", "text": "Basket 0", "href": "/gp/cart/view.html",
+             "visible": False},
+        ],
+        "dialogs": ["Added to Basket"], "text": "Logitech M185 £12.99",
+    })
+    assert "Page: Mouse — https://www.amazon.co.uk/dp/B0MOUSEM185" in text
+    assert '[jv41] select "Colour" options=Select|Blue value="Select"' in text
+    assert '[jv42] button "Add to Basket"' in text
+    assert '[jv7] checkbox "Gift wrap" (unchecked)' in text
+    assert '[jv3] link "Basket 0" → /gp/cart/view.html (below)' in text
+    assert "offset=4" in text, "a long page says how to see more"
+    assert "Open dialog: Added to Basket" in text
+    assert "£12.99" in text
+
+
+async def test_manifest_observation_carries_the_handles(app, ctx, monkeypatch):
+    driver = _FakeDriver(manifest={
+        "elements": [{"handle": "jv9", "role": "button", "text": "Add to Basket"}],
+        "url": "https://x.example", "title": "X", "total": 1,
+    })
+    _install_fake_driver(monkeypatch, app.deps, driver)
+    outcome = await ReadPageManifestTool(app.deps).run({"limit": 50, "roles": [], "offset": 0}, ctx)
+    assert '[jv9] button "Add to Basket"' in outcome.for_model()
+    assert outcome.summary == "1 elements found on X."
+
+
+async def test_settling_waits_for_a_client_side_re_render():
+    """The page must be still before JARVIS acts: a single-page app that
+    re-renders a moment after a click would otherwise swallow what's typed
+    next (the spa-add-two evaluation failure)."""
+    from jarvis.tools.browser.observe import wait_until_quiet
+
+    class Rerendering:
+        def __init__(self):
+            self.calls = 0
+
+        async def run_js(self, script, *, timeout=20.0):
+            self.calls += 1
+            # Mutations keep arriving for the first few polls, then stop.
+            return f"complete:u:{min(self.calls, 4)}:10"
+
+    driver = Rerendering()
+    assert await wait_until_quiet(driver, quiet_s=0.3, timeout_s=3.0) is True
+    assert driver.calls >= 6, "it kept watching until the page had been still for a while"
+
+
+async def test_settling_gives_up_fast_when_javascript_is_off():
+    from jarvis.tools.browser.observe import wait_until_quiet, wait_until_ready
+
+    class Silent:
+        async def run_js(self, script, *, timeout=20.0):
+            return ""
+
+    import time as _time
+
+    started = _time.monotonic()
+    assert await wait_until_ready(Silent(), timeout_s=5.0) is False
+    assert await wait_until_quiet(Silent(), timeout_s=5.0) is False
+    assert _time.monotonic() - started < 2.0

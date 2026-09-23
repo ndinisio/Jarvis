@@ -42,6 +42,10 @@ class ModelProvider(abc.ABC):
     name: str = "provider"
     #: Whether this provider runs on the user's machine (affects privacy rules).
     local: bool = False
+    #: Whether ``stream_chat`` takes the per-slot runtime options
+    #: (``num_ctx``, ``keep_alive``) — true for Ollama, which manages its own
+    #: model memory; hosted APIs have no such knobs.
+    accepts_runtime_options: bool = False
 
     @abc.abstractmethod
     async def available(self) -> bool:
@@ -91,6 +95,22 @@ class ModelProvider(abc.ABC):
 
     async def close(self) -> None:  # pragma: no cover - default no-op
         return None
+
+
+def image_media_type(data: str) -> str:
+    """The media type of a base64-encoded image, from its first bytes.
+
+    Screenshots are re-encoded as JPEG when Pillow is available and stay PNG
+    otherwise; a provider told the wrong type may reject the image outright.
+    """
+    head = (data or "").lstrip()[:16]
+    if head.startswith("/9j/"):
+        return "image/jpeg"
+    if head.startswith("R0lGOD"):
+        return "image/gif"
+    if head.startswith("UklGR"):
+        return "image/webp"
+    return "image/png"
 
 
 def extract_json(text: str) -> dict | None:

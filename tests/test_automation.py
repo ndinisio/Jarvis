@@ -134,7 +134,7 @@ async def test_a_declined_start_never_runs_anything(app, scripted, monkeypatch):
     swallowed with no reply at all (see test_intelligence.py's
     test_declining_the_automation_start_confirmation_still_gets_a_reply for
     the end-to-end proof)."""
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15, "autonomy": "confirm_start"}})
     calls = _stub(app, monkeypatch, "browse_to", ToolResult(summary="should not run"))
     scripted.script_decompose(["open the site"])
 
@@ -153,7 +153,7 @@ async def test_a_routine_step_is_covered_by_the_task_grant_after_the_start_is_ap
     # Config updates rebuild the tool registry (see core/app.py's
     # _on_config_change), so this must happen before _stub() below —
     # otherwise the stub is discarded along with the old registry.
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.5}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.5, "autonomy": "confirm_start"}})
     calls = _stub(app, monkeypatch, "click_element",
                   ToolResult(data={"matched": "Search"}, summary="Clicked Search."))
     scripted.script_decompose(["click search"])
@@ -184,7 +184,7 @@ async def test_a_checkout_labelled_click_always_asks_again_even_mid_task(app, sc
     excludes this from the task grant, so it must produce its own,
     separate confirmation — proven here by requiring two distinct
     approvals rather than one covering both."""
-    app.config_store.update({"security": {"confirmation_timeout_s": 2.0}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 2.0, "autonomy": "confirm_start"}})
     _stub(app, monkeypatch, "click_element",
          ToolResult(data={"matched": "Checkout"}, summary="Clicked."))
     scripted.script_decompose(["checkout"])
@@ -214,7 +214,7 @@ async def test_a_declined_step_stops_the_milestone_without_retrying(app, scripte
     """The same deterministic short-circuit as intelligence/recovery.py: a
     decline ends the milestone immediately rather than asking the model to
     try again, which would just repeat the same prompt."""
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15, "autonomy": "confirm_start"}})
     calls = _stub(app, monkeypatch, "click_element", ToolResult(summary="should not run"))
     scripted.script_decompose(["checkout"])
     scripted.script_step(action="tool_call", tool="click_element",
@@ -364,3 +364,74 @@ async def test_a_genuinely_slow_step_is_also_narrated_not_only_the_milestone(app
     # Milestone boundary + the slow step itself, both narrated.
     assert len(voice.spoken) >= 2
     assert any("Found some results" in s for s in voice.spoken)
+
+
+
+# -- v3.0: autonomy and what the model sees -----------------------------------
+
+async def test_by_default_a_task_just_starts_and_routine_steps_run_unasked(app, scripted, monkeypatch):
+    """The user's chosen autonomy: no "shall I start?" and no prompt for a
+    routine click — only consequential steps ask."""
+    calls = _stub(app, monkeypatch, "click_element",
+                  ToolResult(data={"matched": "Search"}, summary="Clicked Search."))
+    scripted.script_decompose(["click search"])
+    scripted.script_step(action="tool_call", tool="click_element", arguments={"label": "Search"})
+    scripted.script_step(action="complete", reason="done")
+    scripted.script_summary("Clicked search.")
+
+    task = app.deps.tasks.create("automation", "test")
+    await asyncio.wait_for(
+        AutomationCapability(app.deps).handle(_request(app, task, "click search")), timeout=5.0)
+    assert len(calls) == 1
+    asked = [e for e in app.bus.history if e.type == "confirm.request"]
+    assert asked == []
+
+
+async def test_by_default_a_consequential_step_still_asks_exactly_once(app, scripted, monkeypatch):
+    app.config_store.update({"security": {"confirmation_timeout_s": 2.0}})
+    _stub(app, monkeypatch, "click_element", ToolResult(data={"matched": "Checkout"}, summary="Clicked."))
+    scripted.script_decompose(["checkout"])
+    scripted.script_step(action="tool_call", tool="click_element",
+                         arguments={"label": "Proceed to Checkout"})
+    scripted.script_step(action="complete", reason="done")
+    scripted.script_summary("Done.")
+    asked: list[str] = []
+
+    async def approve():
+        while not asked:
+            pending = app.permissions.pending()
+            if pending:
+                asked.append(pending[0]["action"])
+                app.permissions.resolve(pending[0]["id"], True)
+            await asyncio.sleep(0.01)
+
+    approver = asyncio.create_task(approve())
+    task = app.deps.tasks.create("automation", "test")
+    await AutomationCapability(app.deps).handle(_request(app, task, "checkout"))
+    await asyncio.wait_for(approver, timeout=3.0)
+    assert asked == ["click_element"]
+
+
+async def test_the_next_step_sees_the_full_result_not_a_one_line_summary(app, scripted, monkeypatch):
+    """The root cause of "the last steps fail": the model was only ever shown
+    "60 elements found", never the handles it needed to click."""
+    _stub(app, monkeypatch, "search_web", ToolResult(
+        summary="Found 2 results.",
+        observation='[jv9] button "Add to Basket"\n[jv10] link "Basket 0"'))
+    scripted.script_decompose(["look"])
+    scripted.script_step(action="tool_call", tool="search_web", arguments={"query": "x"})
+    scripted.script_step(action="complete", reason="done")
+    scripted.script_summary("Done.")
+    prompts: list[str] = []
+    original = scripted._reply
+
+    def spy(messages, kwargs):
+        prompts.append(" ".join(m.content for m in messages))
+        return original(messages, kwargs)
+
+    app.models._providers["ollama"].router = spy
+    task = app.deps.tasks.create("automation", "test")
+    await AutomationCapability(app.deps).handle(_request(app, task, "look"))
+    step_prompts = [p for p in prompts if "What you can see now" in p]
+    assert len(step_prompts) == 2
+    assert '[jv9] button "Add to Basket"' in step_prompts[1]

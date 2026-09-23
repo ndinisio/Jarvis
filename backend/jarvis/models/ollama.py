@@ -17,6 +17,7 @@ log = get_logger("jarvis.models.ollama")
 
 class OllamaProvider(ModelProvider):
     name = "ollama"
+    accepts_runtime_options = True
     local = True
 
     def __init__(self, base_url: str = "http://127.0.0.1:11434", timeout_s: float = 120.0):
@@ -76,6 +77,8 @@ class OllamaProvider(ModelProvider):
         stop: list[str] | None = None,
         json_mode: bool = False,
         timeout_s: float = 60.0,
+        num_ctx: int = 0,
+        keep_alive: str = "30m",
     ) -> AsyncIterator[str]:
         payload: dict[str, Any] = {
             "model": model,
@@ -85,8 +88,10 @@ class OllamaProvider(ModelProvider):
                 "temperature": temperature,
                 "num_predict": max_tokens,
             },
-            "keep_alive": "30m",
+            "keep_alive": keep_alive or "30m",
         }
+        if num_ctx:
+            payload["options"]["num_ctx"] = int(num_ctx)
         if stop:
             payload["options"]["stop"] = stop
         if json_mode:

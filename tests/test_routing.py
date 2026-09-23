@@ -131,7 +131,7 @@ async def test_router_arithmetic_is_deterministic(app):
 
 async def test_router_heuristic_stage(app):
     decision = await app.router.route(
-        "can you compare the reviews and prices for these headphones online"
+        "I'd love a comparison of the reviews and prices for these headphones online"
     )
     assert decision.path in {RoutePath.HEURISTIC, RoutePath.MODEL, RoutePath.FALLBACK}
     assert decision.kind == RouteKind.CAPABILITY
@@ -166,3 +166,55 @@ async def test_classify_hint_degrades_gracefully_on_nonsense(app, fake_provider)
     fake_provider.json_responses.append("I think you want the FILE capability maybe?")
     hint = await app.router._classify("do the thing with the stuff")
     assert hint is None
+
+
+# -- v3.0: one request, one clause -------------------------------------------
+
+def test_the_whole_understanding_corpus_routes_correctly_on_the_fast_path():
+    """The deterministic gate of the v3.0 evaluation (evals/utterances.yaml):
+    every fast-path expectation in the 300+ utterance corpus holds."""
+    from evals.run_understanding import check_quick
+    from evals.suites import load_utterances
+
+    failures = [(r.text, r.quick_expected, r.quick_actual)
+                for r in map(check_quick, load_utterances()) if r.quick_ok is False]
+    assert failures == []
+
+
+@pytest.mark.parametrize("text", [
+    "search for AirPods on Amazon and add them to my basket",
+    "open Safari and go to bbc.co.uk",
+    "check my email and then reply to Sarah",
+    "take a screenshot, then describe it",
+    "research the best laptops and add the top one to my basket",
+    "what's my battery level and how much storage do I have",
+])
+def test_a_second_instruction_keeps_a_request_off_the_fast_path(text):
+    assert QuickCommands().match(text) is None
+
+
+@pytest.mark.parametrize("text,name", [
+    ("could you open safari please", "open_application"),
+    ("any chance you could open Mail real quick", "open_application"),
+    ("can you take a screenshot for me", "capture_screen"),
+    ("Go to github.com, please", "browse_to"),
+    ("remember that I like tea and biscuits", "memory"),
+    ("search for salt and pepper grinders", "browse_to"),
+])
+def test_politeness_and_lists_still_get_the_fast_answer(text, name):
+    decision = QuickCommands().match(text)
+    assert decision is not None and decision.name == name
+
+
+@pytest.mark.parametrize("text", [
+    "remove the kettle from my amazon basket",
+    "delete the second email",
+    "remember to buy milk",
+    "open a new tab",
+    "open the downloads folder",
+    "search for usb cables on amazon",
+    "how much storage does the iPhone 16 have",
+    "what's the battery life of the MacBook Air",
+])
+def test_lookalike_requests_are_not_misrouted(text):
+    assert QuickCommands().match(text) is None

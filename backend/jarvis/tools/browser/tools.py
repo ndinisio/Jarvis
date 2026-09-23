@@ -51,11 +51,15 @@ class BrowserDriver(abc.ABC):
         return (await self.run_js("1+1")).strip() == "2"
 
     # -- grounded interaction, built entirely on run_js() -------------------
-    async def page_manifest(self, *, limit: int = 60,
-                            roles: list[str] | None = None) -> dict[str, Any]:
-        raw = await self.run_js(manifest_js.build_manifest_script(limit=limit, roles=roles),
+    async def page_manifest(self, *, limit: int = 60, roles: list[str] | None = None,
+                            offset: int = 0) -> dict[str, Any]:
+        raw = await self.run_js(manifest_js.build_manifest_script(limit=limit, roles=roles,
+                                                                   offset=offset),
                                 timeout=20.0)
         return _parse_js_json(raw)
+
+    async def inspect_handle(self, handle: str) -> dict[str, Any]:
+        return _parse_js_json(await self.run_js(manifest_js.build_inspect_script(handle), timeout=10.0))
 
     async def click_handle(self, handle: str) -> dict[str, Any]:
         return _parse_js_json(await self.run_js(manifest_js.build_click_script(handle)))
@@ -254,6 +258,8 @@ class CurrentPageTool(Tool):
             data={"url": page["url"], "title": page.get("title", ""), "text": text[:12000],
                   "browser": driver.app_name},
             summary=f"You're on {page.get('title') or _domain(page['url'])}.",
+            observation=(f"Page: {page.get('title') or 'untitled'} — {page['url']}\n"
+                         + (f"Page text: {' '.join(text.split())[:3000]}" if text else "")),
             display={"kind": "page", "title": page.get("title", ""), "url": page["url"],
                      "text": text[:3000]},
         )

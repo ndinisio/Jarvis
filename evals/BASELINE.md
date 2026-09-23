@@ -39,3 +39,31 @@ Other findings from the same run:
 
 The semantic (chat vs. action) stage and the native Mac suite need real
 models / real macOS and are measured on the Mac (`scripts/bench_all.sh`).
+
+## Phase 1 — root-cause fixes
+
+**Web tasks, oracle: 38 / 40 (95%)**, up from 4 / 40. Every shopping, mail,
+form and safety task now completes. The two left are the shadow-DOM widget
+and the iframe, which the Phase 4 page snapshot is built to reach.
+
+What changed:
+
+- **The model sees the page.** Tools return a model-facing `observation`
+  (a handle-addressed element listing, ranked so the page's content comes
+  before its header clutter, with select options, checkbox state, open
+  dialogs and a text excerpt carrying prices). After every web action the
+  loop looks at the page again by itself and puts it under "What you can
+  see now".
+- **The page is still before JARVIS acts or looks.** A mutation-counting
+  signature must stay unchanged for half a second, so a single-page app's
+  re-render can't swallow what's typed next.
+- **Safety judges the real element.** The permission gate inspects the
+  element a click will hit (its text, id, name, link and form action)
+  before asking, so "Buy Now" described as "Add to Basket" still asks, and
+  a checkbox labelled "Send me the newsletter" doesn't.
+- **Autonomy as chosen:** routine steps run; paying, ordering, sending,
+  deleting, installing and typing into a terminal always ask.
+
+**Understanding corpus, fast path: 315 / 315 (100%)**, up from 244 / 315.
+Compound requests (50/50) and domain-word traps (24/24) no longer misroute;
+polite phrasing ("could you… for me") gets the fast answer (15/15).

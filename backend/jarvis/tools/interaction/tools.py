@@ -113,6 +113,12 @@ class TypeTextTool(Tool):
     def __init__(self, deps):
         self._deps = deps
 
+    async def inspect(self, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any] | None:
+        """Which app will receive this input — typing into a terminal is a
+        command, not a keystroke (see security/consequence.py)."""
+        app = (args.get("app") or "").strip() or await self._deps.controller.frontmost_app()
+        return {"application": app} if app else None
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         text = args["text"]
         ctx.report(f"Typing “{text[:40]}”…", tool="type_text")
@@ -159,6 +165,12 @@ class PressKeyTool(Tool):
 
     def __init__(self, deps):
         self._deps = deps
+
+    async def inspect(self, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any] | None:
+        """Which app will receive this input — typing into a terminal is a
+        command, not a keystroke (see security/consequence.py)."""
+        app = (args.get("app") or "").strip() or await self._deps.controller.frontmost_app()
+        return {"application": app} if app else None
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         key = str(args["key"]).strip().lower()
@@ -218,6 +230,12 @@ class ClickElementTool(Tool):
 
     def __init__(self, deps):
         self._deps = deps
+
+    async def inspect(self, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any] | None:
+        """Which app will receive this input — typing into a terminal is a
+        command, not a keystroke (see security/consequence.py)."""
+        app = (args.get("app") or "").strip() or await self._deps.controller.frontmost_app()
+        return {"application": app} if app else None
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         label = str(args["label"]).strip()

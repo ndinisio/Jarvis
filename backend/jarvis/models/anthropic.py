@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from ..core.errors import ModelTimeout, ModelUnavailable
-from .base import ChatMessage, ModelProvider
+from .base import ChatMessage, ModelProvider, image_media_type
 
 API_VERSION = "2023-06-01"
 
@@ -123,7 +123,7 @@ def _encode(message: ChatMessage) -> dict[str, Any]:
         content.append(
             {
                 "type": "image",
-                "source": {"type": "base64", "media_type": "image/png", "data": image},
+                "source": {"type": "base64", "media_type": image_media_type(image), "data": image},
             }
         )
     content.append({"type": "text", "text": message.content})

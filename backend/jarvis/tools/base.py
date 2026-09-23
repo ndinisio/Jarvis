@@ -110,6 +110,17 @@ class ToolResult:
     #: failing, which the user should simply be told about, and it lets a wrong
     #: guess by the fast path be reconsidered instead of becoming a dead end.
     wrong_tool: bool = False
+    #: What a model deciding the *next* step needs to see — e.g. a page's
+    #: elements with their handles. ``summary`` is written to be spoken; this
+    #: is written to be acted on. Empty means the summary says it all.
+    observation: str = ""
+
+    def for_model(self, limit: int = 4000) -> str:
+        """The result as the next decision should see it."""
+        text = self.observation or self.summary or ("done" if self.ok else "failed")
+        if not self.ok and self.error and self.error not in text:
+            text = f"{text} ({self.error})"
+        return text if len(text) <= limit else text[:limit] + "\n… (truncated)"
 
     @classmethod
     def failure(cls, message: str, detail: str | None = None, *,
@@ -124,6 +135,7 @@ class ToolResult:
             "display": self.display,
             "error": self.error,
             "duration_ms": round(self.duration_ms, 2),
+            "observation": self.observation,
         }
 
 
@@ -172,6 +184,17 @@ class Tool(abc.ABC):
     # Optional hook: tools that can't run here (missing dependency, wrong OS)
     async def health(self) -> tuple[bool, str]:
         return True, "ok"
+
+    async def inspect(self, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any] | None:
+        """Describe the real thing this call would act on, before it runs.
+
+        The permission gate classifies a call on what it will *actually*
+        touch — the button's own text, the form it submits, the app that
+        will receive the keystrokes — never on how the model described it.
+        Tools that act on something addressable override this; ``None``
+        means there's nothing more to know than the arguments.
+        """
+        return None
 
     def validate(self, args: dict[str, Any]) -> dict[str, Any]:
         """Light JSON-schema validation: required keys, types, defaults, enums."""

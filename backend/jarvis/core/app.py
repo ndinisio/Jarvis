@@ -131,6 +131,12 @@ class JarvisApp:
                 return
             await self.models.warmup(Slot.FAST)
             log.info("fast model ready: %s", status["slots"]["fast"].get("resolved"))
+            # The first real action is decided on the reasoning slot, not the
+            # fast one; loading it now is what keeps that first decision from
+            # paying for a cold start.
+            reasoning = self.models.effective_slot(self.config.intelligence.reasoning_slot)
+            if reasoning != self.models.effective_slot(Slot.FAST):
+                await self.models.warmup(reasoning)
         except Exception as exc:
             log.debug("warmup skipped: %s", exc)
 

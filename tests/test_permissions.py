@@ -11,13 +11,50 @@ from jarvis.security.permissions import RiskLevel
 
 def test_policy_follows_configuration(app):
     broker = app.permissions
+    # Default autonomy: routine steps of something the user asked for just run.
     assert broker.policy_for(RiskLevel.LOW) == "allow"
+    assert broker.policy_for(RiskLevel.MEDIUM) == "allow"
+    assert broker.policy_for(RiskLevel.HIGH) == "confirm"
+
+    app.config_store.update({"security": {"autonomy": "confirm_start"}})
     assert broker.policy_for(RiskLevel.MEDIUM) == "confirm"
     assert broker.policy_for(RiskLevel.HIGH) == "confirm"
 
     app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
     assert broker.policy_for(RiskLevel.MEDIUM) == "allow"
     assert broker.policy_for(RiskLevel.HIGH) == "confirm"
+
+
+# -- autonomy -----------------------------------------------------------------
+# The user's choice for v3.0: routine steps just happen; anything
+# consequential always asks, whatever else is configured.
+
+async def test_default_autonomy_lets_routine_steps_run(app):
+    assert await app.permissions.require("click_page_element", RiskLevel.MEDIUM, "click Add to Basket")
+    assert app.permissions.pending() == []
+
+
+async def test_consequential_steps_always_ask_under_the_default_autonomy(app):
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    with pytest.raises(ConfirmationDeclined):
+        await app.permissions.require("click_page_element", RiskLevel.MEDIUM, 'Click "Buy Now"?',
+                                      consequential=True)
+
+
+async def test_a_privacy_consent_always_asks_whatever_the_autonomy(app):
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    with pytest.raises(ConfirmationDeclined):
+        await app.permissions.require("screen_awareness:start", RiskLevel.MEDIUM,
+                                      "watch the screen", consent=True)
+
+
+async def test_confirm_each_step_ignores_task_grants(app):
+    app.config_store.update({"security": {"autonomy": "confirm_each_step",
+                                          "confirmation_timeout_s": 0.15}})
+    app.permissions.grant_task("task-1")
+    with pytest.raises(ConfirmationDeclined):
+        await app.permissions.require("click_page_element", RiskLevel.MEDIUM, "click a button",
+                                      task_id="task-1")
 
 
 async def test_low_risk_needs_no_confirmation(app):
@@ -101,7 +138,7 @@ def test_shell_allowlist_and_denylist(app):
 
 async def test_registry_gates_medium_risk_tools(app, ctx):
     """A MEDIUM-risk tool must not execute while confirmation is outstanding."""
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.2}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.2, "autonomy": "confirm_start"}})
     result = await app.deps.registry.call("close_application", {"name": "Finder"}, ctx)
     assert result.ok is False
     assert "confirm" in (result.summary + str(result.error)).lower()
@@ -167,7 +204,7 @@ async def test_task_grant_never_covers_a_consequential_call(app):
 
 async def test_task_grant_does_not_leak_to_a_different_task(app):
     app.permissions.grant_task("task-1")
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15, "autonomy": "confirm_start"}})
     with pytest.raises(ConfirmationDeclined):
         await app.permissions.require("click_page_element", RiskLevel.MEDIUM, "click a button",
                                       consequential=False, task_id="task-2")
@@ -176,7 +213,7 @@ async def test_task_grant_does_not_leak_to_a_different_task(app):
 async def test_revoke_task_clears_the_grant(app):
     app.permissions.grant_task("task-1")
     app.permissions.revoke_task("task-1")
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15, "autonomy": "confirm_start"}})
     with pytest.raises(ConfirmationDeclined):
         await app.permissions.require("click_page_element", RiskLevel.MEDIUM, "click a button",
                                       consequential=False, task_id="task-1")
@@ -221,7 +258,7 @@ async def test_allow_session_grant_false_also_disables_a_task_grant(app):
     that explicitly asks for a one-off prompt could be silently waved
     through by an unrelated task grant."""
     app.permissions.grant_task("task-1")
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15, "autonomy": "confirm_start"}})
     with pytest.raises(ConfirmationDeclined):
         await app.permissions.require("click_page_element", RiskLevel.MEDIUM, "click a button",
                                       consequential=False, task_id="task-1",
@@ -233,7 +270,24 @@ async def test_registry_stamps_a_stable_prefix_on_a_declined_call(app, ctx):
     prefix on ToolResult.error — recovery.py matches on this, not on the
     human-facing wording, which differs between a timeout and an explicit
     "no"."""
-    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15, "autonomy": "confirm_start"}})
     result = await app.deps.registry.call("close_application", {"name": "Finder"}, ctx)
+    assert result.ok is False
+    assert (result.error or "").startswith("confirmation_declined:")
+
+
+
+async def test_an_explicit_auto_approve_is_the_users_own_override(app):
+    """auto_approve is honoured as written — the pre-v3 contract for users
+    who deliberately turned confirmations off."""
+    app.config_store.update({"security": {"auto_approve": ["low", "medium", "high"],
+                                          "always_confirm": []}})
+    assert await app.permissions.require("send_email", RiskLevel.HIGH, "send", consequential=True)
+
+
+async def test_opening_a_checkout_page_directly_is_gated_even_though_browsing_is_low_risk(app, ctx):
+    app.config_store.update({"security": {"confirmation_timeout_s": 0.15}})
+    result = await app.deps.registry.call("browse_to", {"url": "https://www.amazon.co.uk/gp/buy/spc"},
+                                          app.deps.tool_context())
     assert result.ok is False
     assert (result.error or "").startswith("confirmation_declined:")

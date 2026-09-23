@@ -65,18 +65,29 @@ class ToolRegistry:
         return {k: sorted(v) for k, v in sorted(grouped.items())}
 
     def describe_for_model(self, names: Iterable[str] | None = None) -> str:
-        """Compact tool listing for prompting — deliberately terse to keep
-        local-model prompts small."""
+        """Tool listing for prompting: a signature, what it's for, and the
+        per-argument notes that change how it must be called (e.g. "the
+        handle shown in the page listing") — terse, but never so terse the
+        model has to guess what an argument means."""
         lines = []
         for name in sorted(names or self._tools):
             tool = self._tools.get(name)
             if tool is None:
                 continue
-            props = tool.spec.parameters.get("properties", {})
+            spec = tool.spec
+            props = spec.parameters.get("properties", {})
+            required = set(spec.parameters.get("required", []))
             args = ", ".join(
-                f"{k}:{v.get('type', 'string')}" for k, v in props.items()
+                f"{k}:{v.get('type', 'string')}" if k in required else f"[{k}:{v.get('type', 'string')}]"
+                for k, v in props.items()
             )
-            lines.append(f"- {tool.spec.name}({args}) — {tool.spec.description}")
+            line = f"- {spec.name}({args}) — {spec.description}"
+            notes = [f"{k}: {v['description']}" for k, v in props.items() if v.get("description")]
+            if notes:
+                line += " (" + "; ".join(notes) + ")"
+            if spec.returns:
+                line += f" → {spec.returns}"
+            lines.append(line)
         return "\n".join(lines)
 
     # -- execution ---------------------------------------------------------
@@ -116,13 +127,26 @@ class ToolRegistry:
         # duplication is somewhere else — voice capture, TTS, the UI).
         log.info("turn_id=%s stage=tool_start tool=%s", turn_id, name)
         try:
+            # What the call will really touch, read before it runs — the gate
+            # judges that, not the model's description of it.
+            target = None
             if spec.risk != "low":
+                try:
+                    target = await tool.inspect(cleaned, ctx)
+                except Exception:  # pragma: no cover - inspection is best effort
+                    log.debug("inspect failed for %s", name, exc_info=True)
+            consequential = consequence.classify(name, cleaned, spec, target)
+            # A low-risk tool can still be pointed at something consequential
+            # (opening a checkout URL directly); that call is gated like any
+            # other consequential one.
+            if spec.risk != "low" or consequential:
                 await ctx.permissions.require(
                     action=name,
-                    risk=spec.risk,
-                    summary=_confirmation_text(spec, cleaned),
-                    details={"tool": name, "args": _redact(cleaned), "category": spec.category},
-                    consequential=consequence.classify(name, cleaned, spec),
+                    risk=spec.risk if spec.risk != "low" else "medium",
+                    summary=_confirmation_text(spec, cleaned, target),
+                    details={"tool": name, "args": _redact(cleaned), "category": spec.category,
+                             **({"target": target} if target else {})},
+                    consequential=consequential,
                     task_id=ctx.task_id,
                 )
             result = await tool.run(cleaned, ctx)
@@ -184,10 +208,14 @@ def _redact(args: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _confirmation_text(spec, args: dict[str, Any]) -> str:
+def _confirmation_text(spec, args: dict[str, Any], target: dict[str, Any] | None = None) -> str:
     if spec.confirmation_template:
+        # The user is asked about the element that will really be clicked,
+        # in its own words — not the label the model supplied.
+        real = (target or {}).get("text")
+        values = {**args, **({"label": real} if real else {})}
         try:
-            return spec.confirmation_template.format(**args)
+            return spec.confirmation_template.format(**values)
         except (KeyError, IndexError):
             pass  # fall through to the generic phrasing below
     detail = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3])

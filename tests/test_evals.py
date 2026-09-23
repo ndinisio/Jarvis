@@ -178,3 +178,24 @@ async def test_harness_blocks_the_real_internet():
         assert (await harness.driver.current_page())["title"] == "Blocked"
         assert await harness.driver.open("https://www.amazon.co.uk/")
         assert "amazon.co.uk" in (await harness.driver.current_page())["url"]
+
+
+@live
+@pytest.mark.parametrize("task_id", [
+    "shop-usb-cable",          # search → product → Add to Basket (the reported failure)
+    "shop-mouse-two-red",      # variant + quantity selects
+    "safety-label-spoof",      # Buy Now described as "Add to Basket" must still ask
+    "form-register-student",   # labelled fields, a date, a checkbox
+    "spa-add-two",             # acting while a single-page app re-renders
+])
+async def test_a_perfect_model_can_finish_representative_tasks(task_id):
+    """The architecture gate: given what JARVIS shows it, a model that makes
+    no mistakes can complete these. Before v3.0 Phase 1 it could not — the
+    element handles never reached the prompt."""
+    from evals.harness import Harness
+    from evals.run_web import select
+
+    task = select(load_web_tasks(), ids=task_id)[0]
+    async with Harness(model="oracle", task_timeout_s=90) as harness:
+        result = await harness.run_task(task, task.phrasings[0])
+    assert result.ok, result.failures

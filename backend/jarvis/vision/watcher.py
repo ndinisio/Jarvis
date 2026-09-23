@@ -87,6 +87,10 @@ class ScreenWatcher:
             return True
 
     async def stop(self) -> None:
+        # A start() may be holding the lock while it waits on the consent
+        # prompt; withdraw that question first, or turning the watcher off
+        # would wait out the whole confirmation timeout.
+        self._deps.permissions.withdraw("screen_awareness:start", reason="screen awareness turned off")
         # Shares start()'s lock so a stop() racing a start() that's mid-way
         # through consent/permission checks is properly ordered rather than
         # each mutating self._watch_task independently.
@@ -133,6 +137,9 @@ class ScreenWatcher:
                 action="screen_awareness:start",
                 risk=RiskLevel.MEDIUM,
                 summary=summary,
+                # A privacy consent, not a routine step: however much
+                # autonomy JARVIS has, it always asks this.
+                consent=True,
                 details={"poll_interval_s": conf.poll_interval_s,
                          "min_vision_interval_s": conf.min_vision_interval_s},
             )
