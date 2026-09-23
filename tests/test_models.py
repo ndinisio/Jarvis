@@ -101,3 +101,109 @@ async def test_router_reconfiguration_rebuilds_providers(app):
 async def test_complete_json_returns_none_on_garbage(app, fake_provider):
     fake_provider.json_responses.append("absolutely not json")
     assert await app.models.complete_json(Slot.FAST, [ChatMessage("user", "x")]) is None
+
+
+# --- v3.0 Phase 2: chains, resting, privacy, emulation --------------------------
+
+class _Scripted:
+    """A native-chat provider that answers (or fails) as told."""
+
+    native_chat = True
+    accepts_runtime_options = False
+
+    def __init__(self, name, *, local, outcomes):
+        self.name = name
+        self.local = local
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    async def available(self):
+        return True
+
+    async def list_models(self):
+        return ["m"]
+
+    async def chat(self, messages, model, **kwargs):
+        from jarvis.models.base import Completion
+
+        self.calls += 1
+        outcome = self.outcomes.pop(0) if self.outcomes else "ok"
+        if isinstance(outcome, Exception):
+            raise outcome
+        return Completion(text=f"{self.name}:{outcome}", model=model, provider=self.name)
+
+    async def close(self):
+        return None
+
+
+def _install(app, providers, chain):
+    from jarvis.core.config import ChainLink
+
+    app.models._providers = dict(providers)
+    app.models._catalog.clear()
+    app.models._resolved.clear()
+    app.models._resting.clear()
+    conf = app.models._config.models
+    conf.operator.model = ""
+    conf.reasoning.model = ""
+    conf.general.provider = "local"
+    conf.general.model = "m"
+    conf.general.chain = [ChainLink(provider=name, model="cloud-model") for name in chain]
+
+
+async def test_a_slot_chain_tries_the_accelerator_first_and_local_last(app):
+    from jarvis.core.errors import RateLimited
+
+    cloud = _Scripted("groq", local=False, outcomes=[RateLimited(detail="429"), "ok"])
+    local = _Scripted("local", local=True, outcomes=["ok", "ok"])
+    _install(app, {"groq": cloud, "local": local}, chain=["groq"])
+
+    first = await app.models.chat(Slot.OPERATOR, [ChatMessage("user", "go")])
+    assert first.text == "local:ok", "a rate-limited accelerator falls through to the local model"
+    second = await app.models.chat(Slot.OPERATOR, [ChatMessage("user", "go")])
+    assert second.text == "local:ok"
+    assert cloud.calls == 1, "a rate-limited provider is rested, not retried on the very next call"
+
+
+async def test_sensitive_work_never_leaves_the_mac(app):
+    cloud = _Scripted("groq", local=False, outcomes=["ok"])
+    local = _Scripted("local", local=True, outcomes=["ok"])
+    _install(app, {"groq": cloud, "local": local}, chain=["groq"])
+
+    completion = await app.models.chat(Slot.OPERATOR, [ChatMessage("user", "read my mail")],
+                                       allow_cloud=False)
+    assert completion.text == "local:ok"
+    assert cloud.calls == 0
+
+
+async def test_tool_calls_are_emulated_for_providers_without_native_support(app, fake_provider):
+    from jarvis.models.base import ToolDef
+
+    fake_provider.responses.append('{"tool": "browse_to", "arguments": {"url": "https://x.example"}}')
+    tool = ToolDef("browse_to", "Open a page", {"type": "object", "properties": {"url": {"type": "string"}}})
+    completion = await app.models.chat(Slot.GENERAL, [ChatMessage("user", "open x.example")], tools=[tool])
+    assert completion.tool_calls[0].name == "browse_to"
+    assert completion.tool_calls[0].arguments == {"url": "https://x.example"}
+    assert "browse_to" in fake_provider.calls[-1]["messages"][0].content
+
+
+async def test_complete_json_with_a_schema_goes_through_the_structured_path(app, fake_provider):
+    fake_provider.json_responses.append('{"mode": "act"}')
+    data = await app.models.complete_json(Slot.REASONING, [ChatMessage("user", "x")],
+                                          schema={"type": "object"})
+    assert data == {"mode": "act"}
+    assert fake_provider.calls[-1]["kwargs"]["json_mode"] is True
+
+
+def test_the_operator_and_fast_slots_defer_to_one_resident_model(app):
+    assert app.models.effective_slot(Slot.OPERATOR) == Slot.GENERAL
+    assert app.models.effective_slot(Slot.FAST) == Slot.GENERAL
+
+
+def test_a_free_provider_switches_on_with_its_key(monkeypatch, tmp_path):
+    from jarvis.core.config import load_config
+
+    monkeypatch.setenv("JARVIS_GROQ_API_KEY", "gsk_test")
+    config = load_config(tmp_path / "none.json")
+    assert config.models.providers["groq"].enabled is True
+    assert config.models.providers["openrouter"].enabled is False

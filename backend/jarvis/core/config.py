@@ -35,8 +35,15 @@ class ServerConfig(BaseModel):
     open_browser: bool = True
 
 
+class ChainLink(BaseModel):
+    """One (provider, model) pair tried, in order, before a slot's own model."""
+
+    provider: str
+    model: str
+
+
 class ModelSlotConfig(BaseModel):
-    """One routing slot (fast / general / reasoning / vision / specialist)."""
+    """One routing slot (fast / general / reasoning / operator / vision / …)."""
 
     provider: str = "ollama"
     model: str = ""
@@ -49,6 +56,15 @@ class ModelSlotConfig(BaseModel):
     num_ctx: int = 0
     #: How long Ollama keeps the model loaded after a call.
     keep_alive: str = "30m"
+    #: Reasoning models (Qwen3 and friends) can think before answering.
+    #: ``False`` turns that off for speed, ``True`` asks for it, ``None``
+    #: leaves the model's default. Ignored by models that don't think.
+    think: bool | None = None
+    #: Providers tried first, in order — e.g. a free cloud tier — before this
+    #: slot's own model. A provider that is rate-limited or unreachable is
+    #: skipped (and rested for a while), so the local model is always the last
+    #: resort and JARVIS never depends on the cloud.
+    chain: list[ChainLink] = Field(default_factory=list)
 
 
 class ProviderConfig(BaseModel):
@@ -56,6 +72,9 @@ class ProviderConfig(BaseModel):
     base_url: str = "http://127.0.0.1:11434"
     api_key: str = ""
     enabled: bool = True
+    #: Runs on this Mac (privacy rules treat local and remote differently).
+    #: ``None`` infers it from the URL.
+    local: bool | None = None
 
 
 class ModelsConfig(BaseModel):
@@ -66,16 +85,38 @@ class ModelsConfig(BaseModel):
             "anthropic": ProviderConfig(
                 kind="anthropic", base_url="https://api.anthropic.com", enabled=False
             ),
+            # Free hosted tiers, all OpenAI-compatible and all optional. Each
+            # switches on when its JARVIS_*_API_KEY is set; none is needed.
+            "groq": ProviderConfig(kind="openai", base_url="https://api.groq.com/openai/v1",
+                                   enabled=False),
+            "openrouter": ProviderConfig(kind="openai", base_url="https://openrouter.ai/api/v1",
+                                         enabled=False),
+            "cerebras": ProviderConfig(kind="openai", base_url="https://api.cerebras.ai/v1",
+                                       enabled=False),
+            "gemini": ProviderConfig(
+                kind="openai", base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                enabled=False),
         }
     )
-    #: Small, very fast model: routing, classification, greetings, short rewrites.
-    fast: ModelSlotConfig = ModelSlotConfig(model="llama3.2:1b", max_tokens=200, timeout_s=20.0,
-                                            num_ctx=4096)
-    #: Capable model: conversation, reasoning, synthesis.
-    general: ModelSlotConfig = ModelSlotConfig(model="llama3.1:8b", max_tokens=900, timeout_s=120.0,
-                                               num_ctx=8192)
-    #: Vision model: screen understanding.
-    vision: ModelSlotConfig = ModelSlotConfig(model="llava:7b", max_tokens=600, timeout_s=180.0)
+    #: Apps and sites whose content never leaves this Mac, whatever a slot's
+    #: chain says: a task touching one runs on local models only.
+    cloud_exclusions: list[str] = Field(default_factory=lambda: [
+        "Mail", "Messages", "1Password", "Keychain Access", "Passwords", "Notes",
+        "mail.google.com", "outlook.live.com", "icloud.com", "bank", "paypal.com",
+    ])
+    #: Short, cheap calls (V1.1-mode classification). Left empty it defers
+    #: to ``general`` — on a 16 GB Mac one resident model beats two that
+    #: take turns being loaded.
+    fast: ModelSlotConfig = ModelSlotConfig(model="", max_tokens=200, timeout_s=20.0,
+                                            num_ctx=4096, think=False)
+    #: Capable model: conversation, understanding, reasoning, synthesis. A
+    #: Qwen3-class model with native tool calling; ``evals/bake_off.py``
+    #: measures the alternatives on your own Mac.
+    general: ModelSlotConfig = ModelSlotConfig(model="qwen3:8b", max_tokens=900, timeout_s=120.0,
+                                               num_ctx=8192, think=False)
+    #: Vision model: screen understanding and visual grounding.
+    vision: ModelSlotConfig = ModelSlotConfig(model="qwen2.5vl:7b", max_tokens=600, timeout_s=180.0,
+                                              num_ctx=8192)
     #: Cheap, frequent captures for the background screen watcher (see
     #: ScreenAwarenessConfig). Left empty it defers to ``vision``, so nothing
     #: has to be installed for it to work; set a small/fast model here (e.g.
@@ -88,7 +129,13 @@ class ModelsConfig(BaseModel):
     #: than conversation needs. A longer timeout is deliberate — this slot is
     #: asked for structured output, which is worth waiting a little longer for.
     reasoning: ModelSlotConfig = ModelSlotConfig(
-        model="", temperature=0.1, max_tokens=700, timeout_s=90.0, num_ctx=8192
+        model="", temperature=0.1, max_tokens=700, timeout_s=90.0, num_ctx=8192, think=False
+    )
+    #: The model that operates the computer step by step (v3.0). Empty
+    #: defers to ``reasoning``. This is the slot a free cloud accelerator is
+    #: most worth adding to, via ``chain``.
+    operator: ModelSlotConfig = ModelSlotConfig(
+        model="", temperature=0.1, max_tokens=900, timeout_s=90.0, num_ctx=12288, think=False
     )
     #: Optional domain model (code, maths, a local fine-tune). Empty defers to
     #: ``reasoning``; nothing has to be installed for this slot to be asked for.
@@ -98,16 +145,19 @@ class ModelsConfig(BaseModel):
     #: Candidate models tried, in order, when a slot's model isn't installed.
     fallbacks: dict[str, list[str]] = Field(
         default_factory=lambda: {
-            "fast": ["llama3.2:1b", "qwen2.5:1.5b", "gemma3:1b", "qwen2.5:3b", "phi3:mini", "llama3.2:3b"],
+            "fast": ["qwen3:4b", "llama3.2:3b", "qwen2.5:3b", "llama3.2:1b", "qwen2.5:1.5b", "gemma3:1b"],
             "general": [
-                "llama3.1:8b",
+                "qwen3:8b",
+                "qwen3:4b",
                 "qwen2.5:7b",
+                "llama3.1:8b",
                 "gemma3:4b",
                 "mistral:7b",
                 "llama3.2:3b",
                 "qwen2.5:3b",
             ],
-            "vision": ["llava:7b", "qwen2.5vl:7b", "llama3.2-vision:11b", "moondream", "minicpm-v"],
+            "vision": ["qwen2.5vl:7b", "qwen3-vl:8b", "qwen3-vl:4b", "gemma3:4b", "llava:7b",
+                       "llama3.2-vision:11b", "minicpm-v", "moondream"],
             # Only consulted once reasoning/specialist have a model of their
             # own; an empty slot defers to another slot instead.
             "reasoning": [
@@ -118,6 +168,7 @@ class ModelsConfig(BaseModel):
                 "llama3.2:3b",
             ],
             "specialist": [],
+            "operator": [],
             "screen_watch": [],
         }
     )
@@ -497,6 +548,12 @@ _ENV_MAP: dict[str, tuple[str, ...]] = {
     "OPENAI_API_KEY": ("models", "providers", "openai", "api_key"),
     "ANTHROPIC_BASE_URL": ("models", "providers", "anthropic", "base_url"),
     "ANTHROPIC_API_KEY": ("models", "providers", "anthropic", "api_key"),
+    "GROQ_API_KEY": ("models", "providers", "groq", "api_key"),
+    "OPENROUTER_API_KEY": ("models", "providers", "openrouter", "api_key"),
+    "CEREBRAS_API_KEY": ("models", "providers", "cerebras", "api_key"),
+    "GEMINI_API_KEY": ("models", "providers", "gemini", "api_key"),
+    "REASONING_MODEL": ("models", "reasoning", "model"),
+    "OPERATOR_MODEL": ("models", "operator", "model"),
     "WAKE_WORD": ("voice", "wake_word"),
     "TTS_VOICE": ("voice", "tts_voice"),
     "STT_MODEL": ("voice", "stt_model"),
@@ -562,6 +619,9 @@ def _env_overlay() -> dict:
         _set_path(overlay, ("models", "providers", "openai", "enabled"), True)
     if os.environ.get(_ENV_PREFIX + "ANTHROPIC_API_KEY"):
         _set_path(overlay, ("models", "providers", "anthropic", "enabled"), True)
+    for free in ("GROQ", "OPENROUTER", "CEREBRAS", "GEMINI"):
+        if os.environ.get(_ENV_PREFIX + free + "_API_KEY"):
+            _set_path(overlay, ("models", "providers", free.lower(), "enabled"), True)
     if os.environ.get(_ENV_PREFIX + "BRAVE_API_KEY"):
         _set_path(overlay, ("research", "search_provider"), "brave")
     return overlay

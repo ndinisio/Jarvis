@@ -141,7 +141,7 @@ def test_config_update_is_deep_merged(config_store):
     assert config.voice.wake_word == "computer"
     # Untouched siblings survive the merge.
     assert config.voice.tts_engine in {"off", "macos", "browser"}
-    assert config.models.fast.model
+    assert config.models.general.model
 
 
 def test_config_change_listeners_fire(config_store):

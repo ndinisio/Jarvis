@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Pull a sensible set of local models for JARVIS.
 #
-#   ./scripts/pull-models.sh           fast + general  (~6 GB)
-#   ./scripts/pull-models.sh --vision  also the vision model (~4.5 GB more)
-#   ./scripts/pull-models.sh --small   a lighter pair for 8 GB machines
+#   ./scripts/pull-models.sh           the general model   (~5 GB)
+#   ./scripts/pull-models.sh --vision  also the vision model (~6 GB more)
+#   ./scripts/pull-models.sh --small   a lighter model, for Macs that want headroom
+#
+# On a 16 GB Mac one text model serves every slot (fast, reasoning and
+# operator defer to general), so nothing takes turns being loaded.
+# `python -m evals.bake_off --pull` compares candidates on your own Mac.
 set -euo pipefail
 
 if ! command -v ollama >/dev/null; then
@@ -11,21 +15,20 @@ if ! command -v ollama >/dev/null; then
   exit 1
 fi
 
-FAST="llama3.2:1b"
-GENERAL="llama3.1:8b"
+GENERAL="qwen3:8b"
 VISION=""
 
 for arg in "$@"; do
   case "$arg" in
-    --vision) VISION="llava:7b" ;;
-    --small) FAST="qwen2.5:1.5b"; GENERAL="llama3.2:3b" ;;
+    --vision) VISION="qwen2.5vl:7b" ;;
+    --small) GENERAL="qwen3:4b" ;;
   esac
 done
 
-for model in "$FAST" "$GENERAL" $VISION; do
+for model in "$GENERAL" $VISION; do
   echo "▸ Pulling $model"
   ollama pull "$model"
 done
 
 echo "▸ Done. Point JARVIS at them in Settings, or:"
-echo "    JARVIS_FAST_MODEL=$FAST JARVIS_GENERAL_MODEL=$GENERAL ./scripts/start.sh"
+echo "    JARVIS_GENERAL_MODEL=$GENERAL ./scripts/start.sh"

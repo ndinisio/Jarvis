@@ -28,6 +28,13 @@ class ModelUnavailable(JarvisError):
     user_message = "The local AI service isn't available."
 
 
+class RateLimited(ModelUnavailable):
+    """A (usually free-tier) provider said "not now" — try the next one."""
+
+    code = "rate_limited"
+    user_message = "The model provider is busy right now."
+
+
 class ModelTimeout(JarvisError):
     code = "model_timeout"
     user_message = "The model took too long to respond."

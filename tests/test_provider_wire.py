@@ -245,3 +245,131 @@ async def test_the_router_passes_slot_runtime_options_only_to_providers_that_tak
     app.models._resolved.clear()
     await app.models.complete("general", [ChatMessage("user", "hi")])
     assert "num_ctx" not in fake_provider.calls[-1]["kwargs"]
+
+
+# --- v3.0 Phase 2: native tool calls and constrained output ---------------------
+
+async def test_ollama_chat_offers_tools_and_reads_back_the_call():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={
+            "message": {"content": "", "tool_calls": [
+                {"function": {"name": "click_page_element", "arguments": {"handle": "jv9"}}}]},
+            "done": True, "done_reason": "stop", "prompt_eval_count": 812, "eval_count": 21,
+        })
+
+    from jarvis.models.base import ToolDef
+
+    provider = _mount(OllamaProvider("http://ollama.test"), handler)
+    tool = ToolDef("click_page_element", "Click an element",
+                   {"type": "object", "properties": {"handle": {"type": "string"}}})
+    completion = await provider.chat([ChatMessage("user", "click it")], "qwen3:8b", tools=[tool],
+                                     think=False, num_ctx=12288)
+    assert seen["stream"] is False
+    assert seen["tools"][0]["function"]["name"] == "click_page_element"
+    assert seen["think"] is False and seen["options"]["num_ctx"] == 12288
+    assert completion.tool_calls[0].name == "click_page_element"
+    assert completion.tool_calls[0].arguments == {"handle": "jv9"}
+    assert completion.usage["prompt_tokens"] == 812
+    await provider.close()
+
+
+async def test_ollama_chat_constrains_output_to_a_schema():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": '{"mode": "act"}'}, "done": True})
+
+    schema = {"type": "object", "properties": {"mode": {"enum": ["act", "chat"]}}, "required": ["mode"]}
+    provider = _mount(OllamaProvider("http://ollama.test"), handler)
+    completion = await provider.chat([ChatMessage("user", "x")], "qwen3:8b", schema=schema)
+    assert seen["format"] == schema
+    assert json.loads(completion.text) == {"mode": "act"}
+    await provider.close()
+
+
+async def test_ollama_retries_without_the_thinking_switch_for_models_that_dont_think():
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "think" in body:
+            return httpx.Response(400, json={"error": '"llama3.1:8b" does not support thinking'})
+        return httpx.Response(200, json={"message": {"content": "hello"}, "done": True})
+
+    provider = _mount(OllamaProvider("http://ollama.test"), handler)
+    completion = await provider.chat([ChatMessage("user", "hi")], "llama3.1:8b", think=False)
+    assert completion.text == "hello"
+    assert len(bodies) == 2 and "think" not in bodies[1]
+    # Remembered: the next call doesn't pay for the failed attempt again.
+    await provider.chat([ChatMessage("user", "hi")], "llama3.1:8b", think=False)
+    assert len(bodies) == 3
+    await provider.close()
+
+
+async def test_ollama_strips_a_reasoning_preamble_from_streamed_text():
+    def handler(request: httpx.Request) -> httpx.Response:
+        lines = [json.dumps({"message": {"content": c}, "done": False})
+                 for c in ["<th", "ink>\nlet me", " think</think>\n\n", "Good ", "evening."]]
+        lines.append(json.dumps({"message": {"content": ""}, "done": True}))
+        return httpx.Response(200, text="\n".join(lines))
+
+    provider = _mount(OllamaProvider("http://ollama.test"), handler)
+    text = "".join([c async for c in provider.stream_chat([ChatMessage("user", "hi")], "qwen3:8b")])
+    assert text == "Good evening."
+    await provider.close()
+
+
+async def test_openai_compatible_chat_parses_tool_calls_and_types_rate_limits():
+    from jarvis.core.errors import RateLimited
+    from jarvis.models.base import ToolDef
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": {"message": "Rate limit reached"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "call_x", "type": "function",
+             "function": {"name": "browse_to", "arguments": '{"url": "https://example.com"}'}}]},
+            "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 90, "completion_tokens": 12}})
+
+    provider = _mount(OpenAICompatibleProvider("http://groq.test/v1", "key", name="groq"), handler)
+    tool = ToolDef("browse_to", "Open a page", {"type": "object", "properties": {"url": {"type": "string"}}})
+    with pytest.raises(RateLimited):
+        await provider.chat([ChatMessage("user", "go")], "llama", tools=[tool])
+    completion = await provider.chat([ChatMessage("user", "go")], "llama", tools=[tool])
+    assert completion.tool_calls[0].arguments == {"url": "https://example.com"}
+    assert completion.tool_calls[0].id == "call_x"
+    await provider.close()
+
+
+async def test_openai_compatible_falls_back_to_json_mode_when_schemas_are_unsupported():
+    formats: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        formats.append(body.get("response_format"))
+        if body["response_format"]["type"] == "json_schema":
+            return httpx.Response(400, json={"error": {"message": "response_format json_schema unsupported"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"mode": "chat"}'}}]})
+
+    provider = _mount(OpenAICompatibleProvider("http://x.test/v1", "k"), handler)
+    completion = await provider.chat([ChatMessage("user", "x")], "m", schema={"type": "object"})
+    assert [f["type"] for f in formats] == ["json_schema", "json_object"]
+    assert completion.text == '{"mode": "chat"}'
+    await provider.close()
+
+
+def test_thinking_filter_handles_split_tags_and_plain_text():
+    from jarvis.models.base import ThinkingFilter, strip_thinking
+
+    assert strip_thinking("<think>hmm</think>\nAnswer") == "Answer"
+    assert strip_thinking("<think>never closed") == ""
+    plain = ThinkingFilter()
+    assert plain.feed("Hel") + plain.feed("lo") + plain.flush() == "Hello"

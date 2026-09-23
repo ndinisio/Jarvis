@@ -2,11 +2,19 @@
 
 Logical *slots*, each named for a job rather than a model:
 
-``fast``        tiny model — intent classification, greetings, short rewrites
+``fast``        short, cheap calls (defers to ``general`` when unset)
 ``general``     capable model — conversation and synthesis
 ``reasoning``   deliberate model — understanding, planning, verification, repair
+``operator``    the model that operates the computer step by step (v3.0)
 ``vision``      multimodal model — screen understanding
 ``specialist``  optional domain model — code, maths, a local fine-tune
+
+**Structured calls** (:meth:`ModelRouter.chat`, v3.0) go further than a
+slot's own model: each slot may list a ``chain`` of other providers — a
+free cloud tier, say — tried first. One that is rate-limited or unreachable
+is rested and skipped, and the slot's own (normally local) model is always
+the last link, so nothing ever depends on the cloud. Providers that can't
+do native tool calls or constrained output have both emulated over text.
 
 The router resolves a slot to a concrete (provider, model) pair at call time,
 substituting an installed model when the configured one is missing, so a fresh
@@ -22,16 +30,26 @@ one is a single line of configuration rather than a refactor.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 from ..core.config import Config
-from ..core.errors import ModelUnavailable
+from ..core.errors import ModelTimeout, ModelUnavailable, RateLimited
 from ..core.logging import get_logger
 from ..core.telemetry import Telemetry
 from .anthropic import AnthropicProvider
-from .base import ChatMessage, Completion, ModelProvider, extract_json
+from .base import (
+    ChatMessage,
+    Completion,
+    ModelProvider,
+    NativeUnsupported,
+    ToolCall,
+    ToolDef,
+    extract_json,
+)
 from .ollama import OllamaProvider
 from .openai_compat import OpenAICompatibleProvider
 
@@ -49,6 +67,8 @@ class Slot:
     REASONING = "reasoning"
     VISION = "vision"
     SPECIALIST = "specialist"
+    #: Operates the computer step by step (v3.0). Defers to REASONING.
+    OPERATOR = "operator"
     #: Frequent, cheap background captures for the screen watcher — separate
     #: from VISION so a background poll never has to share cost/quality
     #: tradeoffs with on-demand `analyse_screen`. Defers to VISION when
@@ -59,10 +79,16 @@ class Slot:
 #: Where a slot with no model of its own sends its work. Followed transitively,
 #: so an unconfigured ``specialist`` lands on ``general`` via ``reasoning``.
 SLOT_DEFERS_TO = {
+    Slot.FAST: Slot.GENERAL,
     Slot.REASONING: Slot.GENERAL,
+    Slot.OPERATOR: Slot.REASONING,
     Slot.SPECIALIST: Slot.REASONING,
     Slot.SCREEN_WATCH: Slot.VISION,
 }
+
+#: How long a provider is rested after it rate-limits us, or can't be reached.
+_REST_AFTER_RATE_LIMIT_S = 60.0
+_REST_AFTER_OUTAGE_S = 20.0
 
 
 @dataclass(slots=True)
@@ -81,6 +107,8 @@ class ModelRouter:
         self._catalog: dict[str, tuple[float, list[str]]] = {}
         self._resolved: dict[str, tuple[float, Resolution]] = {}
         self._lock = asyncio.Lock()
+        #: provider name → monotonic time it may be tried again.
+        self._resting: dict[str, float] = {}
         self._build_providers()
 
     # -- construction ------------------------------------------------------
@@ -93,9 +121,10 @@ class ModelRouter:
                 if pconf.kind == "ollama":
                     self._providers[key] = OllamaProvider(pconf.base_url)
                 elif pconf.kind == "openai":
-                    self._providers[key] = OpenAICompatibleProvider(
-                        pconf.base_url, pconf.api_key, name=key
-                    )
+                    provider = OpenAICompatibleProvider(pconf.base_url, pconf.api_key, name=key)
+                    if pconf.local is not None:
+                        provider.local = pconf.local
+                    self._providers[key] = provider
                 elif pconf.kind == "anthropic":
                     self._providers[key] = AnthropicProvider(pconf.base_url, pconf.api_key)
             except Exception as exc:  # pragma: no cover - defensive
@@ -212,8 +241,7 @@ class ModelRouter:
         )
         ttft: float | None = None
         chars = 0
-        runtime = ({"num_ctx": conf.num_ctx, "keep_alive": conf.keep_alive}
-                   if getattr(resolution.provider, "accepts_runtime_options", False) else {})
+        runtime = _runtime(resolution.provider, conf, conf.think)
         try:
             async for delta in resolution.provider.stream_chat(
                 messages,
@@ -256,11 +284,158 @@ class ModelRouter:
             latency_ms=(time.perf_counter() - t0) * 1000.0,
         )
 
-    async def complete_json(self, slot: str, messages: list[ChatMessage], **kwargs) -> dict | None:
+    async def complete_json(self, slot: str, messages: list[ChatMessage], *,
+                            schema: dict[str, Any] | None = None, **kwargs) -> dict | None:
+        """A JSON object from *slot*. With a *schema*, providers that can
+        constrain their output to it do (Ollama's grammar, a server's
+        ``json_schema`` response format), so the reply can't be malformed."""
+        if schema is not None:
+            completion = await self.chat(
+                slot, messages, schema=schema,
+                temperature=kwargs.get("temperature", 0.0),
+                max_tokens=kwargs.get("max_tokens"), timeout_s=kwargs.get("timeout_s"),
+                allow_cloud=kwargs.get("allow_cloud", True),
+            )
+            return extract_json(completion.text)
         kwargs.setdefault("json_mode", True)
         kwargs.setdefault("temperature", 0.0)
         completion = await self.complete(slot, messages, **kwargs)
         return extract_json(completion.text)
+
+    # -- structured calls ----------------------------------------------------
+    async def chat(
+        self,
+        slot: str,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolDef] | None = None,
+        schema: dict[str, Any] | None = None,
+        think: bool | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_s: float | None = None,
+        allow_cloud: bool = True,
+    ) -> Completion:
+        """One structured exchange on *slot*: text, tool calls, or JSON
+        shaped by *schema*.
+
+        Tries the slot's ``chain`` first (skipping any provider that is
+        resting, and any remote one when *allow_cloud* is false — a task
+        touching something sensitive), then the slot's own model. The first
+        answer wins; a provider that rate-limits or can't be reached is
+        rested so the next call doesn't wait on it again.
+        """
+        conf = self.slot_config(slot)
+        effective = self.effective_slot(slot)
+        options = {
+            "temperature": conf.temperature if temperature is None else temperature,
+            "max_tokens": conf.max_tokens if max_tokens is None else max_tokens,
+            "timeout_s": conf.timeout_s if timeout_s is None else timeout_s,
+            "think": conf.think if think is None else think,
+        }
+        last_error: Exception | None = None
+        tried = 0
+        for provider, model in await self._links(slot, conf, allow_cloud):
+            if self._is_resting(provider.name):
+                continue
+            tried += 1
+            watch = self._telemetry.mark("model.chat", slot=effective, model=model, provider=provider.name)
+            try:
+                if provider.native_chat:
+                    try:
+                        runtime = _runtime(provider, conf)
+                        runtime.pop("think", None)  # already in options
+                        completion = await provider.chat(messages, model, tools=tools, schema=schema,
+                                                         **options, **runtime)
+                    except NativeUnsupported:
+                        completion = await self._emulate(effective, provider, model, conf, messages,
+                                                         tools, schema, options)
+                else:
+                    completion = await self._emulate(effective, provider, model, conf, messages,
+                                                     tools, schema, options)
+            except RateLimited as exc:
+                watch.stop(ok=False, reason="rate_limited")
+                self._rest(provider.name, _REST_AFTER_RATE_LIMIT_S)
+                last_error = exc
+                continue
+            except (ModelUnavailable, ModelTimeout) as exc:
+                watch.stop(ok=False, reason=type(exc).__name__)
+                if not provider.local:
+                    self._rest(provider.name, _REST_AFTER_OUTAGE_S)
+                last_error = exc
+                continue
+            watch.stop(tool_calls=len(completion.tool_calls), **completion.usage)
+            return completion
+        if last_error is not None:
+            raise last_error
+        raise ModelUnavailable(
+            "No model is available for that right now." if tried or allow_cloud
+            else "That needs a local model, and none is available.",
+            detail=f"slot {slot}: nothing to try (allow_cloud={allow_cloud})",
+        )
+
+    async def _links(self, slot: str, conf, allow_cloud: bool) -> list[tuple[ModelProvider, str]]:
+        links: list[tuple[ModelProvider, str]] = []
+        for link in conf.chain:
+            provider = self._providers.get(link.provider)
+            if provider is not None and (allow_cloud or provider.local):
+                links.append((provider, link.model))
+        try:
+            resolution = await self.resolve(slot)
+        except ModelUnavailable:
+            if not links:
+                raise
+            return links
+        if allow_cloud or resolution.provider.local:
+            links.append((resolution.provider, resolution.model))
+        return links
+
+    def _is_resting(self, name: str) -> bool:
+        until = self._resting.get(name)
+        return until is not None and time.monotonic() < until
+
+    def _rest(self, name: str, seconds: float) -> None:
+        self._resting[name] = time.monotonic() + seconds
+        log.info("model provider %s rested for %.0fs", name, seconds)
+
+    async def _emulate(self, slot: str, provider: ModelProvider, model: str, conf,
+                       messages: list[ChatMessage], tools: list[ToolDef] | None,
+                       schema: dict[str, Any] | None, options: dict[str, Any]) -> Completion:
+        """Tool calls and constrained output over plain text, for providers
+        that can't do either natively."""
+        prompt = _flatten(messages)
+        if tools:
+            listing = "\n".join(f"- {tool.name}: {tool.description} — arguments: "
+                                f"{json.dumps(tool.parameters.get('properties', {}))}" for tool in tools)
+            prompt.insert(0, ChatMessage("system", (
+                "You can use these tools:\n" + listing +
+                '\nTo use one, reply with JSON only: {"tool": "<name>", "arguments": {...}}. '
+                "Otherwise reply normally.")))
+        elif schema is not None:
+            prompt.insert(0, ChatMessage("system", "Reply with JSON only, matching this schema: "
+                                                   + json.dumps(schema)))
+        started = time.perf_counter()
+        parts: list[str] = []
+        async for delta in provider.stream_chat(
+            prompt, model,
+            temperature=options["temperature"], max_tokens=options["max_tokens"],
+            json_mode=bool(schema is not None and not tools), stop=None,
+            timeout_s=options["timeout_s"], **_runtime(provider, conf, options["think"]),
+        ):
+            parts.append(delta)
+        text = "".join(parts).strip()
+        calls: list[ToolCall] = []
+        if tools:
+            data = extract_json(text)
+            names = {tool.name for tool in tools}
+            name = str((data or {}).get("tool") or (data or {}).get("name") or "")
+            if name in names:
+                arguments = (data or {}).get("arguments")
+                calls.append(ToolCall(name=name, arguments=arguments if isinstance(arguments, dict) else {},
+                                      id="call_0"))
+                text = ""
+        return Completion(text=text, model=model, provider=provider.name,
+                          latency_ms=(time.perf_counter() - started) * 1000.0, tool_calls=calls)
 
     # -- health ------------------------------------------------------------
     async def status(self) -> dict:
@@ -317,6 +492,29 @@ class ModelRouter:
     async def close(self) -> None:
         for provider in self._providers.values():
             await provider.close()
+
+
+def _runtime(provider: ModelProvider, conf, think: bool | None = None) -> dict[str, Any]:
+    """The per-slot knobs only a self-hosted server has: context window,
+    keep-alive, and whether a reasoning model thinks first."""
+    if not getattr(provider, "accepts_runtime_options", False):
+        return {}
+    return {"num_ctx": conf.num_ctx, "keep_alive": conf.keep_alive, "think": think}
+
+
+def _flatten(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Tool-call turns rendered as text, for a provider without native tools."""
+    out: list[ChatMessage] = []
+    for message in messages:
+        if message.tool_calls:
+            calls = "; ".join(json.dumps({"tool": c.name, "arguments": c.arguments})
+                              for c in message.tool_calls)
+            out.append(ChatMessage("assistant", (message.content + "\n" + calls).strip()))
+        elif message.role == "tool":
+            out.append(ChatMessage("user", f"Result of {message.name or 'the tool'}:\n{message.content}"))
+        else:
+            out.append(ChatMessage(message.role, message.content, list(message.images)))
+    return out
 
 
 def _match(candidate: str, installed: list[str]) -> str | None:

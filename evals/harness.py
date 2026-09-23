@@ -245,7 +245,9 @@ async def drive_turn(app, text: str, record: TaskResult, *, approve: list[str],
     except Exception as exc:  # the harness reports; it never crashes a run
         record.error = f"{type(exc).__name__}: {exc}"
     record.wall_s = round(time.perf_counter() - started, 2)
-    record.model_calls = int(app.telemetry.summary().get("model.stream", {}).get("count", 0))
+    summary = app.telemetry.summary()
+    record.model_calls = sum(int(summary.get(name, {}).get("count", 0))
+                             for name in ("model.stream", "model.chat"))
 
 
 async def _converse(app, text: str, record: TaskResult) -> None:

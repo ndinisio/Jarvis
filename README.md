@@ -365,10 +365,11 @@ another host will never start working.
 
 ```jsonc
 "models": {
-  "fast":       { "model": "llama3.2:1b" },   // classification, greetings, rewrites
-  "general":    { "model": "llama3.1:8b" },   // conversation and synthesis
+  "fast":       { "model": "" },              // ← empty: uses the general model
+  "general":    { "model": "qwen3:8b" },      // conversation, understanding, synthesis
   "reasoning":  { "model": "" },              // ← empty: uses the general model
-  "vision":     { "model": "llava:7b" },      // screen understanding
+  "operator":   { "model": "" },              // ← empty: uses reasoning — operates the Mac
+  "vision":     { "model": "qwen2.5vl:7b" },  // screen understanding
   "specialist": { "model": "" }               // ← empty: uses the reasoning model
 }
 ```
@@ -499,25 +500,48 @@ JARVIS defaults to [Ollama](https://ollama.com) — free, local, no account.
 brew install ollama          # or download from ollama.com
 ollama serve                 # leave running (the app installs a service too)
 
-./scripts/pull-models.sh             # llama3.2:1b + llama3.1:8b  (~6 GB)
-./scripts/pull-models.sh --vision    # adds llava:7b             (~4.5 GB)
-./scripts/pull-models.sh --small     # lighter pair for 8 GB Macs
+./scripts/pull-models.sh             # qwen3:8b                  (~5 GB)
+./scripts/pull-models.sh --vision    # adds qwen2.5vl:7b         (~6 GB)
+./scripts/pull-models.sh --small     # qwen3:4b, for 8–16 GB Macs that want headroom
 ```
 
-Five slots, each configurable. Two of them are empty by default and *defer* to
-another slot, so a stock install needs three models and no extra downloads:
+Six slots, each configurable. Most are empty by default and *defer* to
+another slot, so on a 16 GB Mac **one** text model stays resident and serves
+everything — two models taking turns being loaded is what makes a small Mac
+feel slow:
 
 | Slot | Default | Used for |
 | --- | --- | --- |
-| **fast** | `llama3.2:1b` | routing, classification, short rewrites, spoken summaries |
-| **general** | `llama3.1:8b` | conversation and synthesis |
+| **general** | `qwen3:8b` | conversation, understanding, synthesis — native tool calling |
+| **fast** | *(empty → general)* | V1.1-mode classification |
 | **reasoning** | *(empty → general)* | understanding, planning, tool choice, verification, repair |
-| **vision** | `llava:7b` | screen understanding |
+| **operator** | *(empty → reasoning)* | operating the Mac step by step (v3.0) |
+| **vision** | `qwen2.5vl:7b` | screen understanding and visual grounding (loaded on demand) |
 | **specialist** | *(empty → reasoning)* | an optional domain model: code, maths, a local fine-tune |
 
-Giving the agent a stronger brain is one line — `ollama pull qwen2.5:14b`, then
-set the **reasoning** slot — and nothing else changes. See
-[Model roles](#model-roles).
+Thinking is switched off by default (`"think": false`) — a Qwen3-class model
+that deliberates before every click is accurate and slow; per slot you can
+turn it back on. **Which model is best on your Mac is measured, not guessed:**
+`python -m evals.bake_off --pull` runs the understanding corpus and the web
+tasks against each candidate and prints success, latency and memory side by
+side (see [`evals/README.md`](evals/README.md)).
+
+**Free cloud accelerators (optional).** Any slot can list a `chain` of other
+providers tried first — the free tiers of Groq, OpenRouter (`:free` models),
+Cerebras or Google's Gemini API, all built in and off until you set their key
+(`JARVIS_GROQ_API_KEY`, `JARVIS_OPENROUTER_API_KEY`, `JARVIS_CEREBRAS_API_KEY`,
+`JARVIS_GEMINI_API_KEY`):
+
+```jsonc
+"operator": { "chain": [ { "provider": "groq", "model": "<a tool-calling model they list>" } ] }
+```
+
+A provider that rate-limits or is unreachable is rested and skipped, and the
+local model is always the last link, so JARVIS never *needs* the cloud. Free
+tiers have usage limits and their own data-use terms — check them before you
+add one — and anything touching an app or site in `models.cloud_exclusions`
+(Mail, Messages, password managers, banking…) stays on local models whatever
+the chain says.
 
 If a configured model isn't installed, JARVIS substitutes a sensible one from
 what *is* installed (smallest for fast, largest for general and reasoning, any
@@ -658,11 +682,12 @@ file) override the file — see [`.env.example`](.env.example).
 {
   "workspace": "~/JARVIS",
   "models": {
-    "fast":       { "provider": "ollama", "model": "llama3.2:1b", "timeout_s": 20 },
-    "general":    { "provider": "ollama", "model": "llama3.1:8b" },
-    "reasoning":  { "provider": "ollama", "model": "" },   // empty → uses general
-    "vision":     { "provider": "ollama", "model": "llava:7b" },
-    "specialist": { "provider": "ollama", "model": "" }    // empty → uses reasoning
+    "fast":       { "provider": "ollama", "model": "" },           // empty → uses general
+    "general":    { "provider": "ollama", "model": "qwen3:8b", "num_ctx": 8192, "think": false },
+    "reasoning":  { "provider": "ollama", "model": "" },           // empty → uses general
+    "operator":   { "provider": "ollama", "model": "", "chain": [] },  // empty → uses reasoning
+    "vision":     { "provider": "ollama", "model": "qwen2.5vl:7b" },
+    "specialist": { "provider": "ollama", "model": "" }            // empty → uses reasoning
   },
   "intelligence": {
     "enabled": true,          // false restores V1.1: one route, one action
