@@ -130,10 +130,19 @@ class VoiceConfig(BaseModel):
     stt_language: str = "en"
     whispercpp_binary: str = "whisper-cli"
     whispercpp_model_path: str = ""
-    #: Text-to-speech: "macos" (the `say` command) | "browser" | "off"
-    tts_engine: Literal["macos", "browser", "off"] = "macos"
+    #: Text-to-speech: "macos" (the `say` command) | "kokoro" (local neural
+    #: voice, needs kokoro_model_path/kokoro_voices_path — see README.md) |
+    #: "browser" | "off"
+    tts_engine: Literal["macos", "kokoro", "browser", "off"] = "macos"
+    #: Free text, not validated: a macOS voice name ("Daniel") for the
+    #: "macos" engine, or a Kokoro voice code ("bm_lewis") for "kokoro".
     tts_voice: str = "Daniel"
     tts_rate: int = 190
+    #: Path to Kokoro's downloaded .onnx model file. Required for tts_engine
+    #: "kokoro"; there's no auto-download.
+    kokoro_model_path: str = ""
+    #: Path to Kokoro's downloaded voices file (paired with the model above).
+    kokoro_voices_path: str = ""
     #: Duck/stop speech as soon as the user starts talking.
     barge_in: bool = True
     input_device: str = ""

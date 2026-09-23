@@ -75,11 +75,17 @@ button { cursor: pointer; }
 .app__body {
   position: relative;
   display: grid;
-  grid-template-columns: var(--rail) minmax(0, 1fr) var(--rail);
+  /* One dominant centre view by default — the left rail only exists for
+     developer diagnostics (DevPanel), so it's only reserved in the grid
+     when data-dev is set (see App.tsx). */
+  grid-template-columns: minmax(0, 1fr) var(--rail);
   gap: 20px;
   flex: 1;
   min-height: 0;
   padding: 18px 22px 22px;
+}
+.app__body[data-dev='true'] {
+  grid-template-columns: var(--rail) minmax(0, 1fr) var(--rail);
 }
 
 .app__rail {
@@ -95,7 +101,10 @@ button { cursor: pointer; }
 
 .app__center {
   display: grid;
-  grid-template-rows: minmax(190px, 34%) minmax(0, 1fr) auto;
+  /* Core's ambient visualisation is the dominant "at rest" view now that the
+     left rail is gone by default — give it noticeably more room than the
+     old three-column layout could afford. */
+  grid-template-rows: minmax(220px, 46%) minmax(0, 1fr) auto;
   min-height: 0;
   gap: 10px;
 }
@@ -153,6 +162,55 @@ button { cursor: pointer; }
 }
 .statusbar__button:hover { color: var(--text); border-color: var(--line-strong); }
 .statusbar__button.is-active { color: var(--accent); border-color: rgba(95, 211, 243, 0.45); }
+
+/* --- voice chip (compact status-bar voice indicator) ----------------------- */
+
+.voicechip { position: relative; }
+
+.voicechip__button {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+  transition: color 0.18s, border-color 0.18s;
+}
+.voicechip__button:hover { color: var(--text); border-color: var(--line-strong); }
+.voicechip__button.is-live { color: var(--accent); border-color: rgba(95, 211, 243, 0.45); }
+
+.voicechip__dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--text-faint);
+}
+.voicechip__dot[data-ok='false'] { background: var(--warn); }
+.voicechip__dot[data-state='listening'],
+.voicechip__dot[data-state='speaking'] {
+  background: var(--accent); box-shadow: 0 0 8px rgba(95, 211, 243, 0.6);
+}
+.voicechip__dot[data-state='transcribing'] { background: var(--violet); }
+
+.voicechip__label { white-space: nowrap; }
+
+.voicechip__popover {
+  position: absolute; top: calc(100% + 8px); right: 0;
+  width: 260px; z-index: 20;
+  animation: chip-in 0.12s ease-out;
+}
+.voicechip__popover .voice {
+  margin: 0;
+  /* A floating overlay needs to fully obscure whatever's behind it (the
+     Activity panel sits directly under this corner of the screen) — the
+     shared .voice/.activity/... panel background is deliberately more
+     translucent than this wants to be. */
+  background: rgba(6, 10, 16, 0.97);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+}
+@keyframes chip-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 /* --- panels --------------------------------------------------------------- */
 
@@ -350,6 +408,13 @@ button { cursor: pointer; }
 
 .activity__count { font-family: var(--mono); font-size: 9.5px; color: var(--accent); }
 .activity__idle { margin: 0; font-size: 12px; color: var(--text-faint); }
+.activity__quiet { margin: 0; font-size: 12px; color: var(--text-faint); }
+/* At rest — no reasoning trace, no running task, nothing recent — the panel
+   recedes to just its header instead of sitting there as a bordered box. */
+.activity[data-quiet='true'] {
+  border-color: transparent; background: transparent; backdrop-filter: none;
+  padding: 14px 14px 6px;
+}
 
 .task {
   border: 1px solid rgba(176, 140, 255, 0.24);
@@ -652,7 +717,11 @@ button { cursor: pointer; }
 
 @media (max-width: 980px) {
   body { overflow: auto; }
-  .app__body { grid-template-columns: minmax(0, 1fr); }
+  /* Matches [data-dev='true']'s specificity explicitly — otherwise that
+     rule (higher specificity than plain .app__body) would keep the 3-column
+     layout here regardless of source order. */
+  .app__body,
+  .app__body[data-dev='true'] { grid-template-columns: minmax(0, 1fr); }
   .app__rail { flex-direction: row; overflow-x: auto; }
   .app__rail > * { min-width: 260px; flex: 1; }
   .app__center { grid-template-rows: 220px minmax(220px, 1fr) auto; }

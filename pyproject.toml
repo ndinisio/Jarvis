@@ -20,6 +20,11 @@ voice = [
     "faster-whisper>=1.0.0",
     "openwakeword>=0.6.0",
 ]
+# Local neural TTS (voice/tts.py: KokoroTTS). Needs the `voice` extras too,
+# for sounddevice playback — not repeated here, install both together.
+kokoro = [
+    "kokoro-onnx>=0.4.0",
+]
 # Genuine scroll-wheel event synthesis (tools/interaction/scroll_quartz.py).
 # macOS only, and optional — ScrollTool falls back to its key-based path
 # without it.

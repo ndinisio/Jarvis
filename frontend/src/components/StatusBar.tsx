@@ -1,7 +1,8 @@
 import { useStore } from '../state/store'
+import { VoiceChip } from './VoiceChip'
 
-/** Identity, connection, model and the developer toggle. Quiet by design. */
-export function StatusBar() {
+/** Identity, connection, voice, model and the developer toggle. Quiet by design. */
+export function StatusBar({ send }: { send: (m: Record<string, unknown>) => boolean }) {
   const connected = useStore((s) => s.connected)
   const status = useStore((s) => s.status)
   const devMode = useStore((s) => s.devMode)
@@ -31,6 +32,7 @@ export function StatusBar() {
         <span className={`statusbar__pill${connected ? ' is-ok' : ' is-warn'}`}>
           {connected ? 'connected' : 'reconnecting'}
         </span>
+        <VoiceChip send={send} />
         <button
           className={`statusbar__button${devMode ? ' is-active' : ''}`}
           onClick={() => setDevMode(!devMode)}

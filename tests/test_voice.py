@@ -7,7 +7,7 @@ import asyncio
 from jarvis.core.personality import Personality, sentences, speakable
 from jarvis.voice.manager import VoiceManager, VoiceState
 from jarvis.voice.stt import build_stt
-from jarvis.voice.tts import BrowserTTS, NullTTS, build_tts
+from jarvis.voice.tts import BrowserTTS, KokoroTTS, NullTTS, build_tts
 from jarvis.voice.wakeword import build_wake_detector
 
 
@@ -78,6 +78,51 @@ def test_engine_selection_falls_back_off_macos(config, app):
     assert isinstance(engine, BrowserTTS)
     config.voice.tts_engine = "off"
     assert isinstance(build_tts(config, app.bus), NullTTS)
+
+
+def test_engine_selection_builds_kokoro_with_its_own_config(config, app):
+    config.voice.tts_engine = "kokoro"
+    config.voice.tts_voice = "bm_lewis"
+    config.voice.kokoro_model_path = "/tmp/kokoro-v1.0.onnx"
+    config.voice.kokoro_voices_path = "/tmp/voices-v1.0.bin"
+    engine = build_tts(config, app.bus)
+    assert isinstance(engine, KokoroTTS)
+    assert engine.voice == "bm_lewis"
+    assert engine.model_path == "/tmp/kokoro-v1.0.onnx"
+    assert engine.voices_path == "/tmp/voices-v1.0.bin"
+
+
+async def test_kokoro_reports_the_package_is_missing(config):
+    """kokoro-onnx isn't part of the base install — available() must say so
+    plainly rather than raising, the same contract every other optional
+    engine (faster-whisper, whispercpp, openwakeword) honours."""
+    engine = KokoroTTS(model_path="/tmp/model.onnx", voices_path="/tmp/voices.bin")
+    ok, note = await engine.available()
+    assert ok is False
+    assert "kokoro-onnx" in note and "installed" in note
+
+
+async def test_kokoro_reports_missing_model_files(monkeypatch):
+    """With the package importable but no model/voices path configured,
+    available() must name which path is missing rather than failing deeper
+    inside (e.g. when kokoro-onnx is installed for STT use elsewhere but the
+    TTS model itself was never downloaded)."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "kokoro_onnx", types.ModuleType("kokoro_onnx"))
+
+    engine = KokoroTTS()
+    ok, note = await engine.available()
+    assert ok is False and "kokoro_model_path" in note
+
+    engine.model_path = "/tmp/model.onnx"  # still missing on disk
+    ok, note = await engine.available()
+    assert ok is False and "kokoro_model_path" in note
+
+    engine.model_path = __file__  # a real, existing file — good enough to pass the check
+    ok, note = await engine.available()
+    assert ok is False and "kokoro_voices_path" in note
 
 
 async def test_null_engines_report_why_they_are_unavailable(config):

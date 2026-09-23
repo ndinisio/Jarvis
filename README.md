@@ -618,6 +618,24 @@ on first use.
 installed system voice works — Settings lists them. Off macOS, replies are
 spoken by the browser.
 
+**Kokoro (optional, higher-fidelity local voice).** Set `voice.tts_engine` to
+`"kokoro"` for a neural voice via [`kokoro-onnx`](https://github.com/thewh1teagle/kokoro-onnx)
+— CPU-friendly, no PyTorch. This is opt-in, not the default: unlike `say`,
+it needs its model files downloaded manually first (there's no silent
+multi-hundred-MB download on first use):
+
+```
+pip install -e ".[voice,kokoro]"
+```
+
+then download `kokoro-v1.0.onnx` and `voices-v1.0.bin` from the project's
+releases and point `voice.kokoro_model_path`/`voice.kokoro_voices_path` at
+them. `voice.tts_voice` selects the voice by Kokoro's short code — the
+British-male voice is `bm_lewis`; check the release's own voice list, since
+codes can change between releases. Playback goes through `sounddevice`
+(already required for the microphone), so no separate audio library is
+needed.
+
 **Conversation window.** After answering, JARVIS keeps listening for about 12
 seconds so a follow-up needs no wake word.
 

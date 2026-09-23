@@ -3,7 +3,9 @@
 macOS' own `say` is the default: it is offline, instant to start, and the
 British system voices (Daniel, Serena, Oliver) suit the character. The engine
 sits behind an interface so a neural voice can be swapped in later without
-touching anything else.
+touching anything else — which is exactly what :class:`KokoroTTS` is: an
+optional, higher-fidelity local voice for anyone willing to download its
+model files.
 
 Speech is a *queue* with barge-in: :meth:`stop` kills the current utterance and
 drops the rest, which is what makes interruption feel immediate.
@@ -16,6 +18,7 @@ import asyncio
 import contextlib
 import platform
 import shutil
+from pathlib import Path
 from typing import Any
 
 from ..core.events import EventBus, EventType
@@ -120,6 +123,124 @@ class MacSayTTS(TTSEngine):
         return voices
 
 
+class KokoroTTS(TTSEngine):
+    """Kokoro — a small, fast, open-weight local neural voice.
+
+    Runs via ``kokoro-onnx`` (CPU-friendly, no PyTorch) rather than the
+    reference ``kokoro``/``misaki`` package, matching this codebase's existing
+    choice of ``faster-whisper`` over vanilla ``whisper`` for STT: nothing
+    else here needs a multi-hundred-MB PyTorch install. Synthesis happens in
+    a worker thread (``kokoro-onnx`` is not async); the resulting waveform is
+    played through `sounddevice` — already a `voice`-extras dependency, used
+    today for microphone capture (``voice/audio.py``), so this needs no new
+    playback library.
+
+    Requires the model + voices files to be downloaded manually first (see
+    README.md) — there is no silent large download here, the same rule every
+    other optional model in this project follows.
+    """
+
+    name = "kokoro"
+    #: Kokoro's native output sample rate.
+    SAMPLE_RATE = 24000
+
+    def __init__(self, model_path: str = "", voices_path: str = "", voice: str = "bm_lewis",
+                 speed: float = 1.0, lang: str = "en-gb"):
+        self.model_path = model_path
+        self.voices_path = voices_path
+        self.voice = voice
+        self.speed = speed
+        self.lang = lang
+        self._model: Any = None
+        self._load_lock = asyncio.Lock()
+        #: The in-flight sounddevice output stream, if any — stop() aborts it
+        #: from whatever thread called stop(), which is what sounddevice's
+        #: stream objects are meant to support.
+        self._stream: Any = None
+
+    async def available(self) -> tuple[bool, str]:
+        try:
+            import kokoro_onnx  # noqa: F401
+        except ImportError:
+            return False, 'kokoro-onnx isn\'t installed (pip install -e ".[kokoro]")'
+        if not self.model_path or not Path(self.model_path).exists():
+            return False, "kokoro_model_path isn't set to a downloaded .onnx model"
+        if not self.voices_path or not Path(self.voices_path).exists():
+            return False, "kokoro_voices_path isn't set to a downloaded voices file"
+        return True, "ok"
+
+    def _load(self):
+        from kokoro_onnx import Kokoro
+
+        log.info("loading kokoro model %s", self.model_path)
+        return Kokoro(self.model_path, self.voices_path)
+
+    async def warmup(self) -> None:
+        async with self._load_lock:
+            if self._model is None:
+                self._model = await asyncio.to_thread(self._load)
+
+    async def voices(self) -> list[dict[str, str]]:
+        await self.warmup()
+        if self._model is None:
+            return []
+        try:
+            names = await asyncio.to_thread(lambda: sorted(self._model.get_voices()))
+        except Exception as exc:  # pragma: no cover - defensive, depends on kokoro-onnx internals
+            log.debug("kokoro voice listing failed: %s", exc)
+            return []
+        return [{"name": name, "locale": self.lang} for name in names]
+
+    async def speak(self, text: str) -> bool:
+        text = (text or "").strip()
+        if not text:
+            return False
+        await self.warmup()
+        if self._model is None:
+            return False
+        try:
+            samples, sample_rate = await asyncio.to_thread(
+                self._model.create, text, voice=self.voice, speed=self.speed, lang=self.lang,
+            )
+        except Exception as exc:
+            log.warning("kokoro synthesis failed: %s", exc)
+            return False
+        try:
+            await asyncio.to_thread(self._play_blocking, samples, sample_rate)
+        except asyncio.CancelledError:
+            await self.stop()
+            raise
+        except Exception as exc:
+            log.debug("kokoro playback ended early: %s", exc)
+            return False
+        return True
+
+    def _play_blocking(self, samples: Any, sample_rate: int) -> None:
+        """Runs in a worker thread. ``stop()`` aborts ``self._stream`` from
+        the event-loop thread while this is blocked in ``write()``."""
+        import numpy as np
+        import sounddevice as sd
+
+        stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32")
+        self._stream = stream
+        try:
+            stream.start()
+            stream.write(np.asarray(samples, dtype="float32"))
+        finally:
+            with contextlib.suppress(Exception):
+                stream.stop()
+                stream.close()
+            self._stream = None
+
+    async def stop(self) -> bool:
+        stream = self._stream
+        if stream is None:
+            return False
+        with contextlib.suppress(Exception):
+            stream.abort()
+        return True
+
+
 class BrowserTTS(TTSEngine):
     """Speech synthesised in the UI.
 
@@ -184,6 +305,9 @@ def build_tts(config: Any, bus: EventBus) -> TTSEngine:
     engine = voice_config.tts_engine
     if engine == "macos" and platform.system() == "Darwin":
         return MacSayTTS(voice_config.tts_voice, voice_config.tts_rate)
+    if engine == "kokoro":
+        return KokoroTTS(voice_config.kokoro_model_path, voice_config.kokoro_voices_path,
+                         voice_config.tts_voice)
     if engine in {"macos", "browser"}:
         return BrowserTTS(bus, voice_config.tts_voice, max(0.5, voice_config.tts_rate / 190.0))
     return NullTTS()
