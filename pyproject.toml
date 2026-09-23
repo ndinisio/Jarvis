@@ -31,6 +31,16 @@ kokoro = [
 scroll = [
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]
+# JARVIS's own browser, driven over the DevTools protocol (surfaces/web/cdp.py).
+browser = [
+    "playwright>=1.45",
+]
+# The evaluation harness (evals/): suites are YAML; web tasks need `browser`.
+evals = [
+    "pyyaml>=6.0",
+    "playwright>=1.45",
+    "python-multipart>=0.0.9",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -51,7 +61,7 @@ include = ["jarvis*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["backend"]
+pythonpath = ["backend", "."]
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]

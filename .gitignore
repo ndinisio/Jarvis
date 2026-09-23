@@ -19,3 +19,6 @@ logs/
 data/
 backend/jarvis/static/
 .DS_Store
+
+# Evaluation results are machine-specific
+evals/results/

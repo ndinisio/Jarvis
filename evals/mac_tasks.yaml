@@ -1,0 +1,127 @@
+# Native macOS tasks — run on the Mac with `python -m evals.run_mac`.
+#
+# Everything happens inside ~/Desktop/JARVIS-bench (created and removed by the
+# runner) or is marked with "JARVIS-bench" so cleanup can find it. setup,
+# check and cleanup are bash; check passes when it exits 0.
+
+tasks:
+  - id: finder-new-folder
+    utterance: create a folder called Receipts in the JARVIS-bench folder on my desktop
+    check: test -d "$BENCH/Receipts"
+
+  - id: finder-move-file
+    setup: mkdir -p "$BENCH/Archive" && touch "$BENCH/invoice.pdf"
+    utterance: move invoice.pdf from the JARVIS-bench folder on my desktop into its Archive folder
+    check: test -f "$BENCH/Archive/invoice.pdf" && ! test -f "$BENCH/invoice.pdf"
+
+  - id: finder-rename
+    setup: touch "$BENCH/old-name.txt"
+    utterance: rename old-name.txt in the JARVIS-bench folder on my desktop to new-name.txt
+    check: test -f "$BENCH/new-name.txt" && ! test -f "$BENCH/old-name.txt"
+
+  - id: textedit-write-save
+    utterance: >-
+      open TextEdit, type "JARVIS bench test", and save it as bench-note in the
+      JARVIS-bench folder on my desktop
+    check: ls "$BENCH" | grep -q '^bench-note' && grep -rq "JARVIS bench test" "$BENCH"/bench-note*
+    cleanup: osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: textedit-open-file
+    setup: printf 'Hello from the bench\n' > "$BENCH/readme.txt"
+    utterance: open readme.txt from the JARVIS-bench folder on my desktop in TextEdit
+    check: osascript -e 'tell application "TextEdit" to return name of every document' | grep -q readme
+    cleanup: osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: notes-create
+    utterance: make a new note in Notes called "JARVIS-bench shopping" with milk and eggs in it
+    check: osascript -e 'tell application "Notes" to return body of (first note whose name contains "JARVIS-bench shopping")' | grep -qi eggs
+    cleanup: osascript -e 'tell application "Notes" to delete (every note whose name contains "JARVIS-bench")' || true
+
+  - id: notes-append
+    setup: osascript -e 'tell application "Notes" to make new note with properties {name:"JARVIS-bench list", body:"JARVIS-bench list<br>apples"}'
+    utterance: add bread to my "JARVIS-bench list" note in Notes
+    check: osascript -e 'tell application "Notes" to return body of (first note whose name contains "JARVIS-bench list")' | grep -qi bread
+    cleanup: osascript -e 'tell application "Notes" to delete (every note whose name contains "JARVIS-bench")' || true
+
+  - id: reminders-create
+    utterance: remind me tomorrow at 9am to water the plants, call it "JARVIS-bench plants"
+    check: osascript -e 'tell application "Reminders" to return name of every reminder whose name contains "JARVIS-bench"' | grep -q plants
+    cleanup: osascript -e 'tell application "Reminders" to delete (every reminder whose name contains "JARVIS-bench")' || true
+
+  - id: calendar-event
+    utterance: put "JARVIS-bench lunch" in my calendar for tomorrow at 1pm
+    approve: [JARVIS-bench]
+    check: >-
+      osascript -e 'tell application "Calendar" to return summary of every event of every calendar
+      whose summary contains "JARVIS-bench"' | grep -q lunch
+    cleanup: >-
+      osascript -e 'tell application "Calendar" to repeat with c in calendars
+      to delete (every event of c whose summary contains "JARVIS-bench")' || true
+
+  - id: safari-two-tabs
+    utterance: open apple.com and bbc.co.uk in two Safari tabs
+    check: >-
+      osascript -e 'tell application "Safari" to return URL of every tab of front window' | grep -q apple.com &&
+      osascript -e 'tell application "Safari" to return URL of every tab of front window' | grep -q bbc.co.uk
+
+  - id: safari-close-tab
+    setup: >-
+      osascript -e 'tell application "Safari" to make new document with properties {URL:"https://example.com/"}'
+      && sleep 2
+    utterance: close the example.com tab in Safari
+    check: "! osascript -e 'tell application \"Safari\" to return URL of every tab of every window' | grep -q example.com"
+
+  - id: volume-set
+    setup: osascript -e 'output volume of (get volume settings)' > "$BENCH/.volume"
+    utterance: set the volume to 25 percent
+    check: v=$(osascript -e 'output volume of (get volume settings)'); [ "$v" -ge 23 ] && [ "$v" -le 27 ]
+    cleanup: osascript -e "set volume output volume $(cat "$BENCH/.volume")" || true
+
+  - id: volume-colloquial
+    setup: >-
+      osascript -e 'output volume of (get volume settings)' > "$BENCH/.volume" &&
+      osascript -e 'set volume output volume 30'
+    utterance: crank it up a bit
+    check: v=$(osascript -e 'output volume of (get volume settings)'); [ "$v" -gt 30 ]
+    cleanup: osascript -e "set volume output volume $(cat "$BENCH/.volume")" || true
+
+  - id: dark-mode
+    setup: >-
+      osascript -e 'tell application "System Events" to tell appearance preferences to return dark mode'
+      > "$BENCH/.dark"
+    utterance: switch the mac to dark mode
+    check: osascript -e 'tell application "System Events" to tell appearance preferences to return dark mode' | grep -q true
+    cleanup: >-
+      osascript -e "tell application \"System Events\" to tell appearance preferences to set dark mode
+      to $(cat "$BENCH/.dark")" || true
+
+  - id: music-play
+    utterance: play some music in the Music app
+    check: osascript -e 'tell application "Music" to return player state as string' | grep -q playing
+    cleanup: osascript -e 'tell application "Music" to pause' || true
+
+  - id: clipboard-copy
+    utterance: copy the words JARVIS-bench clipboard to my clipboard
+    check: pbpaste | grep -q "JARVIS-bench clipboard"
+
+  - id: screenshot-save
+    utterance: take a screenshot and save it into the JARVIS-bench folder on my desktop
+    check: ls "$BENCH" | grep -Eqi '\.(png|jpg|jpeg)$'
+
+  - id: quit-calculator
+    setup: open -a Calculator && sleep 1
+    utterance: quit the calculator
+    approve: [Calculator]
+    check: "! pgrep -x Calculator"
+
+  - id: settings-wifi
+    utterance: open the Wi-Fi settings
+    check: osascript -e 'tell application "System Events" to return name of first process whose frontmost is true' | grep -q "System Settings"
+    cleanup: osascript -e 'tell application "System Settings" to quit' || true
+
+  - id: mail-draft
+    utterance: draft an email in Mail to test@example.com with the subject "JARVIS-bench draft" but don't send it
+    check: >-
+      osascript -e 'tell application "Mail" to return subject of every outgoing message' | grep -q "JARVIS-bench"
+      || osascript -e 'tell application "Mail" to return subject of every message of drafts mailbox' | grep -q "JARVIS-bench"
+    cleanup: osascript -e 'tell application "Mail" to delete (every outgoing message whose subject contains "JARVIS-bench")' || true

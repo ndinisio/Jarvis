@@ -1,0 +1,390 @@
+# Understanding corpus: how JARVIS should read what people actually say.
+#
+# mode:  act | chat — should JARVIS do something on the computer, or talk?
+# quick: what the deterministic fast path (router/quick.py) must do with it:
+#          <name>  → must match exactly this tool/capability/control
+#          none    → must NOT quick-match (a regex would get it wrong)
+#          omitted → no expectation (either is acceptable)
+# norm:  the deterministic tool the request should reach once the Interpreter
+#        (v3.0 Phase 3) has normalised the colloquial phrasing.
+
+groups:
+  - name: exact commands
+    mode: act
+    tags: [exact]
+    utterances:
+      - {t: "what time is it", quick: get_time}
+      - {t: "What's the time?", quick: get_time}
+      - {t: "what's the date", quick: get_time}
+      - {t: "what day is it", quick: get_time}
+      - {t: "open Safari", quick: open_application}
+      - {t: "launch Spotify", quick: open_application}
+      - {t: "fire up Xcode", quick: open_application}
+      - {t: "quit Music", quick: close_application}
+      - {t: "close Slack", quick: close_application}
+      - {t: "switch to Mail", quick: activate_application}
+      - {t: "what apps are running", quick: list_applications}
+      - {t: "go to bbc.co.uk", quick: browse_to}
+      - {t: "visit github.com", quick: browse_to}
+      - {t: "take a screenshot", quick: capture_screen}
+      - {t: "what's on my screen", quick: analyse_screen}
+      - {t: "what does this error mean", quick: analyse_screen}
+      - {t: "how much storage do I have left", quick: get_storage}
+      - {t: "how much disk space is free", quick: get_storage}
+      - {t: "what's my battery level", quick: get_battery}
+      - {t: "how much battery do I have", quick: get_battery}
+      - {t: "how much ram do I have", quick: get_memory}
+      - {t: "what version of macOS am I on", quick: get_system_info}
+      - {t: "what chip does this mac have", quick: get_system_info}
+      - {t: "what's using my cpu", quick: get_cpu}
+      - {t: "am I online", quick: get_network}
+      - {t: "mute", quick: set_volume}
+      - {t: "unmute", quick: set_volume}
+      - {t: "set the volume to 40 percent", quick: set_volume}
+      - {t: "turn the volume up", quick: system}
+      - {t: "what's on my calendar today", quick: read_calendar}
+      - {t: "what do I have tomorrow", quick: read_calendar}
+      - {t: "check my email", quick: email}
+      - {t: "do I have any new mail", quick: email}
+      - {t: "remember that my sister's birthday is in June", quick: memory}
+      - {t: "what do you remember about me", quick: memory}
+      - {t: "what did I copy", quick: read_clipboard}
+      - {t: "research the best mechanical keyboards", quick: research}
+      - {t: "make a note that the boiler needs servicing", quick: create_note}
+      - {t: "why is my mac so slow", quick: diagnostics}
+      - {t: "list my files", quick: list_files}
+
+  - name: conversational control
+    mode: chat
+    tags: [control]
+    utterances:
+      - {t: "hello", quick: greeting}
+      - {t: "good morning jarvis", quick: greeting}
+      - {t: "thanks jarvis", quick: thanks}
+      - {t: "cheers", quick: thanks}
+      - {t: "stop", quick: cancel, mode: act}
+      - {t: "never mind", quick: cancel, mode: act}
+      - {t: "are you there?", quick: presence}
+      - {t: "goodnight", quick: farewell}
+      - {t: "yes", quick: affirm, mode: act}
+      - {t: "go ahead", quick: affirm, mode: act}
+      - {t: "no", quick: decline, mode: act}
+
+  - name: polite single commands
+    mode: act
+    tags: [polite]
+    utterances:
+      - {t: "could you open safari please", quick: open_application}
+      - {t: "can you open spotify for me", quick: open_application}
+      - {t: "jarvis, would you launch notes", quick: open_application}
+      - {t: "please quit slack", quick: close_application}
+      - {t: "can you take a screenshot", quick: capture_screen}
+      - {t: "could you take a screenshot for me", quick: capture_screen}
+      - {t: "can you mute", quick: set_volume}
+      - {t: "would you check my email", quick: email}
+      - {t: "can you check my email please", quick: email}
+      - {t: "could you go to github.com", quick: browse_to}
+      - {t: "can you set the volume to 20 percent", quick: set_volume}
+      - {t: "hey jarvis what time is it", quick: get_time}
+      - {t: "jarvis, what's my battery level", quick: get_battery}
+      - {t: "um, what's the date", quick: get_time}
+      - {t: "can you tell me what time it is", norm: get_time}
+      - {t: "could you let me know how much battery I've got", norm: get_battery}
+      - {t: "any chance you could open Mail real quick", quick: open_application}
+      - {t: "would you mind muting the sound", norm: set_volume}
+
+  - name: compound requests
+    mode: act
+    quick: none
+    tags: [compound]
+    utterances:
+      - "search for AirPods on Amazon and add them to my basket"
+      - "Search for a USB-C cable on Amazon and add it to my basket"
+      - "open Safari and go to bbc.co.uk"
+      - "open amazon and search for batteries"
+      - "open Amazon and add a kettle to my basket"
+      - "check my email and then reply to Sarah"
+      - "check my email for anything from the dentist and put the appointment in my calendar"
+      - "take a screenshot and save it to my desktop"
+      - "take a screenshot then send it to Bob"
+      - "search for flights to Rome then open the cheapest one"
+      - "open Spotify and play my discover weekly"
+      - "mute the volume and lock the screen"
+      - "google the weather in London and read me the forecast"
+      - "look up a pancake recipe and add eggs to my shopping list"
+      - "open notes and write a new note about the meeting"
+      - "research the best laptops and add the top one to my basket"
+      - "compare iPhone prices on Amazon and add the cheapest to my basket"
+      - "remember to buy milk and add it to my reminders"
+      - "what's my battery level and how much storage do I have"
+      - "set the volume to 30 and open music"
+      - "close Slack and open Zoom"
+      - "open Finder then make a new folder called Receipts"
+      - "search the web for tide times in Brighton and tell me when high tide is"
+      - "go to youtube.com and play some lofi music"
+      - "open the file report.txt and summarise it"
+      - "make a note saying call mum and remind me at 6"
+      - "copy this to the clipboard and paste it into notes"
+      - "find files about taxes and move them to a folder called 2025"
+      - "launch Xcode and open my last project"
+      - "quit Chrome, then open Safari"
+      - "open System Settings and turn on dark mode"
+      - "search for hotels in Paris and email me the best three"
+      - "open Mail and write to Priya saying thanks for the photos"
+      - "switch to Safari and scroll down"
+      - "take a screenshot, and then describe it"
+      - "search for lofi beats on youtube and play the first one"
+      - "open the Makers Meetup site and register me"
+      - "go to amazon.co.uk and add AA batteries to my basket"
+      - "check the weather and if it's raining remind me to take an umbrella"
+      - "read my latest email and draft a reply"
+      - "open calendar and add lunch with Bob on Friday"
+      - "turn the volume down and pause the music"
+      - "open Messages and text Sarah that I'm on my way"
+      - "search for a desk lamp, compare the top two, and add the cheaper one to my basket"
+      - "download the latest Python installer and install it"
+      - "check if I have the latest Python, and if not, download it"
+      - "find me the best value two-pack of ESP-32 boards and add them to my basket"
+      - "open Notes, create a shopping list, and add bread and milk"
+      - "log into my amazon account and check my orders"
+      - "google best pizza near me and open the top result"
+
+  - name: site-qualified searches
+    mode: act
+    quick: none
+    tags: [site]
+    utterances:
+      - "search amazon for usb cables"
+      - "search for usb cables on amazon"
+      - "search youtube for lofi beats"
+      - "search for lofi beats on youtube"
+      - "look up flights to Lisbon on skyscanner"
+      - "search ebay for a vintage camera"
+      - "search wikipedia for the Roman Empire"
+      - "search for the Roman Empire on wikipedia"
+      - "find a kettle on amazon"
+      - "search spotify for Daft Punk"
+      - "search for Daft Punk on Spotify"
+      - "search google maps for coffee near me"
+      - "look up Dune on IMDb"
+      - "search reddit for mechanical keyboard advice"
+      - "search amazon.co.uk for AA batteries"
+
+  - name: domain words that must not hijack
+    quick: none
+    tags: [hijack]
+    utterances:
+      - {t: "buy a battery pack on amazon", mode: act}
+      - {t: "order a new battery charger from amazon", mode: act}
+      - {t: "how much storage does the iPhone 16 have", mode: chat}
+      - {t: "what's the battery life of the MacBook Air", mode: chat}
+      - {t: "how much memory does a raspberry pi 5 have", mode: chat}
+      - {t: "what's the difference between RAM and storage", mode: chat}
+      - {t: "how much battery does a Tesla have", mode: chat}
+      - {t: "what's on today at the cinema", mode: act}
+      - {t: "my agenda for the trip is packed, any tips?", mode: chat}
+      - {t: "is the internet working at the office usually slow on Mondays?", mode: chat}
+      - {t: "how much disk space does Photoshop need", mode: chat}
+      - {t: "what processor does the new iPad use", mode: chat}
+      - {t: "how much ram do I need for video editing", mode: chat}
+      - {t: "check my email for the parcel tracking number and open it", mode: act}
+      - {t: "open a new tab", mode: act, norm: new_tab}
+      - {t: "open a new window in Safari", mode: act}
+      - {t: "open the downloads folder", mode: act}
+      - {t: "open my last email", mode: act}
+      - {t: "open the second one", mode: act}
+      - {t: "open that link", mode: act}
+      - {t: "remove the kettle from my amazon basket", mode: act}
+      - {t: "delete the second email", mode: act}
+      - {t: "remove milk from my shopping list", mode: act}
+      - {t: "bin the meeting on Friday", mode: act}
+
+  - name: colloquial actions
+    mode: act
+    tags: [colloquial]
+    utterances:
+      - {t: "I need some AA batteries", quick: none}
+      - {t: "stick some music on", quick: none, norm: play_music}
+      - {t: "pop YouTube on", quick: none}
+      - {t: "can you sort out my downloads folder", quick: none}
+      - {t: "fire up a new tab", quick: none, norm: new_tab}
+      - {t: "chuck on some lofi", quick: none}
+      - {t: "get me the weather for tomorrow", quick: none}
+      - {t: "let's get the white kettle ordered from amazon", quick: none}
+      - {t: "I want to watch the new Dune trailer", quick: none}
+      - {t: "crank the volume up a bit", quick: system}
+      - {t: "shh", norm: set_volume}
+      - {t: "remind me to call mum at 6", quick: none}
+      - {t: "what's the craic with my inbox", norm: email}
+      - {t: "anything new from Sarah?", quick: none}
+      - {t: "show me what's in my amazon basket", quick: none}
+      - {t: "text Bob I'm running late", quick: none}
+      - {t: "email the landlord about the boiler", quick: none}
+      - {t: "sort my desktop out", quick: none}
+      - {t: "make my screen a bit darker", quick: none}
+      - {t: "turn on dark mode", quick: none}
+      - {t: "go back a page", quick: none}
+      - {t: "close this tab", quick: none}
+      - {t: "next song", quick: none}
+      - {t: "pause the music", quick: none}
+      - {t: "lock my mac", quick: none}
+      - {t: "I'm cold, is it going to rain later?", quick: none}
+      - {t: "get Spotify going", quick: none, norm: open_application}
+      - {t: "bring up my calendar for next week", quick: none}
+      - {t: "what've I got on today", norm: read_calendar}
+      - {t: "am I free on Friday afternoon", quick: none}
+      - {t: "put a meeting with Bob in for Tuesday at 10", quick: none}
+      - {t: "grab me a screenshot", norm: capture_screen}
+      - {t: "snap the screen", norm: capture_screen}
+      - {t: "how's my battery doing", quick: get_battery}
+      - {t: "have I got much space left on this thing", norm: get_storage}
+      - {t: "is my mac running hot", quick: none}
+      - {t: "find that pdf I downloaded yesterday", quick: none}
+      - {t: "empty the bin", quick: none}
+      - {t: "tidy up my desktop", quick: none}
+      - {t: "order more coffee pods", quick: none}
+      - {t: "reorder the dishwasher tablets from amazon", quick: none}
+      - {t: "add bin bags to my basket", quick: none}
+      - {t: "I've run out of printer paper", quick: none}
+      - {t: "put the telly on", quick: none}
+      - {t: "turn the lights off", quick: none}
+      - {t: "message Sarah saying dinner's at 7", quick: none}
+      - {t: "tell Priya thanks for the photos", quick: none}
+      - {t: "reply to Bob, tell him the prototype looks great", quick: none}
+      - {t: "whack the brightness up", quick: none}
+      - {t: "set a timer for 10 minutes", quick: none}
+      - {t: "wake me up at 7", quick: none}
+      - {t: "find me a cheap flight to Dublin next weekend", quick: none}
+      - {t: "book me a haircut on Saturday", quick: none}
+      - {t: "fill in the registration form on this page with my details", quick: none}
+      - {t: "click the big blue button", quick: none}
+      - {t: "scroll down a bit", quick: none}
+      - {t: "go to the next page", quick: none}
+      - {t: "save this page as a pdf", quick: none}
+      - {t: "download this file", quick: none}
+      - {t: "zip up the Receipts folder", quick: none}
+      - {t: "rename the screenshot on my desktop to invoice", quick: none}
+      - {t: "move all my screenshots into one folder", quick: none}
+      - {t: "open whatever I was working on yesterday", quick: none}
+      - {t: "play something chill", quick: none}
+      - {t: "skip this track", quick: none}
+      - {t: "turn it down", quick: none}
+      - {t: "louder", quick: none}
+      - {t: "quieter please", quick: none}
+      - {t: "show me the news", quick: none}
+      - {t: "what's trending on youtube", quick: none}
+      - {t: "check the train times to London", quick: none}
+      - {t: "look up how to fix a leaky tap", quick: none}
+      - {t: "translate this page into Spanish", quick: none}
+      - {t: "summarise this page", quick: none}
+      - {t: "what's this page about", quick: none}
+      - {t: "copy the link to this page", quick: none}
+      - {t: "bookmark this", quick: none}
+      - {t: "share this with Bob", quick: none}
+      - {t: "print this", quick: none}
+      - {t: "can you clear my notifications", quick: none}
+      - {t: "switch the wifi off", quick: none}
+      - {t: "connect my AirPods", quick: none}
+      - {t: "open the thing I use for notes", quick: none}
+
+  - name: small talk and opinions with domain words
+    mode: chat
+    quick: none
+    tags: [chat-domain]
+    utterances:
+      - "I hate dealing with email"
+      - "email is such a pain sometimes"
+      - "what's your favourite browser"
+      - "do you think Safari is better than Chrome"
+      - "tell me a joke about batteries"
+      - "why do batteries die in the cold"
+      - "I spent all day in my calendar, exhausting"
+      - "what does a clipboard manager do"
+      - "how does the basket on amazon work"
+      - "my screen is so dusty lol"
+      - "amazon deliveries have been so slow lately"
+      - "I love my new mechanical keyboard"
+      - "do you like spotify or apple music better"
+      - "screenshots are underrated honestly"
+      - "my inbox is a disaster"
+      - "is it bad to leave my laptop plugged in all the time"
+      - "what's the point of dark mode"
+      - "I keep forgetting to reply to people"
+      - "files and folders confuse my dad"
+      - "do you ever get tired of opening apps"
+      - "what's the history of the clipboard"
+      - "is shopping online cheaper than in store"
+      - "why is Wi-Fi called Wi-Fi"
+      - "reminders never work for me"
+      - "I got a weird email from my bank earlier"
+      - "tabs or bookmarks, which do you prefer"
+      - "the volume on these speakers is great"
+      - "what makes a good password"
+      - "my calendar says I'm busy but I'm not"
+      - "I think my mac is getting old"
+
+  - name: general conversation
+    mode: chat
+    quick: none
+    tags: [chat]
+    utterances:
+      - "what's the capital of France"
+      - "who wrote Dune"
+      - "explain quantum computing simply"
+      - "how are you today"
+      - "what can you do"
+      - "tell me a joke"
+      - "what's 15 percent of 80"
+      - "how do I make a good cup of tea"
+      - "what's the meaning of life"
+      - "give me a fun fact"
+      - "who won the world cup in 2018"
+      - "how far is the moon"
+      - "what should I cook tonight"
+      - "recommend me a good sci-fi book"
+      - "what's a good name for a cat"
+      - "how do vaccines work"
+      - "what is love"
+      - "can you help me write a poem about autumn"
+      - "what's the difference between weather and climate"
+      - "I'm feeling a bit stressed"
+      - "what's your name"
+      - "who made you"
+      - "do you dream"
+      - "what language do they speak in Brazil"
+      - "how many ounces in a pound"
+
+  - name: speech recognition noise
+    mode: act
+    tags: [asr]
+    utterances:
+      - {t: "search for AirPods on Amazon and add them to my bass kit", quick: none}
+      - {t: "open saffari", quick: open_application}
+      - {t: "check my male", quick: none}
+      - {t: "search amazon for double a batteries", quick: none}
+      - {t: "whats the whether tomorrow", quick: none}
+      - {t: "turn the volume dawn", quick: none}
+      - {t: "play some music on spot if i", quick: none}
+      - {t: "open spot if I", quick: open_application}
+      - {t: "open face time", quick: open_application}
+      - {t: "open vs code", quick: open_application}
+      - {t: "take a screen shot", quick: capture_screen}
+      - {t: "what's on my calendar to day", quick: read_calendar}
+      - {t: "add a usb see cable to my basket", quick: none}
+      - {t: "put a kettle in my amazon bass kit", quick: none}
+      - {t: "e-mail bob about the prototype", quick: none}
+      - {t: "texts Sarah I'm late", quick: none}
+      - {t: "remind me to by milk", quick: none}
+      - {t: "open the you tube"}
+      - {t: "set a timer for ten minutes", quick: none}
+      - {t: "whats my battery", quick: get_battery}
+      - {t: "how much stories do I have left", quick: none}
+      - {t: "go to bbc dot co dot uk", quick: none}
+      - {t: "go to github dot com", quick: none}
+      - {t: "open the tab", quick: none}
+      - {t: "new tab please", quick: none}
+      - {t: "close the tap"}
+      - {t: "paws the music", quick: none}
+      - {t: "next track", quick: none}
+      - {t: "check my in box", quick: none}
+      - {t: "jarvis what's the time", quick: get_time}
