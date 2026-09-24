@@ -188,7 +188,7 @@ groups:
       - {t: "what processor does the new iPad use", mode: chat}
       - {t: "how much ram do I need for video editing", mode: chat}
       - {t: "check my email for the parcel tracking number and open it", mode: act}
-      - {t: "open a new tab", mode: act, norm: new_tab}
+      - {t: "open a new tab", mode: act, quick: browser_tab}
       - {t: "open a new window in Safari", mode: act}
       - {t: "open the downloads folder", mode: act}
       - {t: "open my last email", mode: act}
@@ -204,10 +204,10 @@ groups:
     tags: [colloquial]
     utterances:
       - {t: "I need some AA batteries", quick: none}
-      - {t: "stick some music on", quick: none, norm: play_music}
+      - {t: "stick some music on", quick: media_control}
       - {t: "pop YouTube on", quick: none}
       - {t: "can you sort out my downloads folder", quick: none}
-      - {t: "fire up a new tab", quick: none, norm: new_tab}
+      - {t: "fire up a new tab", quick: browser_tab}
       - {t: "chuck on some lofi", quick: none}
       - {t: "get me the weather for tomorrow", quick: none}
       - {t: "let's get the white kettle ordered from amazon", quick: none}
@@ -222,12 +222,12 @@ groups:
       - {t: "email the landlord about the boiler", quick: none}
       - {t: "sort my desktop out", quick: none}
       - {t: "make my screen a bit darker", quick: none}
-      - {t: "turn on dark mode", quick: none}
-      - {t: "go back a page", quick: none}
-      - {t: "close this tab", quick: none}
-      - {t: "next song", quick: none}
-      - {t: "pause the music", quick: none}
-      - {t: "lock my mac", quick: none}
+      - {t: "turn on dark mode", quick: set_appearance}
+      - {t: "go back a page", quick: browser_tab}
+      - {t: "close this tab", quick: browser_tab}
+      - {t: "next song", quick: media_control}
+      - {t: "pause the music", quick: media_control}
+      - {t: "lock my mac", quick: lock_screen}
       - {t: "I'm cold, is it going to rain later?", quick: none}
       - {t: "get Spotify going", quick: none, norm: open_application}
       - {t: "bring up my calendar for next week", quick: none}
@@ -267,7 +267,7 @@ groups:
       - {t: "move all my screenshots into one folder", quick: none}
       - {t: "open whatever I was working on yesterday", quick: none}
       - {t: "play something chill", quick: none}
-      - {t: "skip this track", quick: none}
+      - {t: "skip this track", quick: media_control}
       - {t: "turn it down", quick: none}
       - {t: "louder", quick: none}
       - {t: "quieter please", quick: none}
@@ -286,6 +286,22 @@ groups:
       - {t: "switch the wifi off", quick: none}
       - {t: "connect my AirPods", quick: none}
       - {t: "open the thing I use for notes", quick: none}
+
+  - name: colloquial versions of simple commands
+    mode: act
+    quick: none
+    tags: [colloquial-norm]
+    utterances:
+      - {t: "can you pop a new tab open", norm: browser_tab}
+      - {t: "would you mind pausing the music", norm: media_control}
+      - {t: "make the screen go dark mode please", norm: set_appearance}
+      - {t: "whack on the next song", norm: media_control}
+      - {t: "chuck my mac on lock", norm: lock_screen}
+      - {t: "what's the time looking like", norm: get_time}
+      - {t: "how's the old battery holding up", norm: get_battery}
+      - {t: "is there much room left on my disk", norm: get_storage}
+      - {t: "get Safari up on screen for me", norm: open_application}
+      - {t: "can I get a screenshot of this", norm: capture_screen}
 
   - name: small talk and opinions with domain words
     mode: chat
@@ -382,9 +398,9 @@ groups:
       - {t: "go to bbc dot co dot uk", quick: none}
       - {t: "go to github dot com", quick: none}
       - {t: "open the tab", quick: none}
-      - {t: "new tab please", quick: none}
+      - {t: "new tab please", quick: browser_tab}
       - {t: "close the tap"}
       - {t: "paws the music", quick: none}
-      - {t: "next track", quick: none}
+      - {t: "next track", quick: media_control}
       - {t: "check my in box", quick: none}
       - {t: "jarvis what's the time", quick: get_time}

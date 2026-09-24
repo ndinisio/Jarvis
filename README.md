@@ -483,7 +483,8 @@ cd frontend && npm install && npm run build && cd ..
 | `pydantic` | configuration schema | required |
 | `beautifulsoup4` | web page extraction | required |
 | `sounddevice`, `numpy` | microphone capture | voice only |
-| `faster-whisper` | local speech recognition | voice only |
+| `faster-whisper` | local speech recognition (CPU) | voice only |
+| `mlx-whisper` | local speech recognition on the Apple Silicon GPU (large-v3-turbo) | optional, recommended |
 | `openwakeword` | offline wake-word detection | voice only |
 | `pillow` | screenshot downscaling (faster vision) | optional |
 
@@ -634,9 +635,14 @@ with any phrase.
 detector needs happens in `backend/jarvis/voice/audio.py`; see
 [What's new in V1.1](#whats-new-in-v11) for why the representation matters.
 
-**Speech recognition.** `faster-whisper` with `base.en` by default. `tiny.en` is
-quicker and less accurate; `small.en` is better and slower. The model downloads
-on first use.
+**Speech recognition.** `voice.stt_engine` is `auto` by default: on Apple
+Silicon with `mlx-whisper` installed (`pip install mlx-whisper`), Whisper
+**large-v3-turbo** runs on the GPU — accurate on casual speech and faster than
+real time; otherwise `faster-whisper` with `small.en` on the CPU (`base.en`
+mishears too much everyday phrasing). JARVIS teaches the recogniser this
+Mac's app names and its own command words at start-up, as Whisper's initial
+prompt, so "open Spotify" isn't heard as "open spot if I"; add your own words
+(names, products) in `voice.stt_vocabulary`. Models download on first use.
 
 **Speech output.** macOS `say`, with the British voice *Daniel* by default. Any
 installed system voice works — Settings lists them. Off macOS, replies are
@@ -699,7 +705,8 @@ file) override the file — see [`.env.example`](.env.example).
   "voice": {
     "wake_word": "jarvis",
     "wake_engine": "openwakeword",
-    "stt_model": "base.en",
+    "stt_engine": "auto",     // mlx (Apple Silicon GPU) → faster-whisper
+    "stt_vocabulary": [],     // extra words to hear correctly
     "tts_voice": "Daniel",
     "barge_in": true
   },

@@ -1768,3 +1768,75 @@ async def test_declining_the_automation_start_confirmation_still_gets_a_reply(
     assert len(voice.spoken) == 2, (
         f"expected the acknowledgement plus the decline reply, got: {voice.spoken}")
     assert "left it" in voice.spoken[-1].lower() or "understood" in voice.spoken[-1].lower()
+
+
+# ---------------------------------------------------------------------------
+# v3.0 Phase 3: the interpreter
+# ---------------------------------------------------------------------------
+def _tool_calls(app) -> list[str]:
+    return [e.payload.get("tool") for e in app.bus.history if e.type == "tool.call"]
+
+
+async def test_a_colloquial_request_restated_plainly_takes_the_fast_path(app, brain):
+    """"What's the time looking like" means "what time is it": once the
+    interpreter says so, the deterministic answer runs — no planner, no
+    decision loop, no further model calls."""
+    brain.triage(mode="action", action_evidence=["what's the time"],
+                 normalized_command="what time is it",
+                 objective={"goal": "tell the time", "kind": "read time", "complexity": "simple",
+                            "confidence": "confident", "missing": []})
+    result = await app.ask("what's the time looking like")
+    assert result.decision.name == "get_time"
+    assert "get_time" in _tool_calls(app)
+    assert brain.prompts("decide") == [] and brain.prompts("plan") == []
+
+
+async def test_a_multi_step_errand_is_never_short_circuited_to_a_single_command(app, brain):
+    brain.triage(mode="action", action_evidence=["search for batteries"],
+                 normalized_command="search for batteries",
+                 objective={"goal": "buy batteries", "kind": "research", "complexity": "multi_step",
+                            "confidence": "confident", "missing": []})
+    await app.ask("sort me out with some batteries")
+    assert "browse_to" not in _tool_calls(app)
+
+
+async def test_a_failed_interpreted_command_is_rescued_once_without_looping(app, brain):
+    """The restated command names no real app: the tool says it wasn't its
+    to do, the agent reconsiders — and must not be offered the same fast
+    route again, or the turn would loop."""
+    brain.triage(mode="action", action_evidence=["get blorptastic going"],
+                 normalized_command="open Blorptastic",
+                 objective={"goal": "open Blorptastic", "kind": "open application",
+                            "complexity": "simple", "confidence": "confident", "missing": []})
+    await asyncio.wait_for(app.ask("get blorptastic going"), timeout=10)
+    assert _tool_calls(app).count("open_application") == 1
+    assert len(brain.prompts("triage")) == 2
+
+
+async def test_the_interpreter_asks_for_schema_shaped_output(app, fake_provider, brain):
+    brain.triage(mode="chat", action_evidence=[], reason="small talk")
+    await app.ask("honestly the weather has been grim this week")
+    triage_calls = [c for c in fake_provider.calls
+                    if "You decide what the user wants" in " ".join(m.content for m in c["messages"])]
+    assert triage_calls and triage_calls[0]["kwargs"]["json_mode"] is True
+    assert "matching this schema" in triage_calls[0]["messages"][0].content
+
+
+async def test_the_interpreter_accepts_act_and_an_empty_objective():
+    from jarvis.intelligence.schema import Triage, load
+
+    triage = load(Triage, {"mode": "act", "action_evidence": ["open it"], "objective": {},
+                           "normalized_command": "open Safari"})
+    assert triage.mode == "action"
+    assert triage.objective is None
+    assert triage.normalized_command == "open Safari"
+
+
+async def test_an_objective_carries_success_criteria_and_where_the_work_happens():
+    from jarvis.intelligence.schema import Objective, load
+
+    objective = load(Objective, {"goal": "add batteries to the basket", "kind": "automation",
+                                 "success_criteria": ["a pack of AA batteries is in the Amazon basket"],
+                                 "surface": "web", "site": "amazon.co.uk"})
+    assert objective.success_criteria == ["a pack of AA batteries is in the Amazon basket"]
+    assert (objective.surface, objective.site) == ("web", "amazon.co.uk")

@@ -210,7 +210,6 @@ def test_politeness_and_lists_still_get_the_fast_answer(text, name):
     "remove the kettle from my amazon basket",
     "delete the second email",
     "remember to buy milk",
-    "open a new tab",
     "open the downloads folder",
     "search for usb cables on amazon",
     "how much storage does the iPhone 16 have",
@@ -218,3 +217,20 @@ def test_politeness_and_lists_still_get_the_fast_answer(text, name):
 ])
 def test_lookalike_requests_are_not_misrouted(text):
     assert QuickCommands().match(text) is None
+
+
+
+@pytest.mark.parametrize("text,name,args", [
+    ("open a new tab", "browser_tab", {"action": "new", "browser": ""}),
+    ("new tab in chrome", "browser_tab", {"action": "new", "browser": "chrome"}),
+    ("close this tab", "browser_tab", {"action": "close"}),
+    ("go back a page", "browser_tab", {"action": "back"}),
+    ("pause the music", "media_control", {"action": "pause"}),
+    ("skip this track", "media_control", {"action": "next"}),
+    ("turn on dark mode", "set_appearance", {"mode": "dark"}),
+    ("lock my mac", "lock_screen", {}),
+])
+def test_everyday_commands_are_deterministic(text, name, args):
+    decision = QuickCommands().match(text)
+    assert decision is not None and decision.name == name
+    assert decision.args == args

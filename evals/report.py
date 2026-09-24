@@ -22,6 +22,8 @@ GATES = [
      lambda d: d["summary"]["quick"]["rate"], 1.0),
     ("understanding", "Chat vs. action correct (local model)",
      lambda d: d["summary"]["mode"]["rate"], 0.95),
+    ("understanding", "Colloquial phrasing reaches the right command (local model)",
+     lambda d: d["summary"].get("norm", {}).get("rate"), 0.90),
     ("web", "Web tasks succeed (local model)",
      lambda d: d["summary"]["success_rate"], 0.85),
     ("web-cloud", "Web tasks succeed (free cloud accelerator)",

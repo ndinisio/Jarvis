@@ -57,6 +57,9 @@ class VoiceManager:
 
         self.tts = build_tts(config, bus)
         self.stt = build_stt(config)
+        #: Words taught at start-up (installed apps); re-applied whenever the
+        #: recogniser is rebuilt by a configuration change.
+        self._learned_words: list[str] = []
         self.wake = build_wake_detector(config, self.stt)
         self.microphone = Microphone(config.voice.input_device or None)
 
@@ -108,10 +111,18 @@ class VoiceManager:
         self._config = config
         self.tts = build_tts(config, self._bus)
         self.stt = build_stt(config)
+        if self._learned_words:
+            self.teach(self._learned_words)
         self.wake = build_wake_detector(config, self.stt)
         self.microphone = Microphone(config.voice.input_device or None)
         if was_listening:
             asyncio.create_task(self.restart())
+
+    def teach(self, words: list[str]) -> None:
+        """Bias recognition towards *words* (installed app names, contacts…)
+        on top of the configured vocabulary."""
+        self._learned_words = list(words)
+        self.stt.set_vocabulary(list(self._config.voice.stt_vocabulary) + self._learned_words)
 
     # ------------------------------------------------------------------
     # listening

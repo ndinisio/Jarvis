@@ -182,11 +182,22 @@ class VoiceConfig(BaseModel):
     wake_sensitivity: float = 0.5
     #: How long JARVIS keeps listening for a follow-up after answering.
     conversation_window_s: float = 12.0
-    #: Speech-to-text: "faster-whisper" (local) | "whispercpp" | "off"
-    stt_engine: Literal["faster-whisper", "whispercpp", "off"] = "faster-whisper"
-    stt_model: str = "base.en"
+    #: Speech-to-text. "auto" picks the best installed engine: MLX Whisper
+    #: (large-v3-turbo on the Apple Silicon GPU) when `mlx-whisper` is
+    #: installed, otherwise faster-whisper on the CPU. Or name one: "mlx" |
+    #: "faster-whisper" | "whispercpp" (Metal, via whisper.cpp) | "off".
+    stt_engine: Literal["auto", "mlx", "faster-whisper", "whispercpp", "off"] = "auto"
+    #: Empty uses the engine's own default (large-v3-turbo for MLX,
+    #: small.en for faster-whisper — base.en mishears too much casual speech).
+    stt_model: str = ""
     stt_compute_type: str = "int8"
     stt_language: str = "en"
+    #: Wider beam = fewer mistakes, slower. 1 is greedy.
+    stt_beam_size: int = 1
+    #: Extra words to bias recognition towards (names, products, jargon) —
+    #: added to the installed app names and command words JARVIS already
+    #: teaches the recogniser.
+    stt_vocabulary: list[str] = Field(default_factory=list)
     whispercpp_binary: str = "whisper-cli"
     whispercpp_model_path: str = ""
     #: Text-to-speech: "macos" (the `say` command) | "kokoro" (local neural

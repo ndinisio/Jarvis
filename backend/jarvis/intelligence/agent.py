@@ -93,12 +93,16 @@ class AgentOutcome:
     #: True when ``text`` was already delivered token by token.
     streamed: bool = False
     trace: list[dict[str, Any]] = field(default_factory=list)
-    #: Set when this turn belongs to a capability better suited to run it
-    #: than this loop — currently only "automation" (see the handoff in
-    #: run(), just before the shortlist is built). When set, every other
-    #: field except ``objective`` is meaningless; the orchestrator re-routes
-    #: instead of composing an answer from this outcome.
+    #: Set when this turn belongs to something better suited to run it than
+    #: this loop — "automation" (a multi-step errand; see the handoff in
+    #: run(), just before the shortlist is built) or "quick" (the request,
+    #: restated plainly by the interpreter, is a deterministic command; see
+    #: ``quick_decision``). When set, every other field except ``objective``
+    #: is meaningless; the orchestrator re-routes instead of composing an
+    #: answer from this outcome.
     handoff: str | None = None
+    #: The fast-path route for a "quick" handoff.
+    quick_decision: Any = None
 
 
 class IntelligenceAgent:
@@ -125,7 +129,7 @@ class IntelligenceAgent:
 
     # ------------------------------------------------------------------
     async def run(self, text: str, ctx, *, task=None, emit=None, stream=None,
-                  context: str = "") -> AgentOutcome:
+                  context: str = "", allow_quick: bool = True) -> AgentOutcome:
         """One turn.
 
         ``emit`` narrates progress ("Searching the web…"); ``stream`` receives
@@ -162,6 +166,18 @@ class IntelligenceAgent:
                 trace.intent(objective, state)
                 return await self._converse(text, objective, outcome, trace, stream)
             triage_objective = triage.objective
+            # "Could you pop a new tab open" restated as "open a new tab" is
+            # a deterministic command: hand it to the fast path rather than
+            # spend further model calls on it. Never for a multi-step errand,
+            # and never twice (a rescued quick route comes back with
+            # allow_quick=False).
+            quick = _quick_route(triage, text) if allow_quick else None
+            if quick is not None:
+                outcome.handoff = "quick"
+                outcome.quick_decision = quick
+                outcome.objective = triage_objective
+                outcome.trace = trace.entries
+                return outcome
 
         # "Action" means the user appears to be asking for something, not
         # that there is enough to act on (V1.3 §6). Use triage's own
@@ -515,6 +531,24 @@ class IntelligenceAgent:
         from ..core.personality import Personality
 
         return Personality(self.deps.config).system_prompt(self._context)
+
+
+def _quick_route(triage, text: str):
+    """The fast-path route for the interpreter's plain restatement, if any."""
+    from ..router.quick import QuickCommands
+    from ..router.schema import RouteKind
+
+    command = (triage.normalized_command or "").strip()
+    if not command or command.lower() == (text or "").strip().lower():
+        return None
+    objective = triage.objective
+    if objective is not None and objective.complexity == Complexity.MULTI_STEP:
+        return None
+    decision = QuickCommands().match(command)
+    if decision is None or decision.kind == RouteKind.CONTROL:
+        return None
+    decision.reason = f"interpreted as “{command[:60]}”"
+    return decision
 
 
 def _normalise_kind(kind: str) -> str:

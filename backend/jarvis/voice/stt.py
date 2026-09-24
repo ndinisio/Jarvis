@@ -1,9 +1,16 @@
 """Speech to text.
 
-Local Whisper by default (faster-whisper, which is CTranslate2 under the hood
-and runs comfortably on Apple Silicon). whisper.cpp is supported for users who
-already have it. Everything is optional: with no STT installed, JARVIS still
-works by text and can fall back to the browser's own recogniser.
+Local Whisper, three ways. On Apple Silicon the best is MLX Whisper — the
+large-v3-turbo model on the GPU, accurate on casual speech and faster than
+real time. faster-whisper (CTranslate2, CPU) is the portable default, and
+whisper.cpp (Metal) is supported for users who already have it. Everything
+is optional: with no STT installed, JARVIS still works by text and can fall
+back to the browser's own recogniser.
+
+Every engine can be given a *vocabulary* — installed app names, command
+words, the user's own additions — passed to Whisper as its initial prompt,
+which biases spelling towards words it would otherwise mishear ("Spotify",
+not "spot if I"; "basket", not "bass kit").
 """
 
 from __future__ import annotations
@@ -22,12 +29,39 @@ log = get_logger("jarvis.voice.stt")
 SAMPLE_RATE = 16000
 
 
+#: Words people say to JARVIS that a general-purpose recogniser tends to get
+#: wrong. The installed app names are added at start-up.
+COMMAND_WORDS = (
+    "JARVIS", "Amazon", "basket", "checkout", "Safari", "Chrome", "Spotify", "YouTube",
+    "Finder", "FaceTime", "iMessage", "WhatsApp", "Wi-Fi", "Bluetooth", "screenshot",
+    "Downloads", "Desktop", "tab", "inbox",
+)
+
+
+def vocabulary_prompt(words: list[str] | tuple[str, ...], limit: int = 120) -> str:
+    """Whisper's initial prompt is conditioning text, not a list — a short
+    comma-separated run of the words reads as plausible prior speech."""
+    seen: list[str] = []
+    for word in words:
+        word = (word or "").strip()
+        if word and word.lower() not in {w.lower() for w in seen}:
+            seen.append(word)
+        if len(seen) >= limit:
+            break
+    return ", ".join(seen) + "." if seen else ""
+
+
 class STTEngine(abc.ABC):
     name = "stt"
+    #: Conditioning text biasing recognition towards known words.
+    vocabulary: str = ""
 
     @abc.abstractmethod
     async def transcribe(self, audio: Any, sample_rate: int = SAMPLE_RATE) -> str:
         """Transcribe float32 mono audio (numpy array) or 16-bit PCM bytes."""
+
+    def set_vocabulary(self, words: list[str] | tuple[str, ...]) -> None:
+        self.vocabulary = vocabulary_prompt(list(COMMAND_WORDS) + list(words))
 
     async def available(self) -> tuple[bool, str]:
         return True, "ok"
@@ -39,10 +73,12 @@ class STTEngine(abc.ABC):
 class FasterWhisperSTT(STTEngine):
     name = "faster-whisper"
 
-    def __init__(self, model: str = "base.en", compute_type: str = "int8", language: str = "en"):
-        self.model_name = model
+    def __init__(self, model: str = "small.en", compute_type: str = "int8", language: str = "en",
+                 beam_size: int = 1):
+        self.model_name = model or "small.en"
         self.compute_type = compute_type
         self.language = language
+        self.beam_size = max(1, int(beam_size))
         self._model = None
         self._lock = asyncio.Lock()
 
@@ -76,9 +112,10 @@ class FasterWhisperSTT(STTEngine):
             segments, _info = self._model.transcribe(
                 samples,
                 language=self.language or None,
-                beam_size=1,
+                beam_size=self.beam_size,
                 vad_filter=True,
                 condition_on_previous_text=False,
+                initial_prompt=self.vocabulary or None,
             )
             return " ".join(segment.text.strip() for segment in segments).strip()
 
@@ -110,14 +147,71 @@ class WhisperCppSTT(STTEngine):
             path = Path(handle.name)
         try:
             _write_wav(path, samples, sample_rate)
+            argv = [self.binary, "-m", self.model_path, "-f", str(path), "-nt", "-l", self.language]
+            if self.vocabulary:
+                argv += ["--prompt", self.vocabulary]
             proc = await asyncio.create_subprocess_exec(
-                self.binary, "-m", self.model_path, "-f", str(path), "-nt", "-l", self.language,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
             out, _ = await proc.communicate()
             return out.decode("utf-8", "replace").strip()
         finally:
             path.unlink(missing_ok=True)
+
+
+class MLXWhisperSTT(STTEngine):
+    """Whisper on the Apple Silicon GPU via MLX (``pip install mlx-whisper``)."""
+
+    name = "mlx"
+    DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+
+    def __init__(self, model: str = "", language: str = "en"):
+        self.model_name = model or self.DEFAULT_MODEL
+        self.language = language
+        self._lock = asyncio.Lock()
+        self._warm = False
+
+    @staticmethod
+    def installed() -> bool:
+        import importlib.util
+        import platform
+
+        return (platform.system() == "Darwin" and platform.machine() == "arm64"
+                and importlib.util.find_spec("mlx_whisper") is not None)
+
+    async def available(self) -> tuple[bool, str]:
+        if not self.installed():
+            return False, "mlx-whisper isn't installed (pip install mlx-whisper; Apple Silicon only)"
+        return True, "ok"
+
+    def _run(self, samples) -> str:
+        import mlx_whisper
+
+        result = mlx_whisper.transcribe(
+            samples, path_or_hf_repo=self.model_name, language=self.language or None,
+            initial_prompt=self.vocabulary or None, condition_on_previous_text=False,
+        )
+        return str(result.get("text") or "").strip()
+
+    async def warmup(self) -> None:
+        async with self._lock:
+            if self._warm or not self.installed():
+                return
+            try:
+                import numpy as np
+
+                # The first call downloads (once) and loads the weights.
+                await asyncio.to_thread(self._run, np.zeros(SAMPLE_RATE // 2, dtype=np.float32))
+                self._warm = True
+            except Exception as exc:  # pragma: no cover - platform dependent
+                log.warning("mlx-whisper warm-up failed: %s", exc)
+
+    async def transcribe(self, audio: Any, sample_rate: int = SAMPLE_RATE) -> str:
+        samples = _as_float32(audio)
+        if samples is None or len(samples) < sample_rate * 0.25:
+            return ""
+        await self.warmup()
+        return await asyncio.to_thread(self._run, samples)
 
 
 class NullSTT(STTEngine):
@@ -132,12 +226,20 @@ class NullSTT(STTEngine):
 
 def build_stt(config: Any) -> STTEngine:
     voice = config.voice
-    if voice.stt_engine == "faster-whisper":
-        return FasterWhisperSTT(voice.stt_model, voice.stt_compute_type, voice.stt_language)
-    if voice.stt_engine == "whispercpp":
-        return WhisperCppSTT(voice.whispercpp_binary, voice.whispercpp_model_path,
-                             voice.stt_language)
-    return NullSTT()
+    engine = voice.stt_engine
+    if engine == "auto":
+        engine = "mlx" if MLXWhisperSTT.installed() else "faster-whisper"
+    if engine == "mlx":
+        stt: STTEngine = MLXWhisperSTT(voice.stt_model, voice.stt_language)
+    elif engine == "faster-whisper":
+        stt = FasterWhisperSTT(voice.stt_model, voice.stt_compute_type, voice.stt_language,
+                               voice.stt_beam_size)
+    elif engine == "whispercpp":
+        stt = WhisperCppSTT(voice.whispercpp_binary, voice.whispercpp_model_path, voice.stt_language)
+    else:
+        return NullSTT()
+    stt.set_vocabulary(list(voice.stt_vocabulary))
+    return stt
 
 
 def _as_float32(audio: Any):

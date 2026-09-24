@@ -458,3 +458,73 @@ class _FastTTS(_SlowTTS):
         self.spoken.append(text)
         await asyncio.sleep(0.01)
         return True
+
+
+# --- v3.0 Phase 3: better hearing -------------------------------------------------
+
+def test_vocabulary_prompt_dedupes_and_keeps_command_words_first():
+    from jarvis.voice.stt import COMMAND_WORDS, vocabulary_prompt
+
+    prompt = vocabulary_prompt(list(COMMAND_WORDS) + ["Spotify", "Xcode", "xcode"])
+    assert prompt.startswith("JARVIS, Amazon, basket")
+    assert prompt.count("Spotify") == 1 and prompt.lower().count("xcode") == 1
+    assert vocabulary_prompt([]) == ""
+
+
+def test_auto_engine_falls_back_to_faster_whisper_small_off_apple_silicon(config, monkeypatch):
+    from jarvis.voice import stt
+
+    monkeypatch.setattr(stt.MLXWhisperSTT, "installed", staticmethod(lambda: False))
+    config.voice.stt_engine = "auto"
+    config.voice.stt_model = ""
+    config.voice.stt_vocabulary = ["Priya"]
+    engine = stt.build_stt(config)
+    assert isinstance(engine, stt.FasterWhisperSTT)
+    assert engine.model_name == "small.en"
+    assert "Priya" in engine.vocabulary and "JARVIS" in engine.vocabulary
+
+
+def test_auto_engine_prefers_mlx_on_apple_silicon(config, monkeypatch):
+    from jarvis.voice import stt
+
+    monkeypatch.setattr(stt.MLXWhisperSTT, "installed", staticmethod(lambda: True))
+    config.voice.stt_engine = "auto"
+    config.voice.stt_model = ""
+    engine = stt.build_stt(config)
+    assert isinstance(engine, stt.MLXWhisperSTT)
+    assert engine.model_name == stt.MLXWhisperSTT.DEFAULT_MODEL
+
+
+async def test_faster_whisper_is_given_the_vocabulary_as_its_initial_prompt(monkeypatch):
+    import numpy as np
+    from jarvis.voice.stt import FasterWhisperSTT
+
+    seen: dict = {}
+
+    class _Model:
+        def transcribe(self, samples, **kwargs):
+            seen.update(kwargs)
+
+            class _Segment:
+                text = "open Spotify"
+            return [_Segment()], None
+
+    engine = FasterWhisperSTT("small.en")
+    engine._model = _Model()
+    engine.set_vocabulary(["Spotify"])
+    text = await engine.transcribe(np.zeros(16000, dtype=np.float32))
+    assert text == "open Spotify"
+    assert "Spotify" in seen["initial_prompt"]
+
+
+def test_taught_words_survive_a_reconfigure(config):
+    from jarvis.core.events import EventBus
+    from jarvis.core.telemetry import Telemetry
+    from jarvis.voice.manager import VoiceManager
+
+    config.voice.stt_engine = "faster-whisper"
+    manager = VoiceManager(config, EventBus(), Telemetry())
+    manager.teach(["Blorptastic"])
+    assert "Blorptastic" in manager.stt.vocabulary
+    manager.reconfigure(config)
+    assert "Blorptastic" in manager.stt.vocabulary

@@ -108,11 +108,23 @@ class JarvisApp:
         if self.voice is not None:
             await self.voice.probe()
             if self.config.voice.enabled:
+                asyncio.create_task(self._teach_vocabulary())
                 asyncio.create_task(self.voice.start())
         if self.config.capabilities.screen_awareness and self.config.security.allow_screen_capture:
             asyncio.create_task(self.screen_watcher.start())
         # Warm the fast model so the first real request isn't the cold one.
         asyncio.create_task(self._warmup())
+
+    async def _teach_vocabulary(self) -> None:
+        """Teach the recogniser this Mac's app names, so "open Spotify" isn't
+        heard as "open spot if I"."""
+        try:
+            names = await self.apps.apps()
+        except Exception as exc:  # pragma: no cover - platform dependent
+            log.debug("couldn't list apps for the vocabulary: %s", exc)
+            return
+        if self.voice is not None and names:
+            self.voice.teach(sorted(names, key=len)[:100])
 
     async def _warmup(self) -> None:
         try:

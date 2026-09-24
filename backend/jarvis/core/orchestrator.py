@@ -339,7 +339,7 @@ class Orchestrator:
         retry = RouteDecision(RouteKind.CAPABILITY, decision.name, decision.args,
                               confidence=0.4, path=RoutePath.FALLBACK,
                               reason=f"{decision.name} failed: {result.error}")
-        return await self._handle_intelligently(text, retry)
+        return await self._handle_intelligently(text, retry, allow_quick=False)
 
     async def _verify_quick_tool(self, text: str, decision: RouteDecision,
                                  result) -> TurnResult | None:
@@ -370,7 +370,7 @@ class Orchestrator:
         retry = RouteDecision(RouteKind.CAPABILITY, decision.name, decision.args,
                               confidence=0.4, path=RoutePath.FALLBACK,
                               reason=f"{decision.name} did not verify: {verification.problem}")
-        return await self._handle_intelligently(text, retry)
+        return await self._handle_intelligently(text, retry, allow_quick=False)
 
     async def _execute_tool(self, decision: RouteDecision, task: Task | None):
         ctx = self._tool_context(task)
@@ -450,7 +450,8 @@ class Orchestrator:
         )
 
     # -- intelligence ------------------------------------------------------
-    async def _handle_intelligently(self, text: str, decision: RouteDecision) -> TurnResult:
+    async def _handle_intelligently(self, text: str, decision: RouteDecision, *,
+                                    allow_quick: bool = True) -> TurnResult:
         """Run the turn through the agent loop.
 
         The route no longer decides what to do, or whether to keep the user
@@ -468,10 +469,22 @@ class Orchestrator:
         if agent is None:  # configuration turned it off mid-flight
             return await self._handle_capability(text, decision)
 
-        outcome = await self._run_agent(agent, text, None)
+        outcome = await self._run_agent(agent, text, None, allow_quick=allow_quick)
         if outcome.handoff == "automation":
             return await self._handoff_to_automation(text, decision, outcome)
+        if outcome.handoff == "quick" and outcome.quick_decision is not None:
+            return await self._run_interpreted_command(text, outcome.quick_decision)
         return await self._finish_capability(_response_from_outcome(outcome), decision)
+
+    async def _run_interpreted_command(self, text: str, decision: RouteDecision) -> TurnResult:
+        """Run the deterministic command the interpreter restated the request
+        as — the same path a literally-phrased command takes."""
+        self.deps.bus.publish(EventType.ROUTE, **decision.as_dict())
+        log.info("turn_id=%s stage=dispatch path=interpreted_quick %s (%s)", current_turn_id(),
+                 decision.name, decision.reason)
+        if decision.kind == RouteKind.TOOL:
+            return await self._handle_tool(text, decision)
+        return await self._handle_capability(text, decision)
 
     async def _handoff_to_automation(self, text: str, decision: RouteDecision, outcome) -> TurnResult:
         """A multi-step app/web objective needs a real Task — cancel_event,
@@ -490,7 +503,7 @@ class Orchestrator:
         )
         return await self._handle_capability(text, automation_decision)
 
-    async def _run_agent(self, agent, text: str, task: Task | None):
+    async def _run_agent(self, agent, text: str, task: Task | None, *, allow_quick: bool = True):
         ctx = self._tool_context(task)
         stream, flush = self._stream_sink(task)
 
@@ -499,7 +512,7 @@ class Orchestrator:
                                   task_id=task.id if task else None)
 
         outcome = await agent.run(text, ctx, task=task, emit=activity, stream=stream,
-                                  context=self.context.build(text))
+                                  context=self.context.build(text), allow_quick=allow_quick)
         flush()
         return outcome
 

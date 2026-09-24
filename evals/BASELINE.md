@@ -67,3 +67,25 @@ What changed:
 **Understanding corpus, fast path: 315 / 315 (100%)**, up from 244 / 315.
 Compound requests (50/50) and domain-word traps (24/24) no longer misroute;
 polite phrasing ("could you… for me") gets the fast answer (15/15).
+
+**All phrasings (82 runs), oracle: 97.1%** — the same two Phase 4 tasks.
+
+## Phase 3 — the interpreter
+
+The chat-or-act decision was rewritten around how people actually talk: a
+request can be asked, told, hinted or wished ("I need some AA batteries",
+"pop YouTube on"), while mentioning something JARVIS could act on still
+isn't asking for it. One schema-constrained call now also returns a plain
+restatement of the request, which is tried against the fast path — so a
+colloquial version of a simple command gets the deterministic answer — and
+success criteria the operator will check its work against.
+
+New deterministic commands for what people say most: tabs (new, close,
+reopen, back, forward, reload), music (play, pause, next, previous), dark
+mode, lock screen. Speech recognition prefers Whisper large-v3-turbo on the
+Apple Silicon GPU and is taught the Mac's app names.
+
+**Understanding corpus, fast path: 325 / 325.** The new colloquial group
+(10 utterances like "whack on the next song") must *not* hit the fast path
+directly; the real-model run scores whether the interpreter's restatement
+reaches the right command (gate: ≥90%).

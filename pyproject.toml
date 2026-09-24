@@ -20,6 +20,11 @@ voice = [
     "faster-whisper>=1.0.0",
     "openwakeword>=0.6.0",
 ]
+# Whisper large-v3-turbo on the Apple Silicon GPU (voice/stt.py: MLXWhisperSTT),
+# picked automatically by stt_engine="auto" when installed.
+mlx = [
+    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 # Local neural TTS (voice/tts.py: KokoroTTS). Needs the `voice` extras too,
 # for sounddevice playback — not repeated here, install both together.
 kokoro = [

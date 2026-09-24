@@ -235,6 +235,7 @@ def build_registry(deps) -> ToolRegistry:
     from .files.tools import file_tools
     from .homekit.tools import homekit_tools
     from .interaction.tools import interaction_tools
+    from .macos.everyday import everyday_tools
     from .macos.tools import macos_tools
     from .messages.tools import messages_tools
     from .reminders.tools import reminders_tools
@@ -245,6 +246,7 @@ def build_registry(deps) -> ToolRegistry:
     registry = ToolRegistry()
     caps = deps.config.capabilities
     registry.register_all(macos_tools(deps))
+    registry.register_all(everyday_tools(deps))
     registry.register_all(system_tools(deps))
     if caps.clipboard:
         registry.register_all(clipboard_tools(deps))

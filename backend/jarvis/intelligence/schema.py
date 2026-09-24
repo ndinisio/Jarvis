@@ -57,6 +57,15 @@ class Objective(BaseModel):
     refines_previous: bool = False
     is_correction: bool = False
     missing: list[str] = Field(default_factory=list)
+    #: What must be true when the work is done, in checkable terms ("a pack
+    #: of AA batteries is in the Amazon basket") — what the operator checks
+    #: its own work against before it says it has finished (v3.0).
+    success_criteria: list[str] = Field(default_factory=list)
+    #: Where the work happens: "web" | "native" | "either" | "none".
+    surface: str = ""
+    #: The website or app the user meant, when they named or implied one.
+    site: str = ""
+    app: str = ""
 
     @field_validator("complexity")
     @classmethod
@@ -90,9 +99,23 @@ class Triage(BaseModel):
     mode: Literal["chat", "action"] = "chat"
     confidence: float = 0.5
     action_evidence: list[str] = Field(default_factory=list)
+    #: The request restated as one plain instruction ("open a new tab in
+    #: Safari") — tried against the deterministic fast path, so colloquial
+    #: phrasing of a simple command still gets the millisecond answer.
+    normalized_command: str = ""
     objective: Objective | None = None
     requires_tools: bool = False
     reason: str = ""
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _accept_act(cls, value: Any) -> Any:
+        return "action" if str(value).strip().lower() in {"act", "action"} else value
+
+    @field_validator("objective", mode="before")
+    @classmethod
+    def _empty_objective_is_none(cls, value: Any) -> Any:
+        return None if isinstance(value, dict) and not value else value
 
     @model_validator(mode="after")
     def _evidence_gates_action(self) -> Triage:

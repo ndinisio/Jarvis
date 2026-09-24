@@ -1,17 +1,27 @@
-"""Intent triage: chat or action, before any tool-shaped machinery runs.
+"""The interpreter: what does the person actually want?
 
-This is the one semantic authority for the chat/action split (V1.3). Nothing
-downstream — :class:`~.catalog.ToolCatalog`, the planner, the execution loop —
-ever sees a turn until triage has said "action"; a capability keyword scorer
-is not consulted for this decision (see ``router/router.py``, which no longer
-calls its own heuristic/classify stages for this reason).
+The one semantic authority for chat vs. action (V1.3), rewritten for v3.0
+around how people really talk to an assistant. One schema-constrained call
+decides, from a speech transcript:
 
-Always the reasoning slot (defers to ``general`` — llama3.1:8b — unless a
-stronger model is configured), never ``fast``. The V1.3 benchmark
-(``scripts/bench_triage.py``) is why: the 1B model classified every explicit
-action request as chat, with schema-validation failures on top. Speed is
-intentionally traded for reliability here; the fast gateway
-(``router/quick.py``) is what keeps genuinely deterministic requests fast.
+* **mode** — act on the computer, or talk. Asking, telling, hinting and
+  wishing all count as asking ("I need some AA batteries", "pop YouTube
+  on"); mentioning something JARVIS could act on does not ("I hate dealing
+  with email").
+* **normalized_command** — the request restated as one plain instruction.
+  The orchestrator tries it against the deterministic fast path, so "could
+  you pop a new tab open" gets the same millisecond answer as "open a new
+  tab" without the fast path ever having to understand slang itself.
+* **objective** — goal, kind, targets, constraints, complexity, what's
+  missing, and, new in v3.0, **success_criteria**: what must be true when
+  the work is done, which the operator checks its own work against before
+  it claims to have finished. Plus where the work happens (surface, site,
+  app).
+
+Always the reasoning slot, never ``fast`` — the V1.3 benchmark
+(``scripts/bench_triage.py``) showed a 1B model calling every action "chat".
+With a schema, providers that can constrain output (Ollama's grammar, an
+OpenAI-compatible ``json_schema``) cannot return a malformed reply at all.
 """
 
 from __future__ import annotations
@@ -25,59 +35,88 @@ log = get_logger("jarvis.intelligence.triage")
 
 TRIAGE_PROMPT = """You decide what the user wants. Two modes only.
 
-mode="chat": ordinary conversation, greetings, opinions, questions about you,
-  discussing a topic, thinking aloud — even if it mentions email, files,
-  Safari, calendars or other things JARVIS can act on. Mentioning a domain is
-  NOT evidence of wanting an action in that domain. This is the default:
-  when in doubt, chat.
-mode="action": the user is asking JARVIS to actually do something right now.
-  This includes requests where something is missing (who to email, what to
-  send) — say mode="action" and list what's missing in objective.missing
-  rather than downgrading to chat just because a detail is absent.
+The words come from speech recognition, so expect casual phrasing, filler words
+and the odd misheard word ("bass kit" is "basket", "spot if I" is "Spotify") —
+read what the person meant, not the literal transcript.
 
-Require POSITIVE evidence for mode="action": action_evidence must be short
-literal phrases from what the user just said in THIS message — not from
-earlier context, and not inferred from a task or topic that was active
-before. A prior task being unfinished is never itself evidence that a new,
-unrelated message continues it. If you cannot point to such words in the
-current message, use mode="chat". Do not guess.
+mode="action": the user wants something done on this computer, now — however
+they put it. Asking, telling, hinting and wishing all count:
+  "open a new tab", "could you pop YouTube on", "I need some AA batteries",
+  "stick some music on", "let's get the white kettle ordered", "crank it up a bit",
+  "what's on my calendar today", "anything new from Sarah?", "remind me to call mum at 6".
+  Questions about the user's own things — their mail, calendar, files, screen,
+  basket, this Mac — are actions.
+mode="chat": conversation — greetings, opinions, feelings, jokes, advice, general
+knowledge, talking about a topic:
+  "I hate dealing with email", "what's the capital of France", "why do batteries die
+  in the cold", "do you think Safari is better than Chrome", "how much storage does
+  the iPhone 16 have". Mentioning something JARVIS can act on is NOT asking for it.
 
-Examples of clear action requests (mode="action"):
-  "Open Safari." -> action_evidence: ["open safari"]
-  "Check my email." -> action_evidence: ["check my email"]
-  "Take a screenshot." -> action_evidence: ["take a screenshot"]
-These are genuinely being asked for, not merely mentioned in passing — that
-distinction, not the presence of a domain word, is what "action" means.
+action_evidence: the words in THIS message that ask for something — not from earlier
+context. A task that was active before is never itself evidence that a new message
+continues it. No such words means mode="chat".
 
-A request that requires operating an app or a website through several real
-steps to reach an end result — searching, comparing options, filling in
-forms, clicking through pages, downloading a file — is objective.kind=
-"automation" with objective.complexity="multi_step", not a single tool call:
-  "Find me the best value two-pack of ESP-32 boards and add them to my
-  basket." -> action_evidence: ["find me", "add them to my basket"],
-  objective.kind="automation", objective.complexity="multi_step"
-  "Check if I have the latest Python, and if not, download it." ->
-  action_evidence: ["check if i have", "download it"],
-  objective.kind="automation", objective.complexity="multi_step"
-A single click, read or lookup ("click the search bar", "what's on my
-screen") stays whatever kind describes it, at complexity="simple" —
-"automation" is specifically for a multi-step operation, not every action.
+For mode="action" also give:
+  normalized_command: the request as ONE plain instruction a literal-minded assistant
+    would understand, e.g. "open a new tab in Safari", "play music in Spotify",
+    "set the volume to 30 percent", "search Amazon for AA batteries and add a pack to
+    the basket", "read today's calendar".
+  objective: goal, kind, targets, constraints, complexity, confidence, missing, and
+    success_criteria: what must be TRUE when it's done, each one checkable
+      ("a pack of AA batteries is in the Amazon basket", "Safari shows a new empty tab");
+    surface: "web" | "native" | "either"; site: the website meant, if any (e.g.
+      "amazon.co.uk"); app: the app meant, if any.
+
+Something needing several real steps in an app or website — searching, comparing,
+filling in forms, clicking through pages, adding to a basket, downloading — is
+kind="automation", complexity="multi_step". A single step ("click the search bar",
+"what's on my screen") is complexity="simple".
+If something needed is missing (who to email, what to send), stay mode="action" and
+list it in objective.missing rather than guessing.
 
 {context}
 
 User said: "{text}"
 
-Reply with JSON only:
-{{"mode": "chat|action",
- "confidence": 0.0-1.0,
- "action_evidence": ["open safari"],
- "requires_tools": true|false,
- "objective": {{"goal": "...", "kind": "...", "targets": [...], "complexity": "trivial|simple|multi_step", "confidence": "confident|probable|ambiguous|impossible", "missing": [...]}} or null,
- "reason": "<one short phrase>"}}"""
+Reply with JSON only."""
+
+_STRINGS = {"type": "array", "items": {"type": "string"}}
+
+#: The reply shape, in the order the model should think in: decide first,
+#: evidence next, then the details. Constrained decoding follows it exactly.
+TRIAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "mode": {"type": "string", "enum": ["chat", "action"]},
+        "action_evidence": _STRINGS,
+        "confidence": {"type": "number"},
+        "normalized_command": {"type": "string"},
+        "requires_tools": {"type": "boolean"},
+        "objective": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string"},
+                "kind": {"type": "string"},
+                "targets": _STRINGS,
+                "constraints": _STRINGS,
+                "complexity": {"type": "string", "enum": ["trivial", "simple", "multi_step"]},
+                "confidence": {"type": "string",
+                               "enum": ["confident", "probable", "ambiguous", "impossible"]},
+                "missing": _STRINGS,
+                "success_criteria": _STRINGS,
+                "surface": {"type": "string", "enum": ["web", "native", "either", "none"]},
+                "site": {"type": "string"},
+                "app": {"type": "string"},
+            },
+        },
+        "reason": {"type": "string"},
+    },
+    "required": ["mode", "action_evidence", "reason"],
+}
 
 
 class IntentTriage:
-    """Decides chat or action. Never executes, never replies."""
+    """Decides chat or action and says what the action is. Never executes."""
 
     def __init__(self, models, slot: str = "reasoning"):
         self._models = models
@@ -100,13 +139,14 @@ class IntentTriage:
                 self._slot,
                 [ChatMessage("system", "You decide chat or action. JSON only."),
                  ChatMessage("user", prompt)],
-                max_tokens=350,
+                schema=TRIAGE_SCHEMA,
+                max_tokens=500,
                 timeout_s=30.0,
             )
         except Exception as exc:
             log.debug("triage model unavailable: %s", exc)
             return self._fallback()
-        if isinstance(data, dict) and isinstance(data.get("objective"), dict):
+        if isinstance(data, dict) and isinstance(data.get("objective"), dict) and data["objective"]:
             # The same repair-pass loader as everywhere else, applied to the
             # nested objective before the outer model validates — otherwise a
             # near-miss objective fails the whole triage call instead of just

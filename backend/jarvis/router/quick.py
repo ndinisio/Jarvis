@@ -189,6 +189,35 @@ COMMANDS: list[QuickCommand] = [
        r"(?P<q>.+?)[.!?]?$",
        RouteKind.TOOL, "search_files", lambda m: {"query": m.group("q").strip()}),
 
+    # -- everyday: tabs, music, appearance, lock ---------------------------
+    # Before applications, so "open a new tab" is a tab and never an app.
+    _c(r"^(?:(?:open|pop open|fire up|make|create|start|give me|get me)\s+)?(?:a\s+)?new (?:browser )?tab"
+       r"(?:\s+in\s+(?P<browser>safari|chrome|google chrome|arc|brave|edge|firefox))?$",
+       RouteKind.TOOL, "browser_tab", lambda m: {"action": "new", "browser": m.group("browser") or ""}),
+    _c(r"^close (?:this|the|that|current|my) tab$", RouteKind.TOOL, "browser_tab", {"action": "close"}),
+    _c(r"^(?:reopen|bring back) (?:the |that )?(?:last |closed )?tab(?: i closed)?$",
+       RouteKind.TOOL, "browser_tab", {"action": "reopen"}),
+    _c(r"^(?:go )?back (?:a|one) page$|^(?:go to the )?previous page$",
+       RouteKind.TOOL, "browser_tab", {"action": "back"}),
+    _c(r"^(?:go )?forward (?:a|one) page$", RouteKind.TOOL, "browser_tab", {"action": "forward"}),
+    _c(r"^(?:reload|refresh) (?:the |this )?(?:page|tab)$", RouteKind.TOOL, "browser_tab",
+       {"action": "reload"}),
+    _c(r"^(?:pause|stop) (?:the )?(?:music|song|track|playback)$", RouteKind.TOOL, "media_control",
+       {"action": "pause"}),
+    _c(r"^(?:resume|unpause) (?:the )?(?:music|song|track|playback)$|^play (?:the )?music$|"
+       r"^(?:play|put on|stick on) some music$|^(?:put|stick) some music on$",
+       RouteKind.TOOL, "media_control", {"action": "play"}),
+    _c(r"^(?:next|skip)(?: this| the)? (?:song|track)$|^skip (?:this|it)$", RouteKind.TOOL,
+       "media_control", {"action": "next"}),
+    _c(r"^(?:previous|last) (?:song|track)$|^go back a (?:song|track)$", RouteKind.TOOL,
+       "media_control", {"action": "previous"}),
+    _c(r"^(?:turn on|enable|switch on|use|go) dark mode$|^switch (?:the |my )?(?:mac )?to dark mode$",
+       RouteKind.TOOL, "set_appearance", {"mode": "dark"}),
+    _c(r"^(?:turn off|disable|switch off) dark mode$|^(?:use|go) light mode$|"
+       r"^switch (?:the |my )?(?:mac )?to light mode$", RouteKind.TOOL, "set_appearance", {"mode": "light"}),
+    _c(r"^toggle dark mode$", RouteKind.TOOL, "set_appearance", {"mode": "toggle"}),
+    _c(r"^lock (?:my |the |this )?(?:mac|screen|computer|laptop)$", RouteKind.TOOL, "lock_screen", {}),
+
     # -- applications ------------------------------------------------------
     # `safe=_is_concrete_app_name` on all three: a launch/close/focus target
     # that looks like a web destination, a bare reference or a thing inside

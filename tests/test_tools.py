@@ -165,3 +165,46 @@ async def test_tool_result_shape():
     result = ToolResult.failure("Nope.", detail="why")
     assert result.ok is False and result.error == "why"
     assert result.as_dict()["summary"] == "Nope."
+
+
+# --- v3.0: everyday commands -------------------------------------------------------
+
+async def test_tab_shortcuts_go_to_the_browser_in_front(app, monkeypatch):
+    from jarvis.tools.macos.controller import ShellResult
+    from jarvis.tools.macos.everyday import BrowserTabTool
+
+    scripts: list[str] = []
+
+    async def osascript(script, *args, **kwargs):
+        scripts.append(script)
+        return ShellResult(0, "", "")
+
+    async def frontmost():
+        return "Google Chrome"
+
+    monkeypatch.setattr(app.controller, "osascript", osascript)
+    monkeypatch.setattr(app.controller, "frontmost_app", frontmost)
+    result = await BrowserTabTool(app.deps).run({"action": "close", "browser": ""}, app.deps.tool_context())
+    assert result.ok and "Closed the tab in Google Chrome" in result.summary
+    assert 'tell application "Google Chrome" to activate' in scripts[0]
+    assert 'keystroke "w" using command down' in scripts[0]
+
+
+async def test_media_control_prefers_spotify_when_it_is_running(app, monkeypatch):
+    from jarvis.tools.macos.controller import ShellResult
+    from jarvis.tools.macos.everyday import MediaControlTool
+
+    scripts: list[str] = []
+
+    async def osascript(script, *args, **kwargs):
+        scripts.append(script)
+        return ShellResult(0, "", "")
+
+    async def running(name):
+        return name == "Spotify"
+
+    monkeypatch.setattr(app.controller, "osascript", osascript)
+    monkeypatch.setattr(app.controller, "is_app_running", running)
+    result = await MediaControlTool(app.deps).run({"action": "next", "app": ""}, app.deps.tool_context())
+    assert result.ok
+    assert scripts == ['tell application "Spotify" to next track']

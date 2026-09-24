@@ -91,7 +91,13 @@ async def semantic_pass(results: list[UtteranceResult], config_path: Path | None
                 decision = await triage.decide(result.text, ConversationState())
                 result.latency_ms = round((time.perf_counter() - started) * 1000.0, 1)
                 result.mode_actual = "act" if decision.mode == "action" else "chat"
-                result.detail = {"reason": decision.reason, "confidence": decision.confidence}
+                result.detail = {"reason": decision.reason, "confidence": decision.confidence,
+                                 "normalized_command": decision.normalized_command}
+                if result.norm_expected:
+                    # The interpreter's plain restatement must reach the
+                    # deterministic command the colloquial phrasing meant.
+                    result.norm_actual = fast_path(decision.normalized_command or "")
+                    result.norm_ok = result.norm_actual == result.norm_expected
             result.mode_ok = result.mode_actual == result.mode
             mark = "ok " if result.mode_ok else "BAD"
             print(f"{mark} {result.mode:<4}→{result.mode_actual:<4} {result.latency_ms:7.0f}ms  {result.text[:70]}",
@@ -115,6 +121,7 @@ def summarise(results: list[UtteranceResult]) -> dict:
         "utterances": len(results),
         "quick": rate(r.quick_ok for r in results),
         "mode": rate(r.mode_ok for r in results),
+        "norm": rate(r.norm_ok for r in results),
         "by_tag": {tag: {"quick": rate(r.quick_ok for r in results if tag in r.tags),
                          "mode": rate(r.mode_ok for r in results if tag in r.tags)} for tag in tags},
         "semantic_p50_ms": latencies[len(latencies) // 2] if latencies else None,
@@ -130,6 +137,8 @@ def print_summary(summary: dict) -> None:
     for tag, stats in summary["by_tag"].items():
         print(f"{tag:<14} {fmt(stats['quick']):>16} {fmt(stats['mode']):>16}")
     print(f"{'ALL':<14} {fmt(summary['quick']):>16} {fmt(summary['mode']):>16}")
+    if summary["norm"]["total"]:
+        print(f"colloquial → deterministic command: {fmt(summary['norm'])}")
     if summary["semantic_p50_ms"] is not None:
         print(f"semantic latency p50 {summary['semantic_p50_ms']:.0f} ms, "
               f"p95 {summary['semantic_p95_ms']:.0f} ms")
