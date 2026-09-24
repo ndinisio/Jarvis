@@ -18,9 +18,28 @@ from ..macos.tools import normalise_url
 from ..web.search import search_url
 from . import manifest_js
 
+#: Keys a page action may press, as the model names them → the standard
+#: ``KeyboardEvent.key`` value (which is also what Playwright expects).
+PAGE_KEYS = {
+    "enter": "Enter", "return": "Enter", "escape": "Escape", "esc": "Escape", "tab": "Tab",
+    "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight",
+    "arrowup": "ArrowUp", "arrowdown": "ArrowDown", "arrowleft": "ArrowLeft", "arrowright": "ArrowRight",
+    "pageup": "PageUp", "pagedown": "PageDown", "home": "Home", "end": "End",
+    "backspace": "Backspace", "delete": "Delete", "space": " ",
+}
+
+
+def normalise_key(key: str) -> str:
+    """``"page down"`` → ``"PageDown"``; ``""`` for a key pages aren't sent."""
+    compact = "".join(str(key or "").lower().split()).replace("_", "").replace("-", "")
+    return PAGE_KEYS.get(compact, "")
+
 
 class BrowserDriver(abc.ABC):
     app_name: str
+    #: Whether JARVIS runs this browser itself (JARVIS Chrome) rather than
+    #: reaching into the user's own over AppleScript.
+    owned = False
 
     def __init__(self, controller):
         self._c = controller
@@ -70,6 +89,29 @@ class BrowserDriver(abc.ABC):
 
     async def submit_handle(self, handle: str) -> dict[str, Any]:
         return _parse_js_json(await self.run_js(manifest_js.build_submit_script(handle)))
+
+    async def scroll(self, direction: str = "down", handle: str = "") -> dict[str, Any]:
+        return _parse_js_json(await self.run_js(manifest_js.build_scroll_script(direction, handle)))
+
+    async def go_back(self) -> dict[str, Any]:
+        return _parse_js_json(await self.run_js(manifest_js.back_script()))
+
+    async def press_key(self, key: str, handle: str = "") -> dict[str, Any]:
+        return _parse_js_json(await self.run_js(manifest_js.build_key_script(key, handle)))
+
+    async def focused_handle(self) -> str:
+        """A handle for the element with keyboard focus, ``""`` if none."""
+        return str(_parse_js_json(await self.run_js(manifest_js.active_element_script(),
+                                                    timeout=10.0)).get("handle") or "")
+
+    async def has_text(self, text: str) -> bool:
+        return bool(_parse_js_json(await self.run_js(manifest_js.build_find_text_script(text),
+                                                     timeout=10.0)).get("found"))
+
+    async def bring_to_front(self) -> None:
+        """Show this browser's window — so the user can take over in it."""
+        if self._c is not None:
+            await self._c.osascript(f'tell application "{self.app_name}" to activate')
 
 
 class SafariDriver(BrowserDriver):
@@ -176,6 +218,30 @@ def driver_for(controller, name: str) -> BrowserDriver:
     return SafariDriver(controller)
 
 
+async def navigate(deps, ctx: ToolContext | None, target: str, browser: str = "", *,
+                   label: str = "") -> ToolResult:
+    """Open *target* in whichever browser the hub picks for this call."""
+    from ...surfaces.web.hub import hub_of
+
+    label = label or _domain(target)
+    driver = await hub_of(deps).for_action(ctx, navigating=True, url=target, browser=browser)
+    if driver is not None and driver.owned:
+        # JARVIS Chrome: the call returns once the page has loaded.
+        if not await driver.open(target):
+            return ToolResult.failure(f"{label[:1].upper() + label[1:]} didn't load in {driver.app_name}.")
+        page = await driver.current_page()
+        return ToolResult(data={"url": page.get("url") or target, "browser": driver.app_name},
+                          summary=f"Opened {label}.",
+                          observation=f"Opened {page.get('title') or label} — {page.get('url') or target}",
+                          display={"kind": "link", "url": target})
+    # The everyday browser: the system opens it, exactly as a link would.
+    result = await deps.controller.open_url(target, browser or None)
+    if not result.ok:
+        return ToolResult.failure("The browser didn't respond.", detail=result.output)
+    return ToolResult(data={"url": target}, summary=f"Opening {label}.",
+                      display={"kind": "link", "url": target})
+
+
 class OpenInBrowserTool(Tool):
     spec = ToolSpec(
         name="browse_to",
@@ -205,12 +271,8 @@ class OpenInBrowserTool(Tool):
             return ToolResult.failure("I need a web address or something to search for.")
         target = normalise_url(url) if url else search_url(query)
         browser = args.get("browser") or ""
-        result = await self._deps.controller.open_url(target, browser or None)
-        if not result.ok:
-            return ToolResult.failure("The browser didn't respond.", detail=result.output)
         label = _domain(target) if url else f"a search for “{query}”"
-        return ToolResult(data={"url": target}, summary=f"Opening {label}.",
-                          display={"kind": "link", "url": target})
+        return await navigate(self._deps, ctx, target, browser, label=label)
 
 
 class CurrentPageTool(Tool):
@@ -226,7 +288,6 @@ class CurrentPageTool(Tool):
         },
         risk=RiskLevel.LOW,
         category="browser",
-        requires_macos=True,
         expected_ms=1200,
         examples=["What page am I on?", "Summarise this webpage"],
     )
@@ -235,8 +296,11 @@ class CurrentPageTool(Tool):
         self._deps = deps
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        name = args.get("browser") or await detect_browser(self._deps)
-        driver = driver_for(self._deps.controller, name)
+        from ...surfaces.web.hub import hub_of
+
+        driver = await hub_of(self._deps).for_action(ctx, browser=args.get("browser") or "")
+        if driver is None:
+            return ToolResult.failure("No browser is reachable from here.")
         page = await driver.current_page()
         if not page.get("url"):
             return ToolResult.failure(
@@ -272,7 +336,6 @@ class BrowserTabsTool(Tool):
         parameters={"type": "object", "properties": {"browser": {"type": "string", "default": ""}}},
         risk=RiskLevel.LOW,
         category="browser",
-        requires_macos=True,
         expected_ms=900,
     )
 
@@ -280,7 +343,11 @@ class BrowserTabsTool(Tool):
         self._deps = deps
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        driver = driver_for(self._deps.controller, args.get("browser") or "Safari")
+        from ...surfaces.web.hub import hub_of
+
+        driver = await hub_of(self._deps).for_action(ctx, browser=args.get("browser") or "")
+        if driver is None:
+            return ToolResult.failure("No browser is reachable from here.")
         tabs = await driver.tabs()
         if not tabs:
             return ToolResult.failure(f"{driver.app_name} didn't return any tabs.")

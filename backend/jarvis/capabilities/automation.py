@@ -83,7 +83,9 @@ Rules:
 - "What you can see now" is the page as it is after the last action; use it rather than reading the page again.
 - Use a tool only if it moves this milestone forward; the results above may already cover it.
 - "complete" once the milestone's own goal is actually satisfied, not merely attempted.
-- "give_up" rather than repeating a call that already failed the same way."""
+- "give_up" rather than repeating a call that already failed the same way.
+- Not on screen yet? scroll_page to see more, or wait_for_page while something loads. A pop-up in the way: press_page_key escape or click its close button.
+- Never type a password or card details. A sign-in, CAPTCHA or two-factor check is the user's: ask_user_to_take_over."""
 
 SUMMARISE_PROMPT = """Tell the user what happened, in one or two sentences unless they asked \
 for detail. Be specific about what was actually done, and say plainly anything you couldn't \
@@ -99,7 +101,8 @@ Answer directly. Do not describe your process or mention tool names."""
 #: Web actions after which the loop looks at the page again by itself, so the
 #: next decision sees the page as it now is (and its element handles) without
 #: spending a step asking for it.
-_OBSERVE_AFTER = {"browse_to", "open_url", "click_page_element", "fill_page_field", "submit_page_form"}
+_OBSERVE_AFTER = {"browse_to", "open_url", "click_page_element", "fill_page_field", "submit_page_form",
+                  "press_page_key", "scroll_page", "page_go_back", "wait_for_page", "ask_user_to_take_over"}
 
 #: How much of the current view a step prompt carries.
 _VIEW_CHARS = 5000
@@ -110,7 +113,8 @@ _VIEW_CHARS = 5000
 #: apply here, since this list is fixed and re-offered at every single step.
 WEB_TOOLS: tuple[str, ...] = (
     "browse_to", "get_current_page", "list_browser_tabs", "read_page_manifest",
-    "click_page_element", "fill_page_field", "submit_page_form",
+    "click_page_element", "fill_page_field", "submit_page_form", "press_page_key",
+    "scroll_page", "page_go_back", "wait_for_page", "ask_user_to_take_over",
 )
 NATIVE_TOOLS: tuple[str, ...] = (
     "open_application", "activate_application", "get_frontmost_app", "list_windows",
@@ -189,6 +193,8 @@ class AutomationCapability(Capability):
         finally:
             if task_id:
                 self.deps.permissions.revoke_task(task_id)
+                if self.deps.browsers is not None:
+                    self.deps.browsers.release(task_id)
 
         report = await self._summarise(goal, list(findings))
         return Response(

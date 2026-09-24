@@ -28,11 +28,25 @@ from urllib.parse import urlparse
 
 from . import manifest_js
 
+#: What the page listing says when a page needs the user, not JARVIS.
+SIGNAL_LINES = {
+    "captcha": ("Attention: this page shows a CAPTCHA / “are you human” check. Only the user can "
+                "pass it — call ask_user_to_take_over."),
+    "password_field": ("Attention: this page asks for a password. You never type passwords; if "
+                       "signing in is needed to continue, call ask_user_to_take_over."),
+}
 
-def render_manifest(manifest: dict[str, Any], *, text_chars: int = 900) -> str:
+
+def render_manifest(manifest: dict[str, Any], *, text_chars: int = 900, changes: str = "") -> str:
     elements = manifest.get("elements") or []
     title = manifest.get("title") or "untitled page"
     lines = [f"Page: {title} — {manifest.get('url', '')}"]
+    signals = manifest.get("signals") or {}
+    for name, line in SIGNAL_LINES.items():
+        if signals.get(name):
+            lines.append(line)
+    if changes:
+        lines.append(changes)
     total = manifest.get("total")
     offset = int(manifest.get("offset") or 0)
     if isinstance(total, int) and total > offset + len(elements):
@@ -81,6 +95,45 @@ def _short_href(href: str) -> str:
     if parsed.query:
         target += f"?{parsed.query}"
     return target[:80]
+
+
+class PageMemory:
+    """What was on each browser's page the last time it was looked at, so
+    the next look can say what changed ("New since the last look: dialog
+    'Added to Basket'…") — the most useful thing a small model can be told
+    after an action, and easy for it to miss in a full listing."""
+
+    #: How many (task, browser) pairs to remember.
+    LIMIT = 64
+
+    def __init__(self) -> None:
+        self._seen: dict[Any, tuple[str, set[tuple[str, str]], tuple[str, ...]]] = {}
+
+    def changes(self, key: Any, manifest: dict[str, Any]) -> str:
+        """*key* identifies who is looking — a task and its browser — so one
+        task's last look never stands in for another's."""
+        url = str(manifest.get("url") or "")
+        elements = manifest.get("elements") or []
+        current = {(str(e.get("role") or ""), str(e.get("text") or "")) for e in elements}
+        dialogs = tuple(manifest.get("dialogs") or ())
+        previous = self._seen.pop(key, None)
+        # A page listing continued with an offset is the same look, not a new one.
+        if int(manifest.get("offset") or 0) == 0:
+            self._seen[key] = (url, current, dialogs)
+        elif previous is not None:
+            self._seen[key] = previous
+        while len(self._seen) > self.LIMIT:
+            self._seen.pop(next(iter(self._seen)))
+        if previous is None or previous[0] != url or int(manifest.get("offset") or 0):
+            return ""
+        fresh = [render_element(e) for e in elements
+                 if (str(e.get("role") or ""), str(e.get("text") or "")) not in previous[1]]
+        new_dialogs = [d for d in dialogs if d not in previous[2]]
+        if not fresh and not new_dialogs:
+            return "No change since the last look."
+        parts = [f"dialog “{d[:80]}”" for d in new_dialogs] + fresh[:6]
+        more = len(fresh) - 6
+        return "New since the last look: " + "; ".join(parts) + (f" (+{more} more)" if more > 0 else "")
 
 
 async def wait_until_ready(driver, *, timeout_s: float = 6.0, settle_s: float = 0.3) -> bool:
@@ -140,8 +193,12 @@ async def wait_until_quiet(driver, *, quiet_s: float = 0.5, timeout_s: float = 4
 
 
 async def settle(driver) -> None:
-    """Loaded, and still — the precondition for acting on or reading a page."""
+    """Loaded, finished fetching, and still — the precondition for acting on
+    or reading a page."""
     await wait_until_ready(driver, settle_s=0.0)
+    network = getattr(driver, "settle", None)
+    if network is not None:
+        await network()
     await wait_until_quiet(driver)
 
 

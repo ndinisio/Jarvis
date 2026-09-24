@@ -24,6 +24,14 @@ search box promoted), then content below the fold, then the footer. The
 limit applies after ranking, so "Add to Basket" is never cut off by 45
 department links.
 
+**Beyond the top document (v3.0).** Modern pages put controls inside open
+shadow roots (web components) and same-origin iframes (embedded forms,
+widgets). The manifest walks all of them; a handle stamped inside one is
+found again the same way, whichever browser runs the script.
+
+**Never a password.** The fill script refuses password fields and payment
+card fields outright: signing in and paying are the user's to do.
+
 **Dynamic values** (a handle, fill text) are always embedded via
 ``json.dumps()``, never string concatenation — a stray quote in a scraped
 product title must not be able to break out of the script.
@@ -66,7 +74,7 @@ function jarvisRole(el) {
 _VISIBLE_CHECK = """
 function jarvisVisible(el) {
   if (el.disabled) return false;
-  var style = window.getComputedStyle(el);
+  var style = (el.ownerDocument.defaultView || window).getComputedStyle(el);
   if (style.visibility === 'hidden' || style.display === 'none') return false;
   if (el.closest('[hidden],[aria-hidden=true]')) return false;
   var rect = el.getBoundingClientRect();
@@ -83,8 +91,9 @@ function jarvisLabel(el) {
   if (aria) return jarvisClean(aria);
   var by = el.getAttribute('aria-labelledby');
   if (by) {
+    var scope = el.getRootNode && el.getRootNode().getElementById ? el.getRootNode() : el.ownerDocument;
     var parts = by.split(/\\s+/).map(function(id) {
-      var ref = document.getElementById(id); return ref ? ref.textContent : ''; });
+      var ref = scope.getElementById(id); return ref ? ref.textContent : ''; });
     var joined = jarvisClean(parts.join(' '));
     if (joined) return joined;
   }
@@ -117,9 +126,46 @@ function jarvisText(el, role) {
 }
 """
 
-_LOCATE = """
+#: Every place an element can live: the document, open shadow roots and
+#: same-origin iframes (with the iframe's offset, so "in view" stays true to
+#: the screen). Cross-origin frames are out of reach by design.
+_ROOTS = """
+function jarvisRoots() {
+  var out = [];
+  function walk(root, x, y, depth) {
+    out.push({root: root, x: x, y: y});
+    if (depth > 5) return;
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el.shadowRoot) walk(el.shadowRoot, x, y, depth + 1);
+      if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+        try {
+          var doc = el.contentDocument;
+          if (doc && doc.documentElement) {
+            var r = el.getBoundingClientRect();
+            walk(doc, x + r.left, y + r.top, depth + 1);
+          }
+        } catch (e) {}
+      }
+    }
+  }
+  walk(document, 0, 0, 0);
+  return out;
+}
+"""
+
+_LOCATE = _ROOTS + """
 function jarvisFind(handle) {
-  return document.querySelector('[data-jarvis-id="' + handle + '"]');
+  var selector = '[data-jarvis-id="' + handle + '"]';
+  var direct = document.querySelector(selector);
+  if (direct) return direct;
+  var roots = jarvisRoots();
+  for (var i = 1; i < roots.length; i++) {
+    var el = roots[i].root.querySelector(selector);
+    if (el) return el;
+  }
+  return null;
 }
 """
 
@@ -127,30 +173,55 @@ _MANIFEST_TEMPLATE = """(function(){
 %(classify)s
 %(visible)s
 %(name)s
+%(roots)s
 var roleFilter = %(role_filter)s;
 var limit = %(limit)s;
 var offset = %(offset)s;
 if (typeof window.__jarvisSeq !== 'number') { window.__jarvisSeq = 0; }
 var chrome = 'header,nav,footer,[role=navigation],[role=banner],[role=contentinfo]';
-var nodes = document.querySelectorAll(%(selector)s);
-var seen = [];
 var found = [];
+var order = 0;
 var viewH = window.innerHeight || document.documentElement.clientHeight;
-for (var i = 0; i < nodes.length && found.length < 600; i++) {
-  var el = nodes[i];
-  if (seen.indexOf(el) !== -1) continue;
-  seen.push(el);
-  if (!jarvisVisible(el)) continue;
-  var role = jarvisRole(el);
-  if (roleFilter && roleFilter.indexOf(role) === -1) continue;
-  var rect = el.getBoundingClientRect();
-  var inView = rect.bottom > 0 && rect.top < viewH;
-  var inChrome = !!el.closest(chrome);
-  var isInput = ['field', 'select', 'checkbox', 'radio', 'combobox', 'textbox', 'searchbox'].indexOf(role) !== -1;
-  var inFooter = !!el.closest('footer,[role=contentinfo]');
-  var rank = inFooter ? 4 : (inChrome && !isInput) ? (inView ? 1 : 3) : (inView ? 0 : 2);
-  found.push({el: el, role: role, rect: rect, inView: inView, rank: rank, order: i});
+var roots = jarvisRoots();
+var passwordField = false;
+var captcha = false;
+for (var r = 0; r < roots.length && found.length < 600; r++) {
+  var scope = roots[r];
+  var nodes = scope.root.querySelectorAll(%(selector)s);
+  for (var i = 0; i < nodes.length && found.length < 600; i++) {
+    var el = nodes[i];
+    order += 1;
+    if (!jarvisVisible(el)) continue;
+    if (el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'password') passwordField = true;
+    var role = jarvisRole(el);
+    if (roleFilter && roleFilter.indexOf(role) === -1) continue;
+    var own = el.getBoundingClientRect();
+    var rect = {left: own.left + scope.x, top: own.top + scope.y, width: own.width, height: own.height,
+                bottom: own.bottom + scope.y};
+    var inView = rect.bottom > 0 && rect.top < viewH;
+    var inChrome = !!el.closest(chrome);
+    var isInput = ['field', 'select', 'checkbox', 'radio', 'combobox', 'textbox', 'searchbox'].indexOf(role) !== -1;
+    var inFooter = !!el.closest('footer,[role=contentinfo]');
+    var rank = inFooter ? 4 : (inChrome && !isInput) ? (inView ? 1 : 3) : (inView ? 0 : 2);
+    found.push({el: el, role: role, rect: rect, inView: inView, rank: rank, order: order});
+  }
 }
+// A challenge the user must pass: a visible CAPTCHA widget of real size, or
+// a "checking your browser" interstitial. Not the invisible-reCAPTCHA badge
+// many ordinary pages carry in a corner — that needs nobody.
+var challenges = document.querySelectorAll('iframe[src*="recaptcha"],iframe[src*="hcaptcha"],' +
+  'iframe[src*="challenges.cloudflare.com"],iframe[title*="captcha" i],iframe[title*="challenge" i],' +
+  '[class*="captcha" i],[id*="captcha" i]');
+for (var c = 0; c < challenges.length && !captcha; c++) {
+  var box = challenges[c];
+  var src = box.getAttribute('src') || '';
+  var ident = ((box.getAttribute('class') || '') + ' ' + (box.id || '')).toLowerCase();
+  if (/size=invisible/.test(src) || ident.indexOf('badge') !== -1 || box.closest('.grecaptcha-badge')) continue;
+  if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT' || !jarvisVisible(box)) continue;
+  var area = box.getBoundingClientRect();
+  if (area.width >= 60 && area.height >= 30) captcha = true;
+}
+if (/^(just a moment|attention required|verify you are human)/i.test(document.title)) captcha = true;
 found.sort(function(a, b) { return a.rank - b.rank || a.order - b.order; });
 var out = [];
 for (var j = offset; j < found.length && out.length < limit; j++) {
@@ -196,7 +267,8 @@ var dialogs = Array.prototype.slice.call(document.querySelectorAll('[role=dialog
   .map(function(d) { return jarvisClean(d.innerText).slice(0, 200); });
 return JSON.stringify({elements: out, total: found.length, offset: offset, url: window.location.href,
                        title: document.title, text: excerpt, dialogs: dialogs.slice(0, 3),
-                       ready: document.readyState});
+                       ready: document.readyState,
+                       signals: {password_field: passwordField, captcha: captcha}});
 })()"""
 
 _INSPECT_TEMPLATE = """(function(){
@@ -214,6 +286,10 @@ return JSON.stringify({
   label: jarvisLabel(el).slice(0, 160),
   value: (tag === 'input' ? String(el.value || '') : '').slice(0, 120),
   id: el.id || '', name: el.getAttribute('name') || '', title: el.getAttribute('title') || '',
+  type: (el.getAttribute('type') || '').toLowerCase(),
+  autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(),
+  suggests: !!(el.getAttribute('aria-autocomplete') || el.getAttribute('list') || role === 'combobox'),
+  editable: !!el.isContentEditable,
   href: tag === 'a' ? (el.href || '') : '',
   action: el.getAttribute('formaction') ? el.formAction : (form ? form.action : '')
 });
@@ -238,6 +314,15 @@ _FILL_TEMPLATE = """(function(){
 var el = jarvisFind(%(handle)s);
 if (!el) return JSON.stringify({ok: false, reason: 'stale handle — the page has changed since it was read'});
 var label = jarvisText(el, jarvisRole(el)).slice(0, 120);
+var kind = (el.getAttribute('type') || '').toLowerCase();
+var auto = (el.getAttribute('autocomplete') || '').toLowerCase();
+var ident = ((el.getAttribute('name') || '') + ' ' + (el.id || '')).toLowerCase();
+if (kind === 'password' || auto.indexOf('password') !== -1) {
+  return JSON.stringify({ok: false, refused: true, reason: 'that is a password field — signing in is for the user to do; ask them to take over'});
+}
+if (auto.indexOf('cc-') === 0 || /card.?number|cardnum|cvv|cvc|security.?code|expir/.test(ident)) {
+  return JSON.stringify({ok: false, refused: true, reason: 'that is a payment card field — JARVIS never enters payment details'});
+}
 el.scrollIntoView({block: 'center'});
 el.focus();
 var tag = el.tagName.toLowerCase();
@@ -258,9 +343,10 @@ if (tag === 'select') {
   return JSON.stringify({ok: true, submitted: false, chose: match.text.trim(), text: label,
                          url: window.location.href, title: document.title});
 }
+var realm = el.ownerDocument.defaultView || window;
 var proto = null;
-if (tag === 'textarea') { proto = window.HTMLTextAreaElement.prototype; }
-else if (tag === 'input') { proto = window.HTMLInputElement.prototype; }
+if (tag === 'textarea') { proto = realm.HTMLTextAreaElement.prototype; }
+else if (tag === 'input') { proto = realm.HTMLInputElement.prototype; }
 var applied = false;
 if (proto) {
   var setter = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -308,20 +394,112 @@ return JSON.stringify({ok: true, text: text, url: window.location.href, title: d
 
 _READY_SCRIPT = "(function(){return document.readyState;})()"
 
+#: The element that has keyboard focus — followed into shadow roots and
+#: same-origin frames — stamped with a handle so it can be inspected like
+#: any listed element.
+_ACTIVE_SCRIPT = """(function(){
+var el = document.activeElement;
+for (var hops = 0; el && hops < 8; hops++) {
+  if (el.shadowRoot && el.shadowRoot.activeElement) { el = el.shadowRoot.activeElement; continue; }
+  if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+    var inner = null;
+    try { inner = el.contentDocument ? el.contentDocument.activeElement : null; } catch (e) {}
+    if (inner) { el = inner; continue; }
+  }
+  break;
+}
+if (!el || el.tagName === 'BODY' || el.tagName === 'HTML') return JSON.stringify({handle: ''});
+if (typeof window.__jarvisSeq !== 'number') { window.__jarvisSeq = 0; }
+var handle = el.getAttribute('data-jarvis-id');
+if (!handle) { window.__jarvisSeq += 1; handle = 'jv' + window.__jarvisSeq; el.setAttribute('data-jarvis-id', handle); }
+return JSON.stringify({handle: handle});
+})()"""
+
+_SCROLL_TEMPLATE = """(function(){
+%(locate)s
+var handle = %(handle)s;
+var direction = %(direction)s;
+if (handle) {
+  var el = jarvisFind(handle);
+  if (!el) return JSON.stringify({ok: false, reason: 'stale handle — the page has changed since it was read'});
+  el.scrollIntoView({block: 'center'});
+} else if (direction === 'top') { window.scrollTo(0, 0); }
+else if (direction === 'bottom') { window.scrollTo(0, document.documentElement.scrollHeight); }
+else { window.scrollBy(0, (direction === 'up' ? -1 : 1) * Math.round(window.innerHeight * 0.8)); }
+return JSON.stringify({ok: true, y: Math.round(window.scrollY),
+                       height: document.documentElement.scrollHeight, view: window.innerHeight});
+})()"""
+
+_BACK_SCRIPT = "(function(){history.back();return JSON.stringify({ok:true});})()"
+
+_KEY_TEMPLATE = """(function(){
+%(locate)s
+var handle = %(handle)s;
+var key = %(key)s;
+var el = handle ? jarvisFind(handle) : (document.activeElement || document.body);
+if (!el) return JSON.stringify({ok: false, reason: 'stale handle — the page has changed since it was read'});
+if (handle) { el.focus(); }
+['keydown', 'keypress', 'keyup'].forEach(function(type) {
+  el.dispatchEvent(new KeyboardEvent(type, {key: key, bubbles: true, cancelable: true}));
+});
+if (key === 'Enter' && el.form && typeof el.form.requestSubmit === 'function') { el.form.requestSubmit(); }
+return JSON.stringify({ok: true});
+})()"""
+
+_FIND_TEXT_TEMPLATE = """(function(){
+var wanted = %(text)s.toLowerCase();
+var body = document.body ? (document.body.innerText || '') : '';
+return JSON.stringify({found: body.toLowerCase().indexOf(wanted) !== -1, url: window.location.href});
+})()"""
+
 #: A cheap fingerprint of the page's current state. The mutation counter
-#: (installed on first use in each document) changes on *any* DOM change,
-#: including a client-side re-render that rebuilds identical-looking markup —
-#: element counts alone would miss exactly that.
+#: (installed on first use in each document, same-origin frames included)
+#: changes on *any* DOM change, including a client-side re-render that
+#: rebuilds identical-looking markup — element counts alone would miss
+#: exactly that.
 _SIGNATURE_SCRIPT = """(function(){
-if (!window.__jarvisObserver) {
-  window.__jarvisMutations = 0;
-  window.__jarvisObserver = new MutationObserver(function(records) { window.__jarvisMutations += records.length; });
-  window.__jarvisObserver.observe(document, {subtree: true, childList: true, attributes: true, characterData: true});
+function watch(win) {
+  if (!win.__jarvisObserver) {
+    win.__jarvisMutations = 0;
+    win.__jarvisObserver = new win.MutationObserver(function(records) { win.__jarvisMutations += records.length; });
+    win.__jarvisObserver.observe(win.document, {subtree: true, childList: true, attributes: true, characterData: true});
+  }
+  return win.__jarvisMutations;
+}
+var total = watch(window);
+var state = document.readyState;
+var frames = document.querySelectorAll('iframe,frame');
+for (var i = 0; i < frames.length; i++) {
+  try {
+    var win = frames[i].contentWindow;
+    if (win && win.document && win.document.documentElement) {
+      total += watch(win);
+      if (win.document.readyState !== 'complete') state = win.document.readyState;
+    }
+  } catch (e) {}
 }
 var body = document.body;
-return document.readyState + ':' + window.location.href + ':' + window.__jarvisMutations + ':' +
+return state + ':' + window.location.href + ':' + total + ':' +
        (body ? body.getElementsByTagName('*').length : 0);
 })()"""
+
+
+def build_scroll_script(direction: str = "down", handle: str = "") -> str:
+    return _SCROLL_TEMPLATE % {"locate": _LOCATE, "handle": json.dumps(str(handle or "")),
+                               "direction": json.dumps(str(direction or "down"))}
+
+
+def back_script() -> str:
+    return _BACK_SCRIPT
+
+
+def build_key_script(key: str, handle: str = "") -> str:
+    return _KEY_TEMPLATE % {"locate": _LOCATE, "handle": json.dumps(str(handle or "")),
+                            "key": json.dumps(str(key))}
+
+
+def build_find_text_script(text: str) -> str:
+    return _FIND_TEXT_TEMPLATE % {"text": json.dumps(str(text))}
 
 
 def build_manifest_script(*, limit: int = 60, roles: list[str] | None = None, offset: int = 0,
@@ -337,6 +515,7 @@ def build_manifest_script(*, limit: int = 60, roles: list[str] | None = None, of
         "classify": _CLASSIFY_ROLE,
         "visible": _VISIBLE_CHECK,
         "name": _NAME,
+        "roots": _ROOTS,
         "role_filter": role_filter,
         "limit": max(1, min(int(limit), 200)),
         "offset": max(0, int(offset)),
@@ -374,6 +553,10 @@ def build_submit_script(handle: str) -> str:
 
 def ready_script() -> str:
     return _READY_SCRIPT
+
+
+def active_element_script() -> str:
+    return _ACTIVE_SCRIPT
 
 
 def signature_script() -> str:

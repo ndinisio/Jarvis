@@ -167,7 +167,9 @@ COMMANDS: list[QuickCommand] = [
     _c(r"^\s*(?:are you (?:there|awake|online)|you there)\??\s*$", RouteKind.CONTROL, "presence"),
     _c(r"^\s*(?:goodbye|bye|good night|goodnight|that'?s all)[.!]?\s*$",
        RouteKind.CONTROL, "farewell"),
-    _c(r"^\s*(?:yes|yeah|yep|go ahead|do it|confirm|send it|approved?)[.!]?\s*$",
+    _c(r"^\s*(?:yes|yeah|yep|go ahead|do it|confirm|send it|approved?|"
+       r"(?:ok(?:ay)?,? |all )?done|i'?m (?:all )?done|i'?ve (?:done it|finished)|finished|"
+       r"i'?m (?:signed|logged) in|(?:signed|logged) in)[.!]?\s*$",
        RouteKind.CONTROL, "affirm"),
     _c(r"^\s*(?:no|nope|don'?t|cancel it|leave it)[.!]?\s*$", RouteKind.CONTROL, "decline"),
 

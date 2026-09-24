@@ -17,6 +17,7 @@ from ..memory.store import MemoryStore
 from ..models.registry import ModelRouter, Slot
 from ..router.router import Router
 from ..security.permissions import PermissionBroker
+from ..surfaces.web.hub import BrowserHub
 from ..tasks.manager import TaskManager
 from ..tools.files.sandbox import FileSandbox
 from ..tools.macos.apps import AppCatalog
@@ -70,6 +71,8 @@ class JarvisApp:
             diagnostics=self.diagnostics,
             sandbox=self.sandbox,
         )
+        # Which browser each web action goes to; JARVIS Chrome starts on first use.
+        self.deps.browsers = BrowserHub(self.deps)
         self.deps.registry = build_registry(self.deps)
         self.capabilities = build_capabilities(self.deps)
         self.personality = Personality(config)
@@ -158,6 +161,7 @@ class JarvisApp:
             await self.voice.stop()
         await self.screen_watcher.stop()
         await self.tasks.shutdown()
+        await self.deps.browsers.close()
         await self.models.close()
         self.memory.close()
         log.info("JARVIS stopped")

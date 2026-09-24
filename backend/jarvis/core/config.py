@@ -442,6 +442,35 @@ class ScreenAwarenessConfig(BaseModel):
     narration_action_threshold_s: float = 0.0
 
 
+class BrowserConfig(BaseModel):
+    """Which browser JARVIS operates for web work (v3.0).
+
+    Two browsers, each where it's best. **Your everyday browser** (Safari,
+    Chrome…, driven through AppleScript) for anything about the page you're
+    looking at and for quick reads — your logins are already there. **JARVIS
+    Chrome** — a Chrome profile JARVIS runs itself over the DevTools protocol
+    (``pip install -e ".[browser]"``) — for multi-step errands: genuine clicks
+    and typing that autocompletes and modern web apps respond to, reliable
+    "the page has finished loading" signals, and it never disturbs your own
+    tabs. Sign in to a site once in the JARVIS window and it stays signed in.
+    """
+
+    #: Use JARVIS Chrome for multi-step web tasks when Playwright is installed.
+    jarvis_browser: bool = True
+    #: Where JARVIS Chrome keeps its own profile (logins, cookies).
+    profile_dir: str = "~/JARVIS/browser-profile"
+    #: "chrome" uses installed Google Chrome; empty uses Playwright's Chromium.
+    channel: str = "chrome"
+    #: Show the JARVIS window (so you can watch, and take over when asked).
+    headless: bool = False
+    #: Per-site choice, e.g. {"mail.google.com": "everyday"} for a site you're
+    #: only ever signed into in your own browser. Values: "jarvis" | "everyday".
+    site_overrides: dict[str, str] = Field(default_factory=dict)
+    #: How long JARVIS waits for you to finish a sign-in or a CAPTCHA it has
+    #: handed over, before giving up on the task.
+    handoff_timeout_s: float = 300.0
+
+
 class UIConfig(BaseModel):
     developer_mode: bool = False
     show_telemetry: bool = True
@@ -496,6 +525,7 @@ class Config(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     intelligence: IntelligenceConfig = IntelligenceConfig()
     automation: AutomationConfig = AutomationConfig()
+    browser: BrowserConfig = BrowserConfig()
     screen_awareness: ScreenAwarenessConfig = ScreenAwarenessConfig()
     ui: UIConfig = UIConfig()
     #: Set once the first-run walkthrough has been completed.

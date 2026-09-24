@@ -55,6 +55,7 @@ class OracleBrain:
     issued: str | None = None
     misses: int = 0
     failures: int = 0
+    scrolls: int = 0
     gave_up: str = ""
     decisions: list[dict[str, Any]] = field(default_factory=list)
 
@@ -62,7 +63,7 @@ class OracleBrain:
         self.recipe = list(recipe)
         self.cursor = 0
         self.issued = None
-        self.misses = self.failures = 0
+        self.misses = self.failures = self.scrolls = 0
         self.gave_up = ""
         self.decisions = []
 
@@ -70,7 +71,14 @@ class OracleBrain:
     def on_tool_result(self, tool: str, ok: bool) -> None:
         if tool != self.issued or tool == "read_page_manifest":
             return
-        if ok:
+        # ``allow_fail``: a step that is *meant* to be refused (typing a
+        # password) still moves the recipe on.
+        step = self.recipe[self.cursor] if self.cursor < len(self.recipe) else {}
+        if ok and "until" in step:
+            # A repeated step: it is done when its target shows up, not when it runs.
+            self.scrolls += 1
+            return
+        if ok or step.get("allow_fail"):
             self.cursor += 1
             self.misses = self.failures = 0
         else:
@@ -117,6 +125,28 @@ class OracleBrain:
             return _call("fill_page_field", {"handle": element.handle, "label": step["select"],
                                              "text": str(step["option"])},
                          f"choose {step['option']}")
+        if "key" in step:
+            arguments = {"key": str(step["key"])}
+            if step.get("on"):
+                element = find_element(prompt, step["on"], step.get("role"))
+                if element is None:
+                    return self._look_again(step["on"])
+                arguments["handle"] = element.handle
+            return _call("press_page_key", arguments, f"press {step['key']}")
+        if "scroll" in step:
+            if step.get("until") and find_element(prompt, step["until"]) is not None:
+                self.cursor += 1
+                self.scrolls = 0
+                return self._decide(prompt)
+            if self.scrolls >= 8:
+                return self._give_up(f"“{step.get('until')}” never appeared")
+            return _call("scroll_page", {"direction": str(step["scroll"])}, "scroll")
+        if "back" in step:
+            return _call("page_go_back", {}, "go back")
+        if "wait" in step:
+            return _call("wait_for_page", {"text": str(step["wait"]), "timeout_s": 5}, "wait")
+        if "takeover" in step:
+            return _call("ask_user_to_take_over", {"reason": str(step["takeover"])}, "hand over")
         return self._give_up(f"unknown recipe step {step}")
 
     def _look_again(self, target: str) -> dict[str, Any]:

@@ -72,6 +72,10 @@ SENSITIVE_APPS = {
     "disk utility", "migration assistant", "boot camp assistant",
 }
 
+#: Tools (and arguments) that submit the form their target sits in.
+_SUBMIT_TOOLS = {"submit_page_form"}
+_SUBMIT_KEYS = {"enter", "return"}
+
 #: Keys of an inspected web target that identify the control itself.
 _TARGET_KEYS = ("text", "label", "value", "id", "name", "title")
 
@@ -110,10 +114,21 @@ def classify(tool_name: str, arguments: dict[str, Any], spec: Any,
             return True
         if target.get("role") in {"button", "control", None, ""} and _consequential_url(target.get("action")):
             return True
+        # Pressing Enter in a field (or submit=True) sends its whole form:
+        # where the form goes decides, whatever the field itself is.
+        if _submits(tool_name, arguments) and _consequential_url(target.get("action")):
+            return True
         if records_a_choice:
             return False
     label = arguments.get("label")
     return isinstance(label, str) and bool(_CONSEQUENTIAL_PATTERN.search(_words(label)))
+
+
+def _submits(tool_name: str, arguments: dict[str, Any]) -> bool:
+    if tool_name in _SUBMIT_TOOLS or arguments.get("submit") is True:
+        return True
+    key = "".join(str(arguments.get("key") or "").lower().split())
+    return tool_name == "press_page_key" and key in _SUBMIT_KEYS
 
 
 def _consequential_url(url: Any) -> bool:

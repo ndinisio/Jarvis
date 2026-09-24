@@ -187,14 +187,12 @@ class OpenURLTool(Tool):
             resolved, _ = await self._deps.apps.resolve(browser)
             browser = resolved or browser
         ctx.report(f"Opening {url}…", tool="open_url")
-        result = await self._deps.controller.open_url(url, browser or None)
+        from ..browser.tools import navigate
+
+        result = await navigate(self._deps, ctx, url, browser)
         if not result.ok:
-            return ToolResult.failure("That page didn't open.", detail=result.output)
-        return ToolResult(
-            data={"url": url},
-            summary=f"Opening {_domain(url)}.",
-            display={"kind": "link", "url": url},
-        )
+            return ToolResult.failure("That page didn't open.", detail=result.error)
+        return result
 
 
 class NotificationTool(Tool):

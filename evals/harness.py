@@ -71,19 +71,13 @@ def apply_overrides(config: Config, overrides: dict[str, Any]) -> Config:
 
 @contextlib.contextmanager
 def attach_browser(app, driver):
-    """Point JARVIS's browser tools at the evaluation browser.
+    """Point JARVIS at the evaluation browser.
 
-    The page tools are declared macOS-only because their production drivers
-    speak AppleScript; with a DevTools-driven browser that restriction
-    doesn't apply, so it is lifted for the duration. Everything is restored on
-    exit — the test suite runs other tests in the same process.
+    Every web action goes to *driver* through the browser hub's own
+    ``pin`` — the same code path JARVIS Chrome uses for real. The system
+    "open a link" call and the frontmost-app probe are the only other ways
+    out to a browser, so they are pointed at it too. Restored on exit.
     """
-    import jarvis.tools.browser.page_tools as page_tools
-    import jarvis.tools.browser.tools as browser_tools
-    import jarvis.tools.registry as registry
-
-    async def detect(_deps) -> str:
-        return driver.app_name
 
     async def open_url(url: str, browser: str | None = None) -> ShellResult:
         ok = await driver.open(url)
@@ -92,18 +86,14 @@ def attach_browser(app, driver):
     async def frontmost_app() -> str:
         return driver.app_name
 
-    saved = (registry.IS_MACOS, browser_tools.driver_for, page_tools.driver_for,
-             browser_tools.detect_browser, page_tools.detect_browser)
-    registry.IS_MACOS = True
-    browser_tools.driver_for = page_tools.driver_for = lambda _controller, _name: driver
-    browser_tools.detect_browser = page_tools.detect_browser = detect
+    saved = (app.controller.open_url, app.controller.frontmost_app)
     app.controller.open_url = open_url
     app.controller.frontmost_app = frontmost_app
     try:
-        yield
+        with app.deps.browsers.pin(driver):
+            yield
     finally:
-        (registry.IS_MACOS, browser_tools.driver_for, page_tools.driver_for,
-         browser_tools.detect_browser, page_tools.detect_browser) = saved
+        app.controller.open_url, app.controller.frontmost_app = saved
 
 
 class Harness:
@@ -227,12 +217,16 @@ async def drive_turn(app, text: str, record: TaskResult, *, approve: list[str],
             oracle.brain.on_tool_result(str(payload.get("tool")), bool(payload.get("ok")))
         elif event.type == EventType.CONFIRM_REQUEST:
             details = payload.get("details") or {}
-            consequential = not details.get("offer_remember", True)
+            # A handoff ("sign in, then say done") is the user's own work; the
+            # simulated user only "does" it when the task says they would.
+            handoff = bool(details.get("handoff"))
+            consequential = not handoff and not details.get("offer_remember", True)
             summary = str(payload.get("summary") or "")
-            approved = (not consequential) or any(
+            approved = (not consequential and not handoff) or any(
                 fragment.lower() in summary.lower() for fragment in approve)
             record.confirmations.append({"summary": summary, "consequential": consequential,
-                                         "approved": approved, "action": payload.get("action")})
+                                         "handoff": handoff, "approved": approved,
+                                         "action": payload.get("action")})
             loop.call_soon(app.permissions.resolve, payload.get("id"), approved)
 
     app.bus.add_hook(on_event)

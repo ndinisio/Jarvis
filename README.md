@@ -487,6 +487,7 @@ cd frontend && npm install && npm run build && cd ..
 | `mlx-whisper` | local speech recognition on the Apple Silicon GPU (large-v3-turbo) | optional, recommended |
 | `openwakeword` | offline wake-word detection | voice only |
 | `pillow` | screenshot downscaling (faster vision) | optional |
+| `playwright` | JARVIS Chrome — its own browser for web errands (uses your installed Chrome) | optional, recommended |
 
 Without the voice extras JARVIS still works: you type, or use the microphone
 button, and the browser speaks the replies.
@@ -716,6 +717,13 @@ file) override the file — see [`.env.example`](.env.example).
     "readable_roots": ["~/Documents", "~/Downloads", "~/Desktop"],
     "allow_shell": true
   },
+  "browser": {
+    "jarvis_browser": true,   // errands run in JARVIS Chrome (false: always your own browser)
+    "channel": "chrome",      // your installed Chrome; "" = Playwright's Chromium
+    "profile_dir": "~/JARVIS/browser-profile",
+    "site_overrides": {},     // e.g. {"mail.google.com": "everyday"}
+    "handoff_timeout_s": 300  // how long to wait while you sign in
+  },
   "capabilities": { "email": true, "calendar": true, "research": true, "screen": true },
   "personality": { "address_user_as": "sir", "honorific_frequency": 0.35 }
 }
@@ -723,6 +731,33 @@ file) override the file — see [`.env.example`](.env.example).
 
 API keys are **never written to the config file** — they are read from the
 environment only.
+
+### Two browsers
+
+Web work happens in whichever browser suits it:
+
+* **Your everyday browser** (Safari, Chrome, Arc… over AppleScript) for the
+  page you're on — "summarise this page", "fill in this form" — and for a
+  quick "open YouTube". Your own logins are the point here. (Safari needs
+  *Develop → Allow JavaScript from Apple Events* for JARVIS to read or act on
+  pages.)
+* **JARVIS Chrome** — a separate Chrome window with its own profile — for
+  errands that go somewhere: "find a USB-C cable on Amazon and add it to my
+  basket". It waits properly for pages and their requests, clicks and types
+  with genuine input (so autocompletes and modern web apps respond), reaches
+  controls inside web components and embedded frames, and never touches your
+  own tabs.
+
+A task keeps the browser it started in, so every step of one errand happens
+in one window. If JARVIS Chrome can't run it falls back to your browser, and
+`site_overrides` pins a site to either one.
+
+**Your part.** JARVIS never types a password or card number, in either
+browser. When a site needs you — a sign-in, a CAPTCHA, a two-factor code — it
+brings the window forward and asks: *"Please sign in to Amazon in the JARVIS
+Chrome window, then say 'done'."* Say "done" (or "I'm signed in")
+and it carries on. Sign in to a site once in JARVIS Chrome and it stays signed
+in there.
 
 ---
 
@@ -771,6 +806,9 @@ anything.
   occasional, cooldown-limited vision-model calls — never literally
   continuous inference, and never shown in the interface unless you ask or
   turn on its own narration toggle.
+* **Passwords and card details are yours.** Neither browser will type into a
+  password or payment-card field, whatever the model asks for; sign-ins and
+  CAPTCHAs are handed to you (see *Two browsers*).
 * **Confirmations time out.** No answer within 90 seconds means no.
 
 Details: [`docs/security.md`](docs/security.md).
@@ -1064,8 +1102,9 @@ won't be reachable this way.
 
 * No Spotify, HomeKit, Reminders, Messages or Contacts yet — the tool interface
   is ready for them ([`docs/extending.md`](docs/extending.md)).
-* Browser automation reads, opens and (via the interaction tools) clicks and
-  types; it doesn't fill forms programmatically or drive JavaScript.
+* Web pages inside cross-origin frames (some payment and embedded widgets)
+  are out of reach by design; controls in same-origin frames and open shadow
+  roots are reachable.
 * The agent is bounded to six steps and two repairs per step by default. Work
   that genuinely needs more will stop and say what it got to, rather than
   looping.

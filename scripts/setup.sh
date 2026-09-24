@@ -35,6 +35,20 @@ if [ "${WITH_VOICE:-1}" = "1" ]; then
     warn "Voice extras failed to install — JARVIS will run without local speech input."
 fi
 
+if [ "${WITH_BROWSER:-1}" = "1" ]; then
+  say "Installing JARVIS's own browser support (Playwright)"
+  if ./.venv/bin/pip install --quiet -e ".[browser]"; then
+    # JARVIS Chrome uses your installed Google Chrome; without it, Playwright's
+    # own Chromium is downloaded instead.
+    if [ ! -d "/Applications/Google Chrome.app" ]; then
+      ./.venv/bin/python -m playwright install chromium || \
+        warn "Chromium didn't download — web errands will use your everyday browser."
+    fi
+  else
+    warn "Browser extras failed to install — web errands will use your everyday browser."
+  fi
+fi
+
 ./.venv/bin/pip install --quiet -e ".[dev]" || true
 
 # --- Interface ---------------------------------------------------------------

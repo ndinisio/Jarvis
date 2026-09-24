@@ -68,7 +68,7 @@ What changed:
 Compound requests (50/50) and domain-word traps (24/24) no longer misroute;
 polite phrasing ("could you… for me") gets the fast answer (15/15).
 
-**All phrasings (82 runs), oracle: 97.1%** — the same two Phase 4 tasks.
+**All phrasings, oracle: 97.1%** — the same two Phase 4 tasks.
 
 ## Phase 3 — the interpreter
 
@@ -89,3 +89,40 @@ Apple Silicon GPU and is taught the Mac's app names.
 (10 utterances like "whack on the next song") must *not* hit the fast path
 directly; the real-model run scores whether the interpreter's restatement
 reaches the right command (gate: ≥90%).
+
+## Phase 4 — two browsers, genuine input, the user's part
+
+**Web tasks, oracle: 42 / 42 (100%); every phrasing: 72 / 72.** The
+shadow-DOM widget and the iframe form now complete, along with two new
+tasks: a talks list behind a newsletter pop-up that swallows clicks until
+it's dismissed, which only loads the wanted talk after two rounds of
+scrolling; and a sign-in page where the oracle deliberately tries to type a
+password (it must be refused, with the sign-in handed to the user).
+
+What changed:
+
+- **Which browser.** Errands that navigate run in JARVIS Chrome (its own
+  profile, over the DevTools protocol); anything about the page you're on,
+  and quick one-off opens, use your everyday browser. A task keeps its
+  browser. Site overrides and an off switch; falls back to your browser if
+  Chrome/Playwright aren't there. The evaluation harness now reaches its
+  browser through this same hub (`pin`) instead of patching modules.
+- **Genuine input** in JARVIS Chrome: real mouse clicks and keystrokes
+  (typed character by character into fields that offer suggestions), with
+  the in-page script as fallback when an element can't be reached.
+- **Settling on the network, not only the DOM.** An action returns once the
+  page's own requests have finished — the iframe task failed before this
+  because the "Send" `fetch` was still in flight when the result was
+  checked. Mutations inside same-origin frames count as page changes.
+- **Deeper pages.** The listing walks open shadow roots and same-origin
+  iframes (with their offsets, so "in view" stays true).
+- **New page tools:** `press_page_key`, `scroll_page`, `page_go_back`,
+  `wait_for_page`, `ask_user_to_take_over`. The next look says what changed
+  ("New since the last look: dialog 'Added to Basket'…"), and sign-in or
+  CAPTCHA pages carry an explicit instruction to hand over.
+- **Safety:** password and card fields are refused by both browsers (the
+  script and the genuine-input path check the real element). Pressing Enter
+  in a field, or typing with `submit`, is judged by where the form goes, so
+  submitting a checkout form from a postcode box still asks. A handoff is
+  never pre-approved by any setting, and "done" / "I'm signed in" answers it.
+

@@ -75,6 +75,8 @@ def config(tmp_path: Path) -> Config:
     conf.voice.enabled = False
     conf.voice.tts_engine = "off"
     conf.ui.developer_mode = True
+    # No test starts a real JARVIS Chrome unless it asks for one.
+    conf.browser.jarvis_browser = False
     conf.ensure_workspace()
     return conf
 

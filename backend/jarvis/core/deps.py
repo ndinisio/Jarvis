@@ -43,6 +43,8 @@ class Deps:
     sandbox: FileSandbox
     registry: Any = None  # ToolRegistry, filled in after tools are built
     voice: Any = None  # VoiceManager | None, filled in after tools are built (see core/app.py)
+    #: BrowserHub — which browser a web action goes to (surfaces/web/hub.py).
+    browsers: Any = None
 
     @property
     def config(self) -> Config:

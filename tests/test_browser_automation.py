@@ -171,10 +171,9 @@ async def test_detect_browser_prefers_the_frontmost_browser_app():
 # -- the four Tool subclasses, through their own run() -----------------------
 
 def _install_fake_driver(monkeypatch, deps, driver):
-    import jarvis.tools.browser.page_tools as page_tools_module
+    from jarvis.surfaces.web.hub import hub_of
 
-    monkeypatch.setattr(page_tools_module, "detect_browser", _async_return("Safari"))
-    monkeypatch.setattr(page_tools_module, "driver_for", lambda controller, name: driver)
+    monkeypatch.setattr(hub_of(deps), "_pinned", driver)
 
 
 def _async_return(value):
@@ -235,11 +234,7 @@ async def test_read_page_manifest_returns_the_elements_it_found(app, ctx, monkey
 
 
 def test_click_page_element_is_medium_risk_and_the_prompt_shows_the_label_not_a_bare_handle(app):
-    """``click_page_element`` is ``requires_macos=True``, so exercising its
-    confirmation through the live registry only works on a real Mac (see
-    the ``requires_macos`` gate in ``ToolRegistry.call()``). What's tested
-    here on any host is the piece that actually matters for this feature:
-    the tool is MEDIUM risk (so it *will* be gated), and its
+    """The tool is MEDIUM risk (so it *will* be gated), and its
     ``confirmation_template`` renders the human-readable label the user
     would actually recognise — never the opaque DOM handle."""
     from jarvis.security.permissions import RiskLevel

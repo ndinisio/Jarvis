@@ -39,6 +39,7 @@ def test_automation_flag_disables_every_new_tool_registration(app):
     test_automation_is_disabled_by_the_capability_flag)."""
     automation_only_tools = {
         "read_page_manifest", "click_page_element", "fill_page_field", "submit_page_form",
+        "press_page_key", "scroll_page", "page_go_back", "wait_for_page", "ask_user_to_take_over",
         "download_file", "run_installer",
     }
     before = set(app.deps.registry.names())

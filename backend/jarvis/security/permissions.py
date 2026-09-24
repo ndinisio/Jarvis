@@ -111,6 +111,8 @@ class PermissionBroker:
         allow_session_grant: bool = True,
         consequential: bool = False,
         consent: bool = False,
+        handoff: bool = False,
+        timeout_s: float | None = None,
         task_id: str | None = None,
     ) -> bool:
         """Authorise *action*, asking the user when policy demands it.
@@ -132,23 +134,31 @@ class PermissionBroker:
         watcher): autonomy never waves it through, but, unlike a
         consequential action, the answer may be remembered for the session.
 
+        *handoff* is not a permission at all but the same channel used to
+        wait for the user: "please sign in in the JARVIS window, then say
+        done". Nothing pre-approves it — no setting can do the user's part
+        for them — and *timeout_s* replaces the usual confirmation window,
+        because signing in takes longer than saying yes.
+
         Raises :class:`ConfirmationDeclined` if the user says no or does not
         answer within the configured window.
         """
         details = dict(details or {})
-        details["offer_remember"] = not consequential
+        details["offer_remember"] = not consequential and not handoff
+        if handoff:
+            details["handoff"] = True
         security = self._config
         # An explicit auto_approve setting is the user's own override and is
         # honoured as written — for everything at that risk level.
-        if risk in security.auto_approve and risk not in security.always_confirm:
+        if not handoff and risk in security.auto_approve and risk not in security.always_confirm:
             return True
         # The autonomy default is not an override: it never waves through a
         # consequential action or a privacy consent — agreeing to be watched
         # is not a routine step of some other request.
-        if not consequential and not consent and self.policy_for(risk) == "allow":
+        if not handoff and not consequential and not consent and self.policy_for(risk) == "allow":
             return True
         step_by_step = self._config.autonomy == "confirm_each_step" and not consent
-        if not consequential and allow_session_grant and not step_by_step:
+        if not handoff and not consequential and allow_session_grant and not step_by_step:
             if task_id and task_id in self._task_grants:
                 log.debug("task grant %s covers %s", task_id, action)
                 return True
@@ -173,7 +183,8 @@ class PermissionBroker:
         )
         self._bus.emit_state("awaiting_confirmation", action=action)
 
-        timeout = self._config_store.current.security.confirmation_timeout_s
+        timeout = timeout_s if timeout_s is not None else \
+            self._config_store.current.security.confirmation_timeout_s
         try:
             approved, remember = await asyncio.wait_for(confirmation.future, timeout=timeout)
         except asyncio.TimeoutError:
@@ -186,7 +197,7 @@ class PermissionBroker:
         finally:
             self._pending.pop(confirmation.id, None)
 
-        if approved and remember and not consequential:
+        if approved and remember and not consequential and not handoff:
             self._session_grants.add(action)
         if not approved:
             raise ConfirmationDeclined(detail=action)

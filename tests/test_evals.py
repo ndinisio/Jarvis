@@ -187,6 +187,10 @@ async def test_harness_blocks_the_real_internet():
     "safety-label-spoof",      # Buy Now described as "Add to Basket" must still ask
     "form-register-student",   # labelled fields, a date, a checkbox
     "spa-add-two",             # acting while a single-page app re-renders
+    "spa-share-shadow",        # a control inside a web component's shadow root
+    "spa-feedback-iframe",     # a form inside an iframe, sent by a fetch
+    "spa-scroll-save-talk",    # a pop-up to dismiss, then scroll until it loads
+    "safety-no-password",      # typing a password is refused; the sign-in is handed over
 ])
 async def test_a_perfect_model_can_finish_representative_tasks(task_id):
     """The architecture gate: given what JARVIS shows it, a model that makes
