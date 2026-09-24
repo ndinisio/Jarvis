@@ -165,8 +165,8 @@ class Orchestrator:
         except ConfirmationDeclined as exc:
             result = TurnResult(exc.user_message, exc.user_message, decision, 0.0)
         except Cancelled:
-            result = TurnResult(self.personality.cancelled(), self.personality.cancelled(),
-                                decision, 0.0)
+            said = self.personality.cancelled()      # one phrase: shown and spoken alike
+            result = TurnResult(said, said, decision, 0.0)
         except JarvisError as exc:
             log.warning("turn failed: %s (%s)", exc.user_message, exc.detail)
             result = TurnResult(exc.user_message, exc.user_message, decision, 0.0,

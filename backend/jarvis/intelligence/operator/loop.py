@@ -42,7 +42,7 @@ from ..state import ConversationState
 from ..verify import Verifier
 from .checklist import Checklist
 from .context import Conversation, Turn, budget_for
-from .observation import OBSERVE_AFTER, ObservationLog, first_line
+from .observation import OBSERVE_AFTER, OBSERVERS, ObservationLog, first_line
 from .privacy import PRIVATE_CATEGORIES, PrivacyGuard
 from .prompts import (
     ASK_USER,
@@ -70,10 +70,6 @@ MAX_UNPROVEN_FINISHES = 3
 #: How much of one result (or page listing) the model is shown.
 RESULT_CHARS = 4000
 PAGE_CHARS = 5000
-#: Tools that act on a web page's elements — only worth reading the page
-#: again for when the model can act on what it sees.
-_PAGE_ACTIONS = frozenset({"click_page_element", "fill_page_field", "submit_page_form",
-                           "press_page_key"})
 #: Categories whose actions can legitimately repeat on a changed screen —
 #: covered by stuck detection rather than refused as duplicates.
 _INTERACTIVE = frozenset({"browser", "screen"})
@@ -206,7 +202,10 @@ class _Run:
             if category in PRIVATE_CATEGORIES for name in names))
 
         self.allowed = [name for name in dict.fromkeys(tools) if self.registry.get(name) is not None]
-        self.can_act_on_pages = any(name in _PAGE_ACTIONS for name in self.allowed)
+        #: Which "look again" tools are worth running for this toolset.
+        self.observers = [name for name, (_, actors, _) in OBSERVERS.items()
+                          if self.registry.get(name) is not None
+                          and any(tool in actors for tool in self.allowed)]
         self.defs: list[ToolDef] = self.registry.tool_defs(self.allowed) + self._control_defs()
         self.overhead = sum(len(d.name) + len(d.description) + len(json.dumps(d.parameters)) + 40
                             for d in self.defs)
@@ -229,6 +228,8 @@ class _Run:
         self.hint = ""
         #: Successful state changes, so an identical one isn't repeated.
         self.done_changes: dict[str, str] = {}
+        #: The app the latest native action happened in.
+        self.app_in_use = ""
 
     def _control_defs(self) -> list[ToolDef]:
         defs = [FINISH, ASK_USER, GIVE_UP]
@@ -305,16 +306,16 @@ class _Run:
         turn = Turn(calls=[], full=[], short=[], text=text[:600])
         digest: list[str] = []
         acted = False          # an action ran in this reply
-        observe = False        # …and it was a web action worth looking again after
+        due: list[str] = []    # …and which views to look at again after it
         halted = ""            # why the rest of this reply is skipped
 
         async def look_again() -> None:
-            nonlocal observe
-            if observe and turn.full:
-                listing = await self._observe()
-                if listing:
-                    turn.full[-1] += "\n\nThe page now:\n" + listing
-            observe = False
+            if turn.full:
+                for observer in due:
+                    listing = await self._observe(observer)
+                    if listing:
+                        turn.full[-1] += f"\n\n{OBSERVERS[observer][2]}:\n" + listing
+            due.clear()
 
         for index, call in enumerate(calls):
             call = ToolCall(name=str(call.name or ""), arguments=_arguments(call.arguments),
@@ -342,7 +343,8 @@ class _Run:
             if outcome.ran:
                 acted = True
                 self.unproven = 0
-                observe = observe or call.name in OBSERVE_AFTER
+                due.extend(o for o in self.observers
+                           if call.name in OBSERVERS[o][0] and o not in due)
             if not outcome.ok:
                 halted = f"{call.name} didn't work, so the rest of that reply was skipped"
         await look_again()
@@ -425,7 +427,7 @@ class _Run:
             self.trace.decision("tool_call", tool=name, arguments=cleaned)
         if self.before is not None:
             self.before(name, cleaned)
-        screen = self.screen if name in OBSERVE_AFTER or name == "read_page_manifest" else ""
+        screen = self.screen if name in OBSERVE_AFTER or name in OBSERVERS else ""
         started = time.monotonic()
         result = await self.registry.call(name, cleaned, self.ctx)
         elapsed_ms = (time.monotonic() - started) * 1000.0
@@ -460,8 +462,10 @@ class _Run:
             self.latest = text
             if spec.changes_state:
                 self.done_changes[key] = first_line(result.summary, 80)
-        if name == "read_page_manifest" and result.ok and result.observation:
+        if name in OBSERVERS and result.ok and result.observation:
             self.screen = result.observation
+        if spec.category == "screen" and isinstance(result.data, dict) and result.data.get("application"):
+            self.app_in_use = str(result.data["application"])
         state = "ok" if ok else ("not verified" if result.ok else "failed")
         problem = verification.problem if result.ok and not verification.verified else result.summary
         self.findings.append(f"{name}({_short(cleaned)}) → {state}: {(problem or '')[:200]}")
@@ -481,18 +485,19 @@ class _Run:
         self.stuck.record("", name, arguments, False)
         return _Outcome(text=f"Not run: {problem}.", ran=False, ok=False)
 
-    async def _observe(self) -> str:
-        """Read the page again after a web action, when the model can act on it."""
-        if not self.can_act_on_pages or self.registry.get("read_page_manifest") is None:
-            return ""
-        looked = await self.registry.call("read_page_manifest", {}, self.ctx)
+    async def _observe(self, observer: str) -> str:
+        """Look again after an action — the page, or the window of the app
+        just acted in (which needn't be the one in front)."""
+        arguments = {"app": self.app_in_use} if observer == "read_window" and self.app_in_use else {}
+        looked = await self.registry.call(observer, arguments, self.ctx)
         if not (looked.ok and looked.observation):
             return ""
         self.screen = looked.observation
         self.seen.add(looked.observation)
         listing = looked.for_model(PAGE_CHARS)
         self.latest = listing
-        self.privacy.check_call("read_page_manifest", "browser", None, looked.data)
+        category = self.registry.get(observer).spec.category
+        self.privacy.check_call(observer, category, None, looked.data)
         return listing
 
     # -- bookkeeping ----------------------------------------------------------------

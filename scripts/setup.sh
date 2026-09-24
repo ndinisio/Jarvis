@@ -61,6 +61,12 @@ if [ "${WITH_VOICE:-1}" = "1" ]; then
   fi
 fi
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  say "Installing Mac app control (Accessibility, genuine input, on-screen text)"
+  ./.venv/bin/pip install --quiet -e ".[native]" || \
+    warn "Native extras failed to install — app control will use AppleScript only."
+fi
+
 if [ "${WITH_BROWSER:-1}" = "1" ]; then
   say "Installing JARVIS's own browser support (Playwright)"
   if ./.venv/bin/pip install --quiet -e ".[browser]"; then

@@ -1,6 +1,6 @@
 [project]
 name = "jarvis-assistant"
-version = "3.0.dev5"
+version = "3.0.dev6"
 description = "JARVIS — a local-first, voice-driven AI operating layer for macOS"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -35,6 +35,16 @@ kokoro = [
 # without it.
 scroll = [
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+]
+# Mac apps as a surface (surfaces/native/): the Accessibility tree, genuine
+# key and mouse events, on-device text recognition, and the numbered-marks
+# overlay. setup.sh installs it on macOS; without it the app tools fall back
+# to AppleScript.
+native = [
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
+    "pillow>=10.1",
 ]
 # JARVIS's own browser, driven over the DevTools protocol (surfaces/web/cdp.py).
 browser = [

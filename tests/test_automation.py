@@ -16,7 +16,7 @@ import asyncio
 import json
 
 import pytest
-from jarvis.capabilities.automation import ALL_AUTOMATION_TOOLS, AutomationCapability
+from jarvis.capabilities.automation import CORE_TOOLS, AutomationCapability
 from jarvis.capabilities.base import Request
 from jarvis.core.errors import Cancelled
 from jarvis.intelligence.schema import Objective
@@ -286,7 +286,37 @@ async def test_an_errand_is_offered_the_toolkit_plus_what_its_objective_needs(ap
     assert "click_page_element" in tools and "browse_to" in tools
     assert "send_email" in tools or "draft_email" in tools, \
         "an errand that ends in an email needs the mail tools"
-    assert set(tools) >= {name for name in ALL_AUTOMATION_TOOLS if app.deps.registry.get(name)}
+    assert set(tools) >= {name for name in CORE_TOOLS if app.deps.registry.get(name)}
+
+
+async def test_an_errand_on_one_surface_is_not_offered_the_others_tools(app):
+    capability = AutomationCapability(app.deps)
+    web = capability.tools_for(Objective(goal="add AA batteries to my Amazon basket", surface="web"))
+    assert "click_page_element" in web and "click_control" not in web and "read_window" not in web
+    native = capability.tools_for(Objective(goal="make the title bold in Pages", surface="native"))
+    assert "choose_menu_item" in native and "click_page_element" not in native
+
+
+async def test_rarely_needed_tools_join_only_when_the_errand_calls_for_them(app):
+    capability = AutomationCapability(app.deps)
+    plain = capability.tools_for(Objective(goal="add AA batteries to my Amazon basket"))
+    assert "download_file" not in plain and "run_shell_command" not in plain
+    download = capability.tools_for(Objective(goal="download the latest VLC installer and install it"))
+    assert {"download_file", "run_installer"} <= set(download)
+
+
+async def test_the_toolkit_leaves_most_of_the_context_for_the_work(app):
+    """Every schema is sent on every step: on an 8k-token model even a wide
+    toolkit (no surface known, several extras) must leave most of the
+    window for the task itself."""
+    import json as _json
+
+    from jarvis.intelligence.operator.context import budget_for
+
+    tools = AutomationCapability(app.deps).tools_for(Objective(goal="sort out my downloads folder"))
+    size = sum(len(d.name) + len(d.description) + len(_json.dumps(d.parameters)) + 40
+               for d in app.deps.registry.tool_defs(tools))
+    assert size < budget_for(8192, 900) * 0.55
 
 
 # -- narration integration -----------------------------------------------------

@@ -199,6 +199,21 @@ Commands are passed as argv lists, never as shell strings, so there is no
 injection surface. Every method degrades on non-Darwin hosts, which is what
 keeps the test suite runnable anywhere.
 
+## Surfaces (`surfaces/`, v3.0)
+
+What the operator acts on, each listed for the model the same way — elements
+with short handles, the operator reading the view again after every action:
+
+* **Web** (`surfaces/web/`) — JARVIS's own Chrome over the DevTools protocol
+  (genuine input, network-aware settling) or the everyday browser over
+  AppleScript, chosen per task by the browser hub.
+* **Native** (`surfaces/native/`) — Mac apps through the Accessibility API:
+  `ax.py` turns a window into a bounded listing of `[axN]` controls, `input.py`
+  posts genuine key and mouse events (Quartz), `marks.py` reads a screenshot's
+  text with Apple's Vision framework and numbers what's clickable, and
+  `surface.py` owns the handles and the actions. `backend.py` is the only
+  module that imports PyObjC, and the only one the tests replace.
+
 ---
 
 ## Telemetry (`core/telemetry.py`)

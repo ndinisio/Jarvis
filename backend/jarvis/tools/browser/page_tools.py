@@ -61,10 +61,8 @@ def _now_on(result: dict[str, Any]) -> str:
 class ReadPageManifestTool(Tool):
     spec = ToolSpec(
         name="read_page_manifest",
-        description=(
-            "List the clickable, fillable and readable elements on the current web page, each "
-            "with a stable handle for a later click_page_element/fill_page_field/submit_page_form call"
-        ),
+        description=("List what's on the current web page to click, fill or read, each with a "
+                     "[handle] to act on"),
         parameters={
             "type": "object",
             "properties": {
@@ -79,7 +77,7 @@ class ReadPageManifestTool(Tool):
         category="browser",
         requires_network=False,
         expected_ms=1800,
-        returns="a list of {handle, role, text, name, href, value, rect} for each interactive element",
+        returns="the page's elements, each with a [handle], plus open dialogs and page text",
         examples=["what can I click on this page", "find the search box",
                  "list the products on this page"],
     )

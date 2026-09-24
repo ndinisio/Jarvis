@@ -21,6 +21,12 @@ tree could reorder between the search and the click, which is the same trade
 every one-shot click here already made.
 """
 
+# v3.0: when the native surface is available (macOS with the ``native`` extra,
+# Accessibility granted) these tools go through it — a search of the whole
+# window at any depth, genuine key events with the full key table, Unicode
+# typing that refuses password fields — and the AppleScript paths below
+# remain the fallback.
+
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +34,8 @@ import time
 from typing import Any
 
 from ...security.permissions import RiskLevel
+from ...surfaces.native import NativeError
+from ...surfaces.native.input import UnknownKey, resolve_key
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
 from ..macos.controller import MacOSController, _esc
 
@@ -122,6 +130,19 @@ class TypeTextTool(Tool):
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         text = args["text"]
         ctx.report(f"Typing “{text[:40]}”…", tool="type_text")
+        native = _native(self._deps)
+        if native is not None:
+            try:
+                target = await native.type_text(text)
+                if args.get("press_return"):
+                    await native.press_key(resolve_key("return"))
+            except NativeError as exc:
+                return ToolResult.failure(exc.message, detail=exc.detail)
+            return ToolResult(
+                data={"text": text, "application": target, "submitted": bool(args.get("press_return"))},
+                summary=f"Typed “{text[:60]}”" + (" and submitted it." if args.get("press_return")
+                                                  else f" into {target}." if target else "."),
+            )
         script = f'tell application "System Events" to keystroke "{_esc(text)}"'
         result = await self._deps.controller.osascript(script, timeout=20.0)
         if not result.ok:
@@ -143,13 +164,16 @@ class TypeTextTool(Tool):
 class PressKeyTool(Tool):
     spec = ToolSpec(
         name="press_key",
-        description="Press a key, optionally with modifiers, in the frontmost application",
+        description="Press a key or a shortcut in the frontmost application",
         parameters={
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "return, tab, escape, a letter…"},
+                "key": {"type": "string",
+                        "description": "return, tab, escape, f5, forward delete, down, a letter… "
+                                       "or a whole shortcut like cmd+shift+s"},
                 "modifiers": {"type": "array", "default": [],
-                              "description": "command, shift, option, control"},
+                              "description": "command, shift, option, control, fn"},
+                "repeat": {"type": "integer", "default": 1, "description": "press it this many times"},
             },
             "required": ["key"],
         },
@@ -173,6 +197,22 @@ class PressKeyTool(Tool):
         return {"application": app} if app else None
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        native = _native(self._deps)
+        if native is not None:
+            try:
+                stroke = resolve_key(str(args["key"]), list(args.get("modifiers") or []))
+            except UnknownKey as exc:
+                return ToolResult.failure(f"I don't know the key “{exc}”.",
+                                          detail="a named key (return, f5, down…) or a character")
+            repeat = max(1, min(int(args.get("repeat") or 1), 50))
+            try:
+                native.require_input()
+                await native.press_key(stroke, repeat)
+            except NativeError as exc:
+                return ToolResult.failure(exc.message, detail=exc.detail)
+            times = f" {repeat} times" if repeat > 1 else ""
+            return ToolResult(data={"key": stroke.name, "repeat": repeat},
+                              summary=f"Pressed {stroke.name}{times}.")
         key = str(args["key"]).strip().lower()
         modifiers = [MODIFIERS[m.strip().lower()] for m in (args.get("modifiers") or [])
                      if m.strip().lower() in MODIFIERS]
@@ -199,11 +239,8 @@ class PressKeyTool(Tool):
 class ClickElementTool(Tool):
     spec = ToolSpec(
         name="click_element",
-        description=(
-            "Click a named control (button, field, link…) in a window, addressed by its "
-            "accessibility name or description. Reports every match instead of guessing when "
-            "there's more than one — pass index to pick one"
-        ),
+        description=("Click a control in an app window by its name; if several match, they're "
+                     "listed — pass index to pick one"),
         parameters={
             "type": "object",
             "properties": {
@@ -242,6 +279,10 @@ class ClickElementTool(Tool):
         app = (args.get("app") or "").strip() or None
         window_index = args.get("window_index")
         ctx.report(f"Looking for “{label}”…", tool="click_element")
+
+        native = _native(self._deps)
+        if native is not None and window_index is None:
+            return await _click_natively(native, label, args.get("index"), app or "")
 
         index = args.get("index")
         if index is not None:
@@ -285,10 +326,7 @@ class ClickElementTool(Tool):
 class WaitForElementTool(Tool):
     spec = ToolSpec(
         name="wait_for_element",
-        description=(
-            "Poll a window until a named control appears (or stops being ambiguous), instead "
-            "of guessing a fixed delay before clicking it"
-        ),
+        description="Wait until a control with this name appears in an app window",
         parameters={
             "type": "object",
             "properties": {
@@ -318,10 +356,22 @@ class WaitForElementTool(Tool):
         started = time.monotonic()
         poll_interval = 0.5
 
+        native = _native(self._deps)
         while True:
             ctx.raise_if_cancelled()
-            status, candidates = await _find_elements(self._deps.controller, label,
-                                                       app=app, window_index=window_index)
+            if native is not None and window_index is None:
+                try:
+                    found = await native.find(label, app or "")
+                except NativeError as exc:
+                    if exc.wrong_tool:
+                        return ToolResult.failure(exc.message, detail=exc.detail)
+                    found = []
+                status = "ok"
+                candidates = [{"role": c.role, "name": c.label, "description": "", "handle": c.handle}
+                              for c in found]
+            else:
+                status, candidates = await _find_elements(self._deps.controller, label,
+                                                           app=app, window_index=window_index)
             if status == "error":
                 return ToolResult.failure(_PERMISSION_HINT)
             if status == "noapp":
@@ -350,6 +400,8 @@ class ScrollTool(Tool):
                 "direction": {"type": "string", "enum": ["up", "down", "top", "bottom"], "default": "down"},
                 "amount": {"type": "integer", "default": 1,
                           "description": "repeats for up/down; ignored for top/bottom"},
+                "handle": {"type": "string", "default": "",
+                           "description": "an [axN] handle from read_window: scroll that list or pane"},
             },
         },
         risk=RiskLevel.LOW,
@@ -375,6 +427,14 @@ class ScrollTool(Tool):
         if key is None:
             return ToolResult.failure(f"I don't know the scroll direction “{direction}”.")
         repeats = 1 if direction in ("top", "bottom") else max(1, min(int(args.get("amount") or 1), 20))
+
+        handle = str(args.get("handle") or "").strip()
+        native = _native(self._deps)
+        if handle and native is not None:
+            try:
+                await native.scroll_to(handle)      # the pointer over it: the scroll goes there
+            except NativeError as exc:
+                return ToolResult.failure(exc.message, detail=exc.detail)
 
         if direction in ("up", "down"):
             from . import scroll_quartz
@@ -637,6 +697,50 @@ def _click_outcome(output: str, label: str) -> ToolResult:
     if output.startswith("ERROR:"):
         return ToolResult.failure(_PERMISSION_HINT, detail=output[len("ERROR:"):])
     return ToolResult.failure("The click didn't complete as expected.", detail=output)  # pragma: no cover
+
+
+def _native(deps):
+    """The native surface, when it can work here; None means AppleScript."""
+    native = getattr(deps, "native", None)
+    try:
+        return native if native is not None and native.available() else None
+    except Exception:
+        return None
+
+
+async def _click_natively(native, label: str, index: Any, app: str) -> ToolResult:
+    """click_element over the whole accessibility tree: every depth, with
+    the same never-guess rule — several matches are reported, and an index
+    picks one."""
+    try:
+        controls = await native.find(label, app)
+    except NativeError as exc:
+        return ToolResult.failure(exc.message, detail=exc.detail, wrong_tool=exc.wrong_tool)
+    if not controls:
+        return ToolResult.failure(
+            f"I couldn't find a control called “{label}” in the front window.",
+            detail="no accessibility element matched by name", wrong_tool=True)
+    if index is None and len(controls) > 1:
+        listing = "; ".join(f"{i}: {c.role} “{c.label or '(unnamed)'}” [{c.handle}]"
+                            for i, c in enumerate(controls[:12]))
+        return ToolResult(
+            ok=False,
+            data={"candidates": [{"role": c.role, "name": c.label, "description": "",
+                                  "handle": c.handle} for c in controls]},
+            summary=f"I found {len(controls)} controls matching “{label}” — {listing}. "
+                    "Call again with an index to pick one (or click_control with its handle).",
+        )
+    position = int(index or 0)
+    if not 0 <= position < len(controls):
+        return ToolResult.failure(
+            f"There are only {len(controls)} matches for “{label}” now — the window may have changed.")
+    target = controls[position]
+    try:
+        summary = await native.press(target.handle)
+    except NativeError as exc:
+        return ToolResult.failure(exc.message, detail=exc.detail)
+    return ToolResult(data={"label": label, "matched": target.label, "handle": target.handle},
+                      summary=summary)
 
 
 def interaction_tools(deps) -> list[Tool]:

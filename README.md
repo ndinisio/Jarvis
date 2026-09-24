@@ -125,9 +125,15 @@ of what anyone actually says.
   A failed check goes straight back to the operator as part of the result.
 - **Structured output** (`schema.py`) — every decision is validated Pydantic, with
   a repair pass for the near-misses small models make. Nothing is regex-scraped.
-- **Interaction tools** (`tools/interaction/`) — `click_element`, `type_text`,
-  `press_key`, `get_frontmost_app`, so seeing the screen and acting on it are the
-  same conversation. Semantic, by accessibility label — never guessed coordinates.
+- **App control** (`surfaces/native/`, `tools/native/`, v3.0) — any Mac app's
+  front window as a list of controls with `[axN]` handles, read from the
+  Accessibility tree at every depth (buttons, fields, rows named by what they
+  show, tabs, sheets first); pressing, typing, choosing options and menu items
+  by path (`["File", "Export as PDF…"]`), dragging; genuine key and mouse
+  events with the full key table and Unicode typing; and, for windows that
+  show Accessibility nothing, the window's text read off a screenshot with
+  Apple's on-device Vision and numbered for `click_mark`. Never guessed
+  coordinates; never a password field.
 - **Model roles** — `fast`, `general`, `reasoning`, `vision`, `specialist`. The
   last two are optional: an unconfigured slot *defers* (`specialist` → `reasoning`
   → `general`), so the roles exist in the code from day one and upgrading one is
@@ -641,9 +647,9 @@ reason stated. Nothing is requested for a capability you have switched off.
 | Permission | Needed for | Where |
 | --- | --- | --- |
 | **Microphone** | wake word and speech | Privacy & Security → Microphone |
-| **Screen Recording** | "What's on my screen?" | Privacy & Security → Screen Recording |
+| **Screen Recording** | "What's on my screen?", reading text off app windows | Privacy & Security → Screen Recording |
 | **Automation** | Safari, Mail, Calendar control | Privacy & Security → Automation |
-| **Accessibility** | window titles, focusing apps, **clicking and typing** (V1.2) | Privacy & Security → Accessibility |
+| **Accessibility** | reading app windows, **clicking, typing and menus** | Privacy & Security → Accessibility |
 | **Mail / Calendars** | reading mail and events | Privacy & Security → Mail, Calendars |
 
 The first AppleScript call to Mail or Calendar triggers the system prompt —
@@ -1175,13 +1181,16 @@ actually does — how often it picks the right tool, and what a turn really cost
 in seconds on an M-series Mac — is what `scripts/bench_all.sh` measures on your
 hardware (see [`evals/`](evals/README.md)); those runs are still to be done.
 
-**The UI interaction tools are unverified on hardware.** `click_element`,
-`type_text` and `press_key` use System Events and the Accessibility API. They
-are correct AppleScript and they fail with a clear message when Accessibility
-permission is missing, but no test in this repository has clicked a real button
-on a real Mac. Element lookup is bounded to the front window and matches by
-accessibility name or description; applications that don't label their controls
-won't be reachable this way.
+**App control is tested against a model of the Accessibility API, not a Mac.**
+Everything JARVIS decides about a window — what's listed and how, which element
+a handle means, what gets pressed, typed or refused, which menu items and
+buttons always ask — is tested in CI against a fake accessibility tree, and the
+PyObjC calls underneath follow Apple's documented API; but this repository's CI
+runs on Linux, so no test here has pressed a real button. On your Mac,
+`.venv/bin/python scripts/check_native.py` reads the front window, its menus
+and a screenshot's text for real, and `--act` runs a TextEdit round trip
+(type, bold from the Format menu, close without saving). Without the `native`
+extra the app tools fall back to the v2 AppleScript paths.
 
 **Other current limits**
 

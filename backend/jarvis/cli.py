@@ -230,6 +230,17 @@ async def _doctor(config_path: str | None) -> int:
             mark = "✓" if entry["granted"] else "✗"
             print(f"  {mark} {entry['label']:<16} {entry['why']}")
         print()
+        print("App control")
+        native = jarvis.deps.native
+        if native is not None and native.available():
+            trusted = native.backend.trusted()
+            mark = "✓" if trusted else "✗"
+            print(f"  {mark} accessibility tree, genuine input, on-screen text"
+                  + ("" if trusted else " — needs Accessibility (see above)"))
+        else:
+            print("  ✗ native extras not installed — app control uses AppleScript only "
+                  "(pip install -e '.[native]')")
+        print()
 
     print(f"Tools: {sum(len(v) for v in status['tools'].values())} registered across "
           f"{len(status['tools'])} categories")

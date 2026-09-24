@@ -502,6 +502,8 @@ def test_the_registry_offers_compact_tool_schemas(app):
     text = json.dumps(definition.parameters)
     assert '"default"' not in text
     assert "handle" in definition.parameters["properties"]
+    assert "browser" not in definition.parameters["properties"], \
+        "escape-hatch arguments stay out of the model's way"
 
 
 async def test_a_declined_confirmation_is_never_retried_by_the_errand_either(app, fake_provider,

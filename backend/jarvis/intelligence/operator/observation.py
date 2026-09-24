@@ -15,11 +15,29 @@ from __future__ import annotations
 
 import re
 
-#: Web actions after which the page is looked at again automatically.
-OBSERVE_AFTER = frozenset({
+#: Web actions after which the page is looked at again automatically…
+WEB_ACTIONS = frozenset({
     "browse_to", "open_url", "click_page_element", "fill_page_field", "submit_page_form",
     "press_page_key", "scroll_page", "page_go_back", "wait_for_page", "ask_user_to_take_over",
 })
+#: …and app actions after which the app's window is.
+APP_ACTIONS = frozenset({
+    "click_control", "type_into", "choose_option", "choose_menu_item", "drag_control",
+    "click_mark", "click_element", "press_key", "type_text", "scroll", "open_application",
+    "activate_application",
+})
+OBSERVE_AFTER = WEB_ACTIONS | APP_ACTIONS
+
+#: The tool that looks again, the actions that call for it, and the tools
+#: that make looking worthwhile — reading a page whose elements the model
+#: has no tool to act on only fills the context.
+OBSERVERS: dict[str, tuple[frozenset[str], frozenset[str], str]] = {
+    "read_page_manifest": (WEB_ACTIONS, frozenset({
+        "click_page_element", "fill_page_field", "submit_page_form", "press_page_key"}),
+        "The page now"),
+    "read_window": (APP_ACTIONS, frozenset({
+        "click_control", "type_into", "choose_option", "drag_control"}), "The window now"),
+}
 
 #: Words that carry no evidence on their own.
 _STOPWORDS = frozenset({

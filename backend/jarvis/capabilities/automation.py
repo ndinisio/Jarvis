@@ -50,28 +50,39 @@ What happened (most recent last):
 {ending}
 Answer directly. Do not describe your process or mention tool names."""
 
-#: The errand toolkit, always offered: operating web pages and apps, reading
-#: the web and the screen, files. Anything else an errand needs (mail, notes,
-#: the calendar…) joins it from the same shortlist a foreground turn uses.
+#: The errand toolkit. The core of each surface is always offered; the rest
+#: joins when the errand says it involves it (see _ERRAND_EXTRAS) — every
+#: schema offered is paid for on every step, and a small model chooses
+#: better from fewer.
 WEB_TOOLS: tuple[str, ...] = (
-    "browse_to", "get_current_page", "list_browser_tabs", "read_page_manifest",
-    "click_page_element", "fill_page_field", "submit_page_form", "press_page_key",
-    "scroll_page", "page_go_back", "wait_for_page", "ask_user_to_take_over",
+    "browse_to", "read_page_manifest", "click_page_element", "fill_page_field",
+    "submit_page_form", "press_page_key", "scroll_page", "page_go_back", "wait_for_page",
+    "ask_user_to_take_over",
 )
 NATIVE_TOOLS: tuple[str, ...] = (
-    "open_application", "activate_application", "get_frontmost_app", "list_windows",
-    "click_element", "type_text", "press_key", "wait_for_element", "scroll",
+    "open_application", "activate_application", "read_window", "click_control", "type_into",
+    "choose_option", "choose_menu_item", "press_key", "type_text", "scroll",
+    # By name, no handle needed — and it still works (through AppleScript)
+    # on a Mac without the native extras.
+    "click_element",
+    # When a window shows Accessibility nothing: read it off a screenshot.
+    "mark_screen", "click_mark",
 )
-READ_TOOLS: tuple[str, ...] = (
-    "search_web", "fetch_page", "fetch_pages", "capture_screen", "analyse_screen",
+READ_TOOLS: tuple[str, ...] = ("search_web", "fetch_page")
+#: Joined by what the errand mentions.
+EXTENDED_TOOLS: tuple[str, ...] = (
+    "get_current_page", "list_browser_tabs", "get_frontmost_app", "list_windows",
+    "wait_for_element", "drag_control", "find_on_screen", "fetch_pages", "capture_screen",
+    "analyse_screen", "run_shell_command", "download_file", "run_installer",
 )
-SHELL_TOOLS: tuple[str, ...] = ("run_shell_command",)
-DOWNLOAD_TOOLS: tuple[str, ...] = ("download_file",)
-INSTALL_TOOLS: tuple[str, ...] = ("run_installer",)
 
-ALL_AUTOMATION_TOOLS: tuple[str, ...] = (
-    WEB_TOOLS + NATIVE_TOOLS + READ_TOOLS + SHELL_TOOLS + DOWNLOAD_TOOLS + INSTALL_TOOLS
-)
+ALL_AUTOMATION_TOOLS: tuple[str, ...] = WEB_TOOLS + NATIVE_TOOLS + READ_TOOLS + EXTENDED_TOOLS
+#: The core toolkit, by where the interpreter says the work happens.
+SURFACE_TOOLS: dict[str, tuple[str, ...]] = {
+    "web": WEB_TOOLS + READ_TOOLS + ("open_application", "activate_application"),
+    "native": NATIVE_TOOLS + READ_TOOLS + ("browse_to",),
+}
+CORE_TOOLS: tuple[str, ...] = WEB_TOOLS + NATIVE_TOOLS + READ_TOOLS
 
 #: What an errand says it involves → the tools that involves, beyond the
 #: toolkit. Word starts, so "remind" covers "reminder" and "remind me".
@@ -93,6 +104,16 @@ _ERRAND_EXTRAS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("music", "song", "playlist", "album", "volume"), ("media_control", "set_volume")),
     (("dark mode", "light mode", "appearance"), ("set_appearance",)),
     (("notif",), ("send_notification",)),
+    (("download",), ("download_file",)),
+    (("install", "setup", "set up"), ("download_file", "run_installer")),
+    (("drag", "move", "folder"), ("drag_control",)),
+    (("tab",), ("list_browser_tabs", "get_current_page")),
+    (("window",), ("list_windows", "get_frontmost_app")),
+    (("screen", "look at", "what's showing", "icon", "picture"),
+     ("analyse_screen", "capture_screen", "find_on_screen")),
+    (("terminal", "command", "shell", "script", "git ", "brew", "npm", "pip "), ("run_shell_command",)),
+    (("compare", "research", "reviews", "best"), ("fetch_pages",)),
+    (("wait", "load", "appear"), ("wait_for_element",)),
 )
 #: Extra tools taken from the objective's shortlist, for anything else.
 _SHORTLIST_EXTRAS = 4
@@ -161,7 +182,7 @@ class AutomationCapability(Capability):
         errand that mentions email gets the mail tools, one that mentions a
         reminder gets those, and the objective's own best matches join them.
         """
-        wanted = list(ALL_AUTOMATION_TOOLS)
+        wanted = list(SURFACE_TOOLS.get((objective.surface or "").strip().lower(), CORE_TOOLS))
         about = " ".join([objective.goal, objective.kind, objective.app, objective.site,
                           *objective.targets, *objective.constraints]).lower()
         for words, tools in _ERRAND_EXTRAS:

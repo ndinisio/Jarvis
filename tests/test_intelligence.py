@@ -1623,9 +1623,8 @@ async def test_stop_reaches_an_action_already_under_way_in_the_foreground(app, b
     brain.queues.clear()
     assert stop.text, "the stop is acknowledged"
     assert calls == [1], "nothing more may run once the user has said stop"
-    from jarvis.core.personality import CANCELLED
-
-    assert result.text in CANCELLED
+    assert result.text == result.spoken, "what's shown and what's said are the same phrase"
+    assert result.text.rstrip(".").removesuffix(", sir") in {"Stopped", "Cancelled", "I've halted that"}
 
 
 async def test_an_errand_that_asks_a_question_resumes_with_the_answer(app, brain, monkeypatch):

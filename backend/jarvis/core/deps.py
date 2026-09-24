@@ -45,6 +45,8 @@ class Deps:
     voice: Any = None  # VoiceManager | None, filled in after tools are built (see core/app.py)
     #: BrowserHub — which browser a web action goes to (surfaces/web/hub.py).
     browsers: Any = None
+    #: NativeSurface — Mac apps through Accessibility (surfaces/native/).
+    native: Any = None
 
     @property
     def config(self) -> Config:

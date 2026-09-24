@@ -233,11 +233,12 @@ class IntelligenceAgent:
 
         operator = Operator(self.deps, slot=Slot.OPERATOR, trace=trace)
         context = ctx if ctx is not None else self.deps.tool_context()
+        tools = _with_companions([card.name for card in cards], self.deps.registry)
         budget = Budget(steps=self.max_steps, wall_s=max(60.0, 20.0 * self.max_steps),
                         model_calls=self.max_steps + 4)
         with self.deps.telemetry.span("intelligence.operate"):
             return await operator.run(
-                objective.goal or text, context, tools=[card.name for card in cards],
+                objective.goal or text, context, tools=tools,
                 objective=objective, budget=budget, background=False, said=text,
                 situation=self.state.describe_for_model(include_turns=2),
                 context=self._context, state=self.state, before=before, vet=vet)
@@ -412,6 +413,26 @@ def _quick_route(triage, text: str):
         return None
     decision.reason = f"interpreted as “{command[:60]}”"
     return decision
+
+
+#: A tool that acts on handles is no use without the tool that shows them,
+#: and the handle-based app tools are what a label-based one really wants.
+_COMPANIONS: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
+    (frozenset({"click_page_element", "fill_page_field", "submit_page_form", "press_page_key",
+                "scroll_page"}), ("read_page_manifest",)),
+    (frozenset({"click_element", "click_control", "type_into", "choose_option", "drag_control",
+                "choose_menu_item", "wait_for_element"}),
+     ("read_window", "click_control", "type_into", "choose_menu_item")),
+    (frozenset({"click_mark", "find_on_screen"}), ("mark_screen", "click_mark")),
+)
+
+
+def _with_companions(tools: list[str], registry) -> list[str]:
+    out = list(tools)
+    for triggers, companions in _COMPANIONS:
+        if any(tool in triggers for tool in tools):
+            out.extend(c for c in companions if c not in out and registry.get(c) is not None)
+    return out
 
 
 def _changes_state(cards: list[ToolCard]) -> bool:

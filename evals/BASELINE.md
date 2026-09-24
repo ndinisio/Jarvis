@@ -182,3 +182,39 @@ What changed:
 - Budgets: `automation.max_steps` 50, `max_wall_s` 600, `max_model_calls` 80
   (replacing per-milestone steps).
 
+
+## Phase 6 — Mac apps as a surface
+
+**Web tasks, oracle: 42 / 42; every phrasing: 72 / 72**, unchanged, at the
+same cost (5.5 model calls per task) — with a smaller toolkit: an errand is
+now offered its surface's core tools, and the rest join only when the errand
+mentions them (a download, an installer, a terminal command).
+
+What changed:
+
+- **App windows, fully.** v2's native tools searched a window's *direct
+  children* through System Events — anything inside a toolbar, split view or
+  scroll view was out of reach. The new native surface reads the whole
+  Accessibility tree (bounded by depth, nodes and time), lists every control
+  with an `[axN]` handle, names table rows by the text inside them, lists
+  only a big table's visible rows, walks past scroll bars and layout
+  containers, and puts a sheet or dialog — and its buttons — first.
+- **Acting on handles:** `click_control` (the accessibility press where the
+  control has one, a genuine click at its centre where it doesn't),
+  `type_into`, `choose_option`, `choose_menu_item` by path, `drag_control`.
+  A wrong menu path answers with what the menu does contain.
+- **Genuine input:** the full key table (F-keys, forward delete, chords
+  like cmd+shift+s), Unicode typing independent of keyboard layout, long text
+  pasted with the clipboard put back exactly as it was.
+- **Numbered marks** for windows that show Accessibility nothing: the window
+  is photographed, its text read on-device (Vision), and everything worth
+  pointing at numbered; a vision model can pick a number for an icon.
+- **Safety:** the consequence check reads the real control ("Move to Trash",
+  "Empty Trash…", "Erase", "Install", "Don't Save", "Shut Down" always ask,
+  whatever the model called them); password fields are refused.
+- The operator reads the window again after each app action, in the app it
+  acted in.
+
+This is tested against a fake accessibility tree (42 tests; each guard proven
+by reverting it). `scripts/check_native.py` runs the real thing on a Mac.
+

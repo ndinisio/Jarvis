@@ -47,7 +47,11 @@ _CONSEQUENTIAL_PATTERN = re.compile(
     r"buy(\s*it)?(\s*now)?|purchase|order\s*now|pay(\s*now)?|"
     r"place\s*(your\s*)?order|confirm\s*(purchase|order)|complete\s*(order|purchase)|"
     r"submit\s*(payment|order)|check\s*out|checkout|proceed\s*to\s*(payment|checkout)|"
-    r"delete|remove\s*permanently|send"
+    r"delete|remove\s*permanently|send|"
+    # Native apps: moving to or emptying the Trash, erasing a disk, installing,
+    # throwing away unsaved work, shutting the Mac down.
+    r"(move\s*to\s*|empty\s*)?trash|erase|(un)?install|discard(\s*changes)?|don['’]?t\s*save|"
+    r"publish|shut\s*down|restart"
     r")\b",
     re.IGNORECASE,
 )
@@ -61,8 +65,9 @@ _CONSEQUENTIAL_PATH = re.compile(
 #: Navigation tools whose destination URL is checked against the above.
 _NAVIGATION_TOOLS = {"browse_to", "open_url"}
 
-#: Tools that deliver keyboard/mouse input to whatever app is frontmost.
-_NATIVE_INPUT_TOOLS = {"type_text", "press_key", "click_element"}
+#: Tools that deliver keyboard/mouse input to an app.
+_NATIVE_INPUT_TOOLS = {"type_text", "press_key", "click_element", "click_control", "type_into",
+                       "choose_option", "choose_menu_item", "drag_control", "click_mark"}
 
 #: Apps where typed input is itself a command, a credential or a system change.
 SENSITIVE_APPS = {
@@ -83,7 +88,8 @@ _TARGET_KEYS = ("text", "label", "value", "id", "name", "title")
 #: checkbox labelled "Send the invoice" on a to-do list sends nothing; the
 #: button that submits the choice is what gets judged.
 _STATE_ROLES = {"checkbox", "radio", "switch", "field", "select", "option", "tab", "combobox",
-                "textbox", "searchbox"}
+                "textbox", "searchbox", "search field", "text area", "slider", "stepper",
+                "date field", "time field"}
 
 
 def classify(tool_name: str, arguments: dict[str, Any], spec: Any,

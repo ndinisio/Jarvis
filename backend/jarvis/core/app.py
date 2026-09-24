@@ -17,6 +17,7 @@ from ..memory.store import MemoryStore
 from ..models.registry import ModelRouter, Slot
 from ..router.router import Router
 from ..security.permissions import PermissionBroker
+from ..surfaces.native import NativeSurface
 from ..surfaces.web.hub import BrowserHub
 from ..tasks.manager import TaskManager
 from ..tools.files.sandbox import FileSandbox
@@ -73,6 +74,7 @@ class JarvisApp:
         )
         # Which browser each web action goes to; JARVIS Chrome starts on first use.
         self.deps.browsers = BrowserHub(self.deps)
+        self.deps.native = NativeSurface(self.deps)
         self.deps.registry = build_registry(self.deps)
         self.capabilities = build_capabilities(self.deps)
         self.personality = Personality(config)

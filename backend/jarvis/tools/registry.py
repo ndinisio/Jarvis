@@ -106,10 +106,10 @@ class ToolRegistry:
                 continue
             spec = tool.spec
             description = spec.description.strip()
-            if spec.returns:
+            if spec.returns and len(description) + len(spec.returns) <= 190:
                 description = f"{description.rstrip('.')}. Returns {spec.returns}."
             defs.append(ToolDef(name=spec.name, description=description,
-                                parameters=_compact_schema(spec.parameters)))
+                                parameters=_model_schema(spec.parameters)))
         return defs
 
     # -- execution ---------------------------------------------------------
@@ -219,6 +219,12 @@ class ToolRegistry:
 _SCHEMA_NOISE = {"default", "examples", "example", "title", "$schema"}
 
 
+#: Arguments a tool still accepts but the model is never offered: escape
+#: hatches (which browser, which window by number) and paging knobs whose
+#: defaults are right. Each costs characters on every step of every task.
+_HIDDEN_ARGUMENTS = {"browser", "window_index", "roles", "limit"}
+
+
 def _compact_schema(schema: Any) -> Any:
     if isinstance(schema, dict):
         return {key: _compact_schema(value) for key, value in schema.items()
@@ -226,6 +232,16 @@ def _compact_schema(schema: Any) -> Any:
     if isinstance(schema, list):
         return [_compact_schema(value) for value in schema]
     return schema
+
+
+def _model_schema(parameters: dict[str, Any]) -> dict[str, Any]:
+    compact = _compact_schema(parameters)
+    properties = compact.get("properties")
+    if isinstance(properties, dict):
+        compact["properties"] = {k: v for k, v in properties.items() if k not in _HIDDEN_ARGUMENTS}
+        if isinstance(compact.get("required"), list):
+            compact["required"] = [r for r in compact["required"] if r not in _HIDDEN_ARGUMENTS]
+    return compact
 
 
 _SENSITIVE_KEYS = {"password", "token", "api_key", "secret", "passphrase"}
@@ -273,6 +289,7 @@ def build_registry(deps) -> ToolRegistry:
     from .macos.everyday import everyday_tools
     from .macos.tools import macos_tools
     from .messages.tools import messages_tools
+    from .native.tools import native_tools
     from .reminders.tools import reminders_tools
     from .screen.tools import screen_tools
     from .system.tools import system_tools
@@ -294,6 +311,7 @@ def build_registry(deps) -> ToolRegistry:
         registry.register_all(screen_tools(deps))
         # Seeing the screen is only useful if JARVIS can also act on it.
         registry.register_all(interaction_tools(deps))
+        registry.register_all(native_tools(deps))
     if caps.browser:
         registry.register_all(browser_tools(deps))
         if caps.automation:
