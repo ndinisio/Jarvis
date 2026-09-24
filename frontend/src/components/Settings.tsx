@@ -28,6 +28,7 @@ export function Settings() {
   const [saving, setSaving] = useState(false)
   const [voices, setVoices] = useState<{ name: string; locale: string }[]>([])
   const [models, setModels] = useState<string[]>([])
+  const [skills, setSkills] = useState<SkillRow[]>([])
 
   useEffect(() => {
     if (show && config) setDraft(JSON.parse(JSON.stringify(config)))
@@ -40,7 +41,13 @@ export function Settings() {
       const installed = Object.values(d.providers ?? {}).flatMap((p: any) => p.models ?? [])
       setModels(installed as string[])
     }).catch(() => {})
+    apiFetch('/api/skills').then((r) => r.json()).then((d) => setSkills(d.skills ?? [])).catch(() => {})
   }, [show])
+
+  const forget = async (id: string) => {
+    const response = await apiFetch(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (response.ok) setSkills((current) => current.filter((skill) => skill.id !== id))
+  }
 
   if (!show || !draft) return null
 
@@ -181,6 +188,30 @@ export function Settings() {
                     onChange={(v) => set(['intelligence', 'trace'], v)} />
           </Group>
 
+          <Group title="Skills">
+            <Toggle label="Use recipes for common errands" value={draft.skills?.enabled ?? true}
+                    onChange={(v) => set(['skills', 'enabled'], v)} />
+            <Toggle label="Learn recipes from errands that worked" value={draft.skills?.learn ?? true}
+                    onChange={(v) => set(['skills', 'learn'], v)} />
+            {skills.filter((skill) => skill.source === 'learned').length === 0 ? (
+              <p className="sheet__hint">No learned recipes yet. {skills.length} built in.</p>
+            ) : (
+              <ul className="skills">
+                {skills.filter((skill) => skill.source === 'learned').map((skill) => (
+                  <li key={skill.id} data-set-aside={skill.set_aside}>
+                    <span className="skills__title">{skill.title.replace(/^Learned: /, '')}</span>
+                    <span className="skills__meta">
+                      {[...skill.sites, ...skill.apps].join(', ')}
+                      {skill.uses ? ` · used ${skill.uses}×` : ''}
+                      {skill.set_aside ? ' · set aside (kept failing)' : ''}
+                    </span>
+                    <button className="skills__forget" onClick={() => forget(skill.id)}>Forget</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Group>
+
           <Group title="Capabilities">
             {Object.entries(draft.capabilities).map(([key, value]) => (
               <Toggle key={key} label={key} value={Boolean(value)}
@@ -247,6 +278,16 @@ function Toggle({ label, value, onChange }: {
 }
 
 /** API keys live in the environment, never in the config file. */
+interface SkillRow {
+  id: string
+  title: string
+  source: 'builtin' | 'learned'
+  sites: string[]
+  apps: string[]
+  uses: number
+  set_aside: boolean
+}
+
 function stripSecrets(draft: any) {
   const clone = JSON.parse(JSON.stringify(draft))
   for (const provider of Object.values<any>(clone.models?.providers ?? {})) {

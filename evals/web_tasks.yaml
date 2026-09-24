@@ -13,6 +13,7 @@ tasks:
   # ------------------------------------------------------------------ shopping
   - id: shop-usb-cable
     category: shop
+    understood: {site: amazon.co.uk, targets: [usb c cable], surface: web}
     phrasings:
       - Search for a USB-C cable on Amazon and add it to my basket
       - can you find me a usb c cable on amazon and pop it in my basket
@@ -28,6 +29,7 @@ tasks:
 
   - id: shop-aa-batteries
     category: shop
+    understood: {site: amazon.co.uk, targets: [AA batteries], surface: web}
     phrasings:
       - Add a pack of AA batteries to my Amazon basket
       - I need some AA batteries, put a pack in my amazon basket
@@ -41,6 +43,7 @@ tasks:
 
   - id: shop-hdmi
     category: shop
+    understood: {site: amazon.co.uk, targets: [HDMI cable], surface: web}
     phrasings:
       - Put an HDMI cable in my Amazon basket
       - grab me an hdmi lead on amazon, just add it to the basket
@@ -53,6 +56,7 @@ tasks:
 
   - id: shop-lamp
     category: shop
+    understood: {site: amazon.co.uk, targets: [desk lamp], surface: web}
     phrasings:
       - Find a desk lamp on Amazon and add it to the basket
       - my desk is too dark, can you add a desk lamp to my amazon basket
@@ -65,6 +69,7 @@ tasks:
 
   - id: shop-notebook
     category: shop
+    understood: {site: amazon.co.uk, targets: [dotted A5 notebook], surface: web}
     phrasings:
       - add a dotted A5 notebook to my basket on amazon
       - I'm out of notebooks — put an A5 dotted one in my Amazon basket
@@ -77,6 +82,7 @@ tasks:
 
   - id: shop-earbuds
     category: shop
+    understood: {site: amazon.co.uk, targets: [noise cancelling earbuds], surface: web}
     phrasings:
       - add the noise cancelling earbuds to my amazon basket, don't buy them yet
       - stick the noise-cancelling earbuds in my Amazon basket so I can think about it

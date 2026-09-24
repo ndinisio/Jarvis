@@ -27,6 +27,9 @@ class WebTask:
     tags: list[str] = field(default_factory=list)
     #: Which phase of v3.0 is expected to make this pass (informational).
     target_phase: int = 1
+    #: What a competent interpreter would extract whatever the phrasing — the
+    #: thing it's about, the site — which lets a skill run without a model.
+    understood: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -58,6 +61,7 @@ def load_web_tasks(path: Path | None = None) -> list[WebTask]:
             phrasings=list(raw["phrasings"]), checks=list(raw.get("checks", [])),
             setup=raw.get("setup") or {}, start_url=raw.get("start_url", ""),
             approve=list(raw.get("approve", [])), oracle=list(raw.get("oracle", [])),
+            understood=dict(raw.get("understood") or {}),
             tags=list(raw.get("tags", [])), target_phase=int(raw.get("target_phase", 1)),
         ))
     ids = [t.id for t in tasks]

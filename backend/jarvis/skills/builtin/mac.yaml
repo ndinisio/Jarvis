@@ -1,0 +1,111 @@
+# Mac apps and settings. URL schemes open the right place directly — no
+# clicking through menus, no model needed.
+skills:
+  - id: maps-directions
+    title: Get directions in Maps
+    description: Open Apple Maps with directions to a place.
+    apps: [maps]
+    implied: true
+    words: [directions, "route to", "navigate to", "drive to", "walk to", "cycle to"]
+    params:
+      destination: {description: where to go, from: target}
+    steps:
+      - open: "maps://?daddr={destination|url}"
+    summary: "Here are directions to {destination} in Maps."
+
+  - id: maps-find
+    title: Find a place in Maps
+    description: Show a place or a kind of place in Apple Maps.
+    apps: [maps]
+    words: [find, show, where, nearby, "near me", map]
+    params:
+      query: {description: the place, from: target}
+    steps:
+      - open: "maps://?q={query|url}"
+    summary: "Here's {query} in Maps."
+
+  - id: textedit-new-document
+    title: Write a new TextEdit document
+    description: Open TextEdit, start a new document, and type the text into it.
+    apps: [textedit]
+    words: [write, new, document, type, note]
+    surface: native
+    params:
+      text: {description: what to write}
+    steps:
+      - app: TextEdit
+      - menu: [File, New]
+      - type: "{text}"
+    summary: "I've written that in a new TextEdit document."
+
+  - id: settings-wifi
+    title: Open Wi-Fi settings
+    description: Open the Wi-Fi pane of System Settings.
+    apps: [settings, preferences]
+    words: [wifi, wi-fi, wireless, network]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.wifi-settings-extension"
+    summary: "Wi-Fi settings are open."
+
+  - id: settings-bluetooth
+    title: Open Bluetooth settings
+    description: Open the Bluetooth pane of System Settings.
+    apps: [settings, preferences]
+    words: [bluetooth, headphones, airpods, pair]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.BluetoothSettings"
+    summary: "Bluetooth settings are open."
+
+  - id: settings-displays
+    title: Open Displays settings
+    description: Open the Displays pane of System Settings.
+    apps: [settings, preferences]
+    words: [display, displays, screen, resolution, monitor, brightness]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.Displays-Settings.extension"
+    summary: "Display settings are open."
+
+  - id: settings-sound
+    title: Open Sound settings
+    description: Open the Sound pane of System Settings.
+    apps: [settings, preferences]
+    words: [sound, audio, speaker, microphone, output, input]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.Sound-Settings.extension"
+    summary: "Sound settings are open."
+
+  - id: settings-notifications
+    title: Open Notifications settings
+    description: Open the Notifications pane of System Settings.
+    apps: [settings, preferences]
+    words: [notification, notifications, alerts, banners]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+    summary: "Notification settings are open."
+
+  - id: settings-privacy
+    title: Open Privacy & Security settings
+    description: Open Privacy & Security in System Settings (where Accessibility and Screen Recording are allowed).
+    apps: [settings, preferences]
+    words: [privacy, security, permission, permissions, accessibility, "screen recording"]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+    summary: "Privacy & Security settings are open."
+
+  - id: settings-battery
+    title: Open Battery settings
+    description: Open the Battery pane of System Settings.
+    apps: [settings, preferences]
+    words: [battery, power, "low power", energy]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.Battery-Settings.extension"
+    summary: "Battery settings are open."
+
+  - id: settings-keyboard
+    title: Open Keyboard settings
+    description: Open the Keyboard pane of System Settings.
+    apps: [settings, preferences]
+    words: [keyboard, shortcuts, "input sources", dictation]
+    steps:
+      - open: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
+    summary: "Keyboard settings are open."

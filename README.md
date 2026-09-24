@@ -134,6 +134,11 @@ of what anyone actually says.
   show Accessibility nothing, the window's text read off a screenshot with
   Apple's on-device Vision and numbered for `click_mark`. Never guessed
   coordinates; never a password field.
+- **Skills** (`skills/`, v3.0) — recipes for common errands ("add AA batteries
+  to my Amazon basket", "open Bluetooth settings", "play lo-fi on YouTube")
+  that run with no model calls when they fit and hand over to the operator the
+  moment a step doesn't; site and app tips for the operator's brief; and
+  recipes **learned** from errands that finished and proved it.
 - **Model roles** — `fast`, `general`, `reasoning`, `vision`, `specialist`. The
   last two are optional: an unconfigured slot *defers* (`specialist` → `reasoning`
   → `general`), so the roles exist in the code from day one and upgrading one is
@@ -384,6 +389,57 @@ Around the loop:
 * **Questions and stops.** An errand that needs something only you know asks
   once; your next words are the answer and it picks up from there. "Stop"
   reaches a foreground action in progress as well as a background task.
+
+### Skills: recipes for the common errands
+
+Most errands are the same few moves on the same few sites and apps. A
+**skill** (`skills/`) is a recipe for one of them — what a person would say
+("the *Add to Basket* button", "the result that best matches *AA
+batteries*"), never a stored handle — so it is grounded afresh in each page
+or window JARVIS reads:
+
+```yaml
+- id: amazon-add-to-basket
+  sites: [amazon]
+  requires: [[basket, cart, trolley], [add, put, stick, pop, chuck, grab]]
+  params:
+    query: {description: what to buy, from: target}   # "AA batteries", from the interpreter
+    domain: {from: domain, default: www.amazon.co.uk}   # amazon.com if you said so
+  steps:
+    - go: "https://{domain}/s?k={query|url}"
+    - click: {role: link, href: /dp/, best_match: "{query}"}
+    - click: {text: [Add to Basket, Add to Cart], role: button}
+  done_when: [Added to Basket, Added to Cart]
+  summary: "I've added {query} to your Amazon basket."
+```
+
+* **Recipes first.** When an errand names a site or app a skill covers, uses
+  its words, and everything the skill needs is known, the steps run with
+  **no model calls at all** — each through the tool registry, with the same
+  permission gate and consequence check as the operator's own calls. If a
+  step doesn't fit (this product needs a size first), the operator takes over
+  from exactly there, with the page in front of it and what was done so far.
+* **Offered as tools.** The operator also sees fitting skills as tools
+  (`skill_amazon_search`) and can run one for part of a longer errand.
+* **Built in:** Amazon (search, add to basket, open the basket, orders), eBay
+  search, YouTube (play, search), Wikipedia, Maps (directions, find), a new
+  TextEdit document, and System Settings panes (Wi-Fi, Bluetooth, Displays,
+  Sound, Notifications, Privacy & Security, Battery, Keyboard).
+* **Knowledge packs** (`skills/knowledge/*.md`): a few lines of tips per site
+  or app — how Amazon's results, product pages and basket are laid out, Finder
+  and Notes shortcuts — added to the operator's brief when that site or app is
+  involved.
+* **Learned skills.** An errand that finishes *and proves it* is saved as a
+  recipe in `~/JARVIS/skills/learned/`: each click stored as what it was, the
+  errand's subject turned into a parameter, the proof turned into the success
+  check. Only plain operating steps are learned — never a run that sent,
+  deleted or bought something. A learned recipe that fails twice in a row is
+  set aside; Settings → Skills lists them, with *Forget*.
+* **Your own.** Drop a YAML file in the same format into `~/JARVIS/skills/`.
+  (Direct tool calls are reserved for the built-in recipes.)
+
+No skill ever buys: a request to buy, pay or order is left to the operator,
+whose checkout steps always ask you first.
 
 ### Context, and why follow-ups work
 
@@ -788,6 +844,11 @@ file) override the file — see [`.env.example`](.env.example).
     "max_wall_s": 600,        // …and minutes of wall clock, in seconds
     "max_model_calls": 80
   },
+  "skills": {
+    "enabled": true,          // recipes for common errands (0 model calls when they fit)
+    "learn": true,            // save a recipe from an errand that finished and proved it
+    "disabled": []            // skill ids never to use, e.g. ["youtube-play"]
+  },
   "voice": {
     "wake_word": "jarvis",
     "wake_engine": "openwakeword",
@@ -914,6 +975,7 @@ Details: [`docs/security.md`](docs/security.md).
 ├── notes/                 notes JARVIS writes for you
 ├── tasks/                 research reports and task output
 ├── captures/              screenshots taken on request
+├── skills/                your own recipes (*.yaml); learned/ holds the ones JARVIS saved
 ├── logs/jarvis.log        rotating log
 └── .trash/                deleted files, recoverable
 ```
@@ -960,6 +1022,11 @@ backend/jarvis/
 │   ├── verify.py              did it actually work?
 │   ├── schema.py              validated structured decisions
 │   └── observability.py       the stage trace
+├── skills/                    recipes: built-in YAML, knowledge packs, learned ones,
+│                              grounded afresh in every page or window
+├── surfaces/
+│   ├── web/                   the page snapshot, JARVIS Chrome, your browser, the policy
+│   └── native/                Accessibility tree, genuine input, OCR marks
 ├── models/                    ModelProvider → Ollama | OpenAI-compatible | Anthropic
 ├── capabilities/              conversation, system, apps, files, clipboard, screen,
 │                              browser, research, diagnostics, email, calendar, memory

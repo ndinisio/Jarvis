@@ -1,6 +1,6 @@
 [project]
 name = "jarvis-assistant"
-version = "3.0.dev6"
+version = "3.0.dev7"
 description = "JARVIS — a local-first, voice-driven AI operating layer for macOS"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -11,6 +11,8 @@ dependencies = [
     "pydantic>=2.5",
     "beautifulsoup4>=4.12",
     "python-dotenv>=1.0",
+    # Skill recipes (backend/jarvis/skills/builtin/*.yaml).
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -72,6 +74,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["backend"]
 include = ["jarvis*"]
+
+# Recipes and knowledge packs ship inside the package.
+[tool.setuptools.package-data]
+"jarvis.skills" = ["builtin/*.yaml", "knowledge/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

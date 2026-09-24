@@ -200,6 +200,16 @@ def create_app(jarvis: JarvisApp | None = None, *, host: str | None = None,
     async def clear_conversation() -> dict[str, Any]:
         return {"deleted": await jarvis.memory.clear_conversation()}
 
+    @app.get("/api/skills")
+    async def skills() -> dict[str, Any]:
+        library = jarvis.deps.skills
+        return {"enabled": library is not None, "skills": library.listing() if library else []}
+
+    @app.delete("/api/skills/{skill_id}")
+    async def forget_skill(skill_id: str) -> dict[str, Any]:
+        library = jarvis.deps.skills
+        return {"forgotten": bool(library and library.forget(skill_id))}
+
     @app.get("/api/permissions")
     async def permissions() -> dict[str, Any]:
         return await jarvis.permission_report()

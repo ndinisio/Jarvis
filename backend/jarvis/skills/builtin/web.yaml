@@ -1,0 +1,34 @@
+skills:
+  - id: youtube-play
+    title: Play a video on YouTube
+    description: Search YouTube and play the video that best matches.
+    sites: [youtube]
+    words: [play, watch, "put on", video]
+    params:
+      query: {description: the video to play, from: target}
+    steps:
+      - go: "https://www.youtube.com/results?search_query={query|url}"
+      - click: {role: link, href: /watch, best_match: "{query}"}
+    summary: "Playing {query} on YouTube."
+
+  - id: youtube-search
+    title: Search YouTube
+    description: Show YouTube's results for something.
+    sites: [youtube]
+    words: [search, find, look, show]
+    params:
+      query: {description: what to search for, from: target}
+    steps:
+      - go: "https://www.youtube.com/results?search_query={query|url}"
+    summary: "Here are YouTube's results for {query}."
+
+  - id: wikipedia-article
+    title: Open a Wikipedia article
+    description: Open the Wikipedia article about something.
+    sites: [wikipedia]
+    words: [open, show, article, page, "look up", read]
+    params:
+      query: {description: the subject, from: target}
+    steps:
+      - go: "https://en.wikipedia.org/wiki/Special:Search?search={query|url}&go=Go"
+    summary: "Here's the Wikipedia article on {query}."

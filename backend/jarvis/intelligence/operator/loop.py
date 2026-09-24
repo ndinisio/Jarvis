@@ -127,6 +127,11 @@ class OperatorResult:
     replans: int = 0
     #: Set when the task ran on local models only, and why.
     local_only: str = ""
+    #: Every action as it ran — tool, arguments, whether it worked, and the
+    #: listing the model was looking at — for learning a skill from it.
+    trail: list[dict[str, Any]] = field(default_factory=list)
+    #: Skills the operator ran as tools.
+    used_skills: list[str] = field(default_factory=list)
 
     @property
     def done(self) -> list[str]:
@@ -151,7 +156,9 @@ class Operator:
                   context: str = "", state: ConversationState | None = None,
                   before: Callable[[str, dict], None] | None = None,
                   after: Callable[[StepReport], None] | None = None,
-                  vet: Callable[[str, dict], str | None] | None = None) -> OperatorResult:
+                  vet: Callable[[str, dict], str | None] | None = None,
+                  skills: list | None = None, observed: list[str] | None = None,
+                  tips: str = "") -> OperatorResult:
         """Work towards *goal* with *tools* until it is done, proven, or can't be.
 
         ``background`` holds the task to a checklist even when the
@@ -160,13 +167,19 @@ class Operator:
         going on right now (open pages, recent results, the conversation) and
         ``context`` what's known about the user. ``before``/``after`` are
         told about each action, for progress displays; ``vet`` may stop an
-        action with a question for the user instead. A stop reaches the loop
-        through ``ctx`` (:class:`~jarvis.core.errors.Cancelled`).
+        action with a question for the user instead. ``skills`` are offered
+        as tools of their own (a recipe runs several steps in one call);
+        ``observed`` is what was already shown before this run — a skill that
+        got partway — and counts as proof; ``tips`` are hints about the site
+        or app. A stop reaches the loop through ``ctx``
+        (:class:`~jarvis.core.errors.Cancelled`).
         """
         run = _Run(self, goal, ctx, objective or Objective(goal=goal), budget or Budget(),
                    background=background, said=said, situation=situation, context=context,
                    state=state or ConversationState(), tools=tools, before=before,
-                   after=after, vet=vet)
+                   after=after, vet=vet, skills=skills or [], tips=tips)
+        for text in observed or []:
+            run.seen.add(text)
         return await run.execute()
 
 
@@ -175,7 +188,7 @@ class _Run:
 
     def __init__(self, owner: Operator, goal: str, ctx, objective: Objective, budget: Budget, *,
                  background: bool, said: str, situation: str, context: str,
-                 state: ConversationState, tools, before, after, vet):
+                 state: ConversationState, tools, before, after, vet, skills: list, tips: str):
         self.deps = owner.deps
         self.models = owner.deps.models
         self.registry = owner.deps.registry
@@ -206,14 +219,18 @@ class _Run:
         self.observers = [name for name, (_, actors, _) in OBSERVERS.items()
                           if self.registry.get(name) is not None
                           and any(tool in actors for tool in self.allowed)]
-        self.defs: list[ToolDef] = self.registry.tool_defs(self.allowed) + self._control_defs()
+        #: Skills offered as tools, by the name the model calls them.
+        self.skill_tools = {skill.tool_name: skill for skill in skills}
+        self.defs: list[ToolDef] = (self.registry.tool_defs(self.allowed)
+                                    + [_skill_def(skill) for skill in skills] + self._control_defs())
         self.overhead = sum(len(d.name) + len(d.description) + len(json.dumps(d.parameters)) + 40
                             for d in self.defs)
         conf = self.models.slot_config(self.slot)
         self.conversation = Conversation(
             system=system_prompt(proven=self.checklist.gated),
             brief=brief(self.goal, self.checklist, objective=objective, said=said,
-                        situation=situation, background=context),
+                        situation=situation, background=context, tips=tips,
+                        recipes=bool(skills)),
             budget_chars=budget_for(conf.num_ctx, conf.max_tokens),
         )
 
@@ -230,6 +247,8 @@ class _Run:
         self.done_changes: dict[str, str] = {}
         #: The app the latest native action happened in.
         self.app_in_use = ""
+        self.trail: list[dict[str, Any]] = []
+        self.used_skills: list[str] = []
 
     def _control_defs(self) -> list[ToolDef]:
         defs = [FINISH, ASK_USER, GIVE_UP]
@@ -403,6 +422,8 @@ class _Run:
     # -- actions --------------------------------------------------------------------
     async def _act(self, call: ToolCall) -> _Outcome:
         name, arguments = call.name, call.arguments
+        if name in self.skill_tools:
+            return await self._run_skill(self.skill_tools[name], arguments)
         if name not in self.allowed:
             problem = (f"{name} isn't one of the tools for this task" if self.registry.get(name)
                        else f"there is no tool called {name}")
@@ -429,10 +450,13 @@ class _Run:
             self.before(name, cleaned)
         screen = self.screen if name in OBSERVE_AFTER or name in OBSERVERS else ""
         started = time.monotonic()
+        view_before = self.screen
         result = await self.registry.call(name, cleaned, self.ctx)
         elapsed_ms = (time.monotonic() - started) * 1000.0
         self.steps += 1
         self.tool_calls += 1
+        self.trail.append({"tool": name, "arguments": dict(cleaned), "ok": bool(result.ok),
+                           "view": view_before})
         self.privacy.check_call(name, spec.category, None, result.data)
         if self.trace is not None:
             self.trace.result(self.steps, name, result)
@@ -478,6 +502,46 @@ class _Run:
         self._report(name, (result.summary or ("done" if result.ok else "failed"))[:180], ok,
                      spec.expected_ms, elapsed_ms)
         return _Outcome(text=text, short=first_line(text), ran=True, ok=ok)
+
+    async def _run_skill(self, skill, arguments: dict) -> _Outcome:
+        """A recipe as one call: its steps run through the registry, grounded
+        in what's on screen; it reports how far it got either way."""
+        from ...skills.runner import SkillRunner
+
+        library = getattr(self.deps, "skills", None)
+        params = library.parameters(skill, self.objective, given=arguments) if library else None
+        if params is None:
+            needed = ", ".join(p.name for p in skill.params if p.required and not p.default)
+            return self._refuse(skill.tool_name, arguments, f"{skill.title} needs {needed}")
+        if self.trace is not None:
+            self.trace.decision("tool_call", tool=skill.tool_name, arguments=params)
+        if self.before is not None:
+            self.before(skill.tool_name, params)
+        started = time.monotonic()
+        outcome = await SkillRunner(self.deps, self.ctx).run(skill, params, view=self.screen)
+        if library is not None:
+            library.record(skill, outcome.ok)
+        self.used_skills.append(skill.id)
+        self.steps += max(1, outcome.actions)
+        self.tool_calls += outcome.actions
+        for text in outcome.observations:
+            self.seen.add(text)
+        if outcome.view:
+            self.screen = outcome.view
+            self.latest = outcome.view
+        state = "ok" if outcome.ok else "stopped"
+        self.findings.append(f"{skill.tool_name}({_short(params)}) → {state}: {outcome.account()[:200]}")
+        self._report(skill.tool_name, skill.title + (" — done" if outcome.ok else " — stopped partway"),
+                     outcome.ok, 0, (time.monotonic() - started) * 1000.0)
+        if outcome.declined:
+            return _Outcome(text=outcome.reason, ran=True, ok=False,
+                            ended=self._result(Status.DECLINED, reason=outcome.reason))
+        text = ("The recipe finished. " if outcome.ok else "The recipe stopped partway. ") + outcome.account()
+        if outcome.evidence:
+            text += f" The page showed “{outcome.evidence}”."
+        if outcome.view:
+            text += "\n\nWhat's on screen now:\n" + outcome.view[:PAGE_CHARS]
+        return _Outcome(text=text, short=first_line(text), ran=True, ok=outcome.ok)
 
     def _refuse(self, name: str, arguments: dict, problem: str) -> _Outcome:
         if self.trace is not None:
@@ -543,6 +607,7 @@ class _Run:
             findings=list(self.findings), latest=self.latest, display=self.display,
             steps=self.steps, tool_calls=self.tool_calls, model_calls=self.model_calls,
             replans=self.stuck.replans, local_only=self.privacy.reason,
+            trail=list(self.trail), used_skills=list(self.used_skills),
         )
 
 
@@ -553,6 +618,12 @@ class _Outcome:
     ran: bool = False
     ok: bool = True
     ended: OperatorResult | None = None
+
+
+def _skill_def(skill) -> ToolDef:
+    return ToolDef(name=skill.tool_name,
+                   description=f"Recipe: {skill.description.rstrip('.')}. Several steps in one call.",
+                   parameters=skill.parameter_schema())
 
 
 def _arguments(value: Any) -> dict[str, Any]:

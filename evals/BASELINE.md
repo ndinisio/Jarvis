@@ -218,3 +218,37 @@ What changed:
 This is tested against a fake accessibility tree (42 tests; each guard proven
 by reverting it). `scripts/check_native.py` runs the real thing on a Mac.
 
+
+
+## Phase 7 — Skills
+
+**Web tasks, oracle: every phrasing 72 / 72**, with **4.7 model calls per
+task** (Phase 6: 5.5). The 15 phrasings a built-in recipe covers — search
+and add to basket, open the basket, across seven shop tasks — finish in
+**exactly one model call** (the interpreter reading the sentence); the recipe
+itself costs none. Tasks the recipes don't cover (a colour to choose, the
+cheapest of several, a form) are unchanged.
+
+What changed:
+
+- **Recipes** (`skills/builtin/*.yaml`): each step says what a person would
+  point at — "the result that best matches *{query}*", "the *Add to Basket*
+  button" — and is grounded afresh in every listing, so nothing depends on a
+  handle from another visit. Each step is one registry call: validation,
+  permission gate, consequence check, confirmation, exactly as for the model.
+- **Recipes first, operator after.** A recipe that fits and has everything
+  it needs runs straight away, in the foreground or as an errand. The first
+  step that doesn't fit hands over to the operator with the page, what was
+  done so far and everything seen — the proof included.
+- **Offered as tools.** Fitting recipes join the operator's toolkit as
+  `skill_*` tools; knowledge packs add a few lines of site/app tips to the
+  brief.
+- **Learned recipes.** A run that finished *and proved it* becomes a recipe:
+  elements by what they were, the errand's subject as a parameter, the proof
+  as its success check. Anything that sent, deleted or bought is never
+  learned; a learned recipe that fails twice is set aside.
+- **No recipe buys.** A request to buy, pay or order matches none, so the
+  safety tasks (Buy Now, checkout) still go through the operator and its
+  confirmation — "order me the earbuds" no longer finds the *orders* recipe.
+
+39 tests, including one per guard proven by reverting it.

@@ -40,7 +40,10 @@ Finishing: when the job is done, or you have what the user asked for, call finis
 the user in one or two sentences — built only from what the results showed."""
 
 BRIEF = """Task: {goal}
-{said}{criteria}{where}{situation}{background}"""
+{said}{criteria}{where}{recipes}{tips}{situation}{background}"""
+
+RECIPES = ("Recipes: the skill_ tools each do a whole routine in one call. Use one when it fits; "
+           "it says how far it got, and you carry on from there.\n")
 
 #: How much of the live situation and of what's known about the user a brief
 #: carries — it is part of every request in the run.
@@ -93,7 +96,7 @@ def system_prompt(*, proven: bool) -> str:
 
 
 def brief(goal: str, checklist, *, objective=None, said: str = "", situation: str = "",
-          background: str = "") -> str:
+          background: str = "", tips: str = "", recipes: bool = False) -> str:
     """The task as the model sees it — fixed for the whole run."""
     said = " ".join((said or "").split())
     said_line = (f"The user said: \u201c{said[:300]}\u201d\n"
@@ -118,7 +121,10 @@ def brief(goal: str, checklist, *, objective=None, said: str = "", situation: st
     known = _clip("\n".join(line for line in (background or "").splitlines()
                             if not line.startswith("Current date and time")), _BACKGROUND_CHARS)
     context = f"\nWhat you know about the user:\n{known}\n" if known else ""
+    tips = _clip(tips, 700)
     return BRIEF.format(goal=goal.strip(), said=said_line, criteria=criteria, where=where,
+                        recipes=RECIPES if recipes else "",
+                        tips=f"Tips for this site or app:\n{tips}\n" if tips else "",
                         situation=now, background=context).strip()
 
 

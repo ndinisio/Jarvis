@@ -75,6 +75,7 @@ class JarvisApp:
         # Which browser each web action goes to; JARVIS Chrome starts on first use.
         self.deps.browsers = BrowserHub(self.deps)
         self.deps.native = NativeSurface(self.deps)
+        self.deps.skills = _skill_library(config)
         self.deps.registry = build_registry(self.deps)
         self.capabilities = build_capabilities(self.deps)
         self.personality = Personality(config)
@@ -181,6 +182,7 @@ class JarvisApp:
         self.sandbox.reconfigure(config)
         self.personality.reconfigure(config)
         self.deps.registry = build_registry(self.deps)
+        self.deps.skills = _skill_library(config)
         self.capabilities = build_capabilities(self.deps)
         self.orchestrator.capabilities = self.capabilities
         # The registry is a new object; the orchestrator's context observer and
@@ -259,3 +261,13 @@ def _version() -> str:
     from .. import __version__
 
     return __version__
+
+
+def _skill_library(config):
+    """The skill library, or None when skills are switched off."""
+    if not config.skills.enabled:
+        return None
+    from ..skills import SkillLibrary
+
+    root = config.workspace_path / "skills"
+    return SkillLibrary(root / "learned", user_dir=root, disabled=config.skills.disabled)

@@ -236,12 +236,49 @@ class IntelligenceAgent:
         tools = _with_companions([card.name for card in cards], self.deps.registry)
         budget = Budget(steps=self.max_steps, wall_s=max(60.0, 20.0 * self.max_steps),
                         model_calls=self.max_steps + 4)
+        situation = self.state.describe_for_model(include_turns=2)
+        library = self.deps.skills
+        observed: list[str] = []
+        if library is not None:
+            recipe = await self._recipe(library, objective, text, context, emit)
+            if isinstance(recipe, OperatorResult):
+                return recipe
+            if recipe is not None:
+                skill, outcome = recipe
+                observed = outcome.observations
+                situation = "\n\n".join(part for part in (
+                    situation, f"A recipe (“{skill.title}”) started on this. {outcome.account()}",
+                    f"What's on screen now:\n{outcome.view}" if outcome.view else "") if part)
         with self.deps.telemetry.span("intelligence.operate"):
             return await operator.run(
                 objective.goal or text, context, tools=tools,
                 objective=objective, budget=budget, background=False, said=text,
-                situation=self.state.describe_for_model(include_turns=2),
-                context=self._context, state=self.state, before=before, vet=vet)
+                situation=situation, context=self._context, state=self.state, before=before,
+                vet=vet, skills=library.offer(objective, text) if library is not None else [],
+                observed=observed,
+                tips=library.knowledge(objective, text) if library is not None else "")
+
+    async def _recipe(self, library, objective: Objective, text: str, ctx, emit):
+        """Run the skill that fits, if one does: a finished OperatorResult,
+        ``(skill, outcome)`` when it stopped partway, or None."""
+        from ..skills.runner import SkillRunner, summary_for
+
+        found = library.direct(objective, text)
+        if found is None:
+            return None
+        skill, params = found
+        with self.deps.telemetry.span("intelligence.skill", skill=skill.id):
+            outcome = await SkillRunner(self.deps, ctx, report=emit).run(skill, params)
+        library.record(skill, outcome.ok)
+        if outcome.ok:
+            return OperatorResult(status=Status.FINISHED, answer=summary_for(skill, params, outcome),
+                                  findings=outcome.done, steps=outcome.actions,
+                                  tool_calls=outcome.actions, used_skills=[skill.id])
+        if outcome.declined:
+            return OperatorResult(status=Status.DECLINED, reason=outcome.reason, findings=outcome.done,
+                                  steps=outcome.actions, tool_calls=outcome.actions,
+                                  used_skills=[skill.id])
+        return skill, outcome
 
     # -- endings -----------------------------------------------------------
     async def _compose(self, text: str, objective: Objective, result: OperatorResult,

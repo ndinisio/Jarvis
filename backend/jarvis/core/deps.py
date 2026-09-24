@@ -47,6 +47,8 @@ class Deps:
     browsers: Any = None
     #: NativeSurface — Mac apps through Accessibility (surfaces/native/).
     native: Any = None
+    #: SkillLibrary — recipes for common errands (skills/).
+    skills: Any = None
 
     @property
     def config(self) -> Config:

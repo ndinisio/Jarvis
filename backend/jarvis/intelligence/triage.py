@@ -62,6 +62,8 @@ For mode="action" also give:
     "set the volume to 30 percent", "search Amazon for AA batteries and add a pack to
     the basket", "read today's calendar".
   objective: goal, kind, targets, constraints, complexity, confidence, missing, and
+    targets: the specific things it is about, in the user's words (["AA batteries"],
+      ["Tom"], ["the airport"]);
     success_criteria: what must be TRUE when it's done, each one checkable
       ("a pack of AA batteries is in the Amazon basket", "Safari shows a new empty tab");
     surface: "web" | "native" | "either"; site: the website meant, if any (e.g.

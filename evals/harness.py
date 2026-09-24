@@ -181,6 +181,7 @@ class Harness:
         app, oracle = self.build_app(workspace)
         if oracle is not None:
             oracle.brain.begin(task.oracle)
+            oracle.understood = dict(task.understood)
 
         record = TaskResult(id=task.id, category=task.category, phrasing=phrasing, ok=False,
                             target_phase=task.target_phase)

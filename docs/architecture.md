@@ -214,6 +214,43 @@ with short handles, the operator reading the view again after every action:
   `surface.py` owns the handles and the actions. `backend.py` is the only
   module that imports PyObjC, and the only one the tests replace.
 
+## Skills (`skills/`, v3.0)
+
+Recipes for the errands people ask for most, stated the way a person would
+describe each step — never as a handle, which means nothing on the next visit:
+
+```
+errand ─► library.direct(objective) ──fits, all parameters known──► runner
+               │                                               │
+               └─ fits, something missing ─► offered to        ├─ every step grounded in the
+                  the operator as skill_* tools                 │  latest listing, one registry
+                                                                │  call each (gate included)
+                                          proven ─◄─────────────┤
+                                                                └─ a step doesn't fit ─► operator
+                                                                   carries on from that page
+```
+
+* `model.py` — the recipe format (steps: `go`, `open`, `app`, `click`,
+  `fill`, `key`, `menu`, `type`, `wait`, `scroll_until`, `expect`, and — for
+  built-in recipes only — `tool`), parameters with where they come from (the
+  errand's subject, a domain the user named, the app), and `done_when`.
+* `grounding.py` — finds "the *Add to Basket* button" or "the result that
+  best matches *AA batteries*" in a page or window listing.
+* `runner.py` — runs the steps and reports exactly how far it got.
+* `library.py` — which recipe fits (`sites`/`apps`, `words`, `requires`,
+  `excludes`), which can run directly, which to offer, tips from
+  `knowledge/*.md`, and the learned recipes' bookkeeping. A request to buy,
+  pay or order matches no skill.
+* `learning.py` — turns a proven operator run into a recipe: each element
+  stored as what it was, the errand's subject as a parameter, the proof as
+  the success check. Anything that changed state beyond plain operating
+  (sending, deleting) means nothing is learned.
+
+A recipe that finishes costs no model calls. A foreground turn and a
+background errand both try one before starting the operator and, when it
+stops part-way, start the operator with the recipe's account, the current
+page and everything it saw.
+
 ---
 
 ## Telemetry (`core/telemetry.py`)

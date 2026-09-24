@@ -202,6 +202,9 @@ class OracleProvider(ModelProvider):
     def __init__(self) -> None:
         self.brain = OracleBrain()
         self.calls: list[dict[str, Any]] = []
+        #: What a competent interpreter extracts for the current task (the
+        #: subject, the site) — see WebTask.understood.
+        self.understood: dict[str, Any] = {}
 
     async def available(self) -> bool:
         return True
@@ -224,14 +227,15 @@ class OracleProvider(ModelProvider):
                 "mode": "action", "confidence": 0.95, "action_evidence": [evidence],
                 "requires_tools": True, "reason": "oracle",
                 "objective": {"goal": text, "kind": "automation", "targets": [],
-                              "complexity": "multi_step", "confidence": "confident", "missing": []},
+                              "complexity": "multi_step", "confidence": "confident", "missing": [],
+                              **self.understood},
             })
         if stage == "understand":
             text = _user_text(prompt)
             return stage, json.dumps({
                 "goal": text, "kind": "automation", "targets": [], "constraints": [], "references": [],
                 "needs_tools": True, "complexity": "multi_step", "confidence": "confident",
-                "refines_previous": False, "is_correction": False, "missing": [],
+                "refines_previous": False, "is_correction": False, "missing": [], **self.understood,
             })
         if stage == "operate":
             return stage, json.dumps(_as_tool_call(self.brain.next_action(prompt), prompt))

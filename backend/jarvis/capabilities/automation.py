@@ -20,6 +20,10 @@ is everything that makes it an errand rather than a turn:
   deleting, installing — is ever covered by it; each of those asks.
 * **Narration** of slow steps and proven items, when voice is on, and an
   honest report at the end: what was done, and what wasn't.
+* **Recipes first** (:mod:`jarvis.skills`): when a skill fits — Amazon's
+  basket, directions in Maps, a Settings pane — it runs with no model
+  deciding the steps, and the operator takes over from wherever it stops.
+  An errand the operator finishes and proves can become a recipe itself.
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ from ..intelligence.schema import Complexity, Objective
 from ..models.base import ChatMessage
 from ..models.registry import Slot
 from ..security.permissions import RiskLevel
+from ..skills.learning import learn
+from ..skills.runner import SkillRunner, summary_for
 from .base import Capability, Request, Response
 
 log = get_logger("jarvis.capabilities.automation")
@@ -153,14 +159,29 @@ class AutomationCapability(Capability):
         trace = Trace(self.deps.bus if intelligence.trace else None, self.deps.telemetry,
                       verbose=self.deps.config.ui.developer_mode, task_id=task_id)
         progress = _Progress(self, request)
+        library = self.deps.skills
+        situation = str(request.args.get("situation") or "")
         try:
+            # A recipe that fits runs first: no model for its steps.
+            recipe = await self._try_recipe(library, objective, goal, request, progress)
+            if isinstance(recipe, Response):
+                return recipe
+            observed: list[str] = []
+            if recipe is not None:
+                skill, outcome = recipe
+                observed = outcome.observations
+                situation = "\n\n".join(part for part in (
+                    situation, f"A recipe (“{skill.title}”) started on this. {outcome.account()}",
+                    f"What's on screen now:\n{outcome.view}" if outcome.view else "") if part)
             result = await Operator(self.deps, slot=Slot.OPERATOR, trace=trace).run(
                 goal, request.ctx, tools=self.tools_for(objective), objective=objective,
                 budget=Budget(steps=conf.max_steps, wall_s=conf.max_wall_s,
                               model_calls=conf.max_model_calls),
-                background=True, said=request.text,
-                situation=str(request.args.get("situation") or ""), context=request.context,
+                background=True, said=request.text, situation=situation, context=request.context,
                 after=progress.step,
+                skills=library.offer(objective, request.text) if library is not None else [],
+                observed=observed,
+                tips=library.knowledge(objective, request.text) if library is not None else "",
             )
         finally:
             if task_id:
@@ -168,11 +189,60 @@ class AutomationCapability(Capability):
                 if self.deps.browsers is not None:
                     self.deps.browsers.release(task_id)
 
+        data = _data(goal, result)
+        learned = self._learn(library, objective, result, used_recipe=recipe is not None)
+        if learned:
+            data["learned"] = learned
         if result.status == Status.ASKED:
             return Response(text=result.question, clarification=result.question,
-                            display=_display(goal, result), data=_data(goal, result))
+                            display=_display(goal, result), data=data)
         report = await self._report(goal, result)
-        return Response(text=report, display=_display(goal, result), data=_data(goal, result))
+        return Response(text=report, display=_display(goal, result), data=data)
+
+    # -- recipes ------------------------------------------------------------------
+    async def _try_recipe(self, library, objective: Objective, goal: str, request: Request,
+                          progress: _Progress):
+        """Run the skill that fits, if one does. Returns the finished
+        Response, ``(skill, outcome)`` when it stopped partway (the operator
+        carries on), or None when no skill fits."""
+        if library is None:
+            return None
+        found = library.direct(objective, request.text)
+        if found is None:
+            return None
+        skill, params = found
+        outcome = await SkillRunner(self.deps, request.ctx, report=progress.say).run(skill, params)
+        library.record(skill, outcome.ok)
+        if outcome.ok:
+            summary = summary_for(skill, params, outcome)
+            checklist = [{"text": goal, "done": True, "evidence": outcome.evidence}]
+            display = {"kind": "automation", "title": goal[:90], "status": "finished",
+                       "checklist": checklist if outcome.evidence else [], "findings": outcome.done}
+            return Response(text=summary, display=display,
+                            data={"goal": goal, "status": "finished", "skill": skill.id,
+                                  "checklist": display["checklist"], "findings": outcome.done,
+                                  "steps": outcome.actions, "model_calls": 0})
+        if outcome.declined:
+            before = f" Before that: {'; '.join(outcome.done)}." if outcome.done else ""
+            return Response(text=(outcome.reason or "Understood — I've left it alone.") + before,
+                            data={"goal": goal, "status": "declined", "skill": skill.id,
+                                  "findings": outcome.done})
+        return skill, outcome
+
+    def _learn(self, library, objective: Objective, result: OperatorResult, *,
+               used_recipe: bool) -> str:
+        """Keep a recipe from an errand that finished and proved it."""
+        if (library is None or not self.deps.config.skills.learn or used_recipe
+                or result.used_skills or result.status != Status.FINISHED or not result.checklist
+                or not all(item.get("done") for item in result.checklist)):
+            return ""
+        skill = learn(objective, result.trail,
+                      [str(item.get("evidence") or "") for item in result.checklist], self.registry)
+        if skill is None:
+            return ""
+        library.save(skill)
+        log.info("learned skill %s from an errand", skill.id)
+        return skill.id
 
     def tools_for(self, objective: Objective) -> list[str]:
         """The errand toolkit plus whatever this objective specifically needs.
@@ -260,6 +330,14 @@ class _Progress:
         self._narrator = capability._narrator
         self._request = request
         self._proven: set[str] = set()
+
+    def say(self, message: str) -> None:
+        """A recipe's step, into the trail."""
+        task = self._request.task
+        if task is not None:
+            self._deps.tasks.step(task, message)
+        else:
+            self._request.ctx.report(message)
 
     def step(self, report: StepReport) -> None:
         task = self._request.task

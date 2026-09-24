@@ -672,6 +672,7 @@ button { cursor: pointer; }
 }
 .sheet__footer > div { display: flex; gap: 9px; }
 .sheet__path { font-family: var(--mono); font-size: 10px; color: var(--text-faint); word-break: break-all; }
+.sheet__hint { margin: 4px 0 2px; font-size: 11px; color: var(--text-faint); }
 
 .settings__group { margin-bottom: 22px; }
 .settings__group h3 {
@@ -748,3 +749,20 @@ button { cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* Settings → Skills: learned recipes, each forgettable. */
+.skills { list-style: none; margin: 4px 0 0; padding: 0; }
+.skills li {
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center;
+  padding: 7px 0; border-top: 1px solid var(--line);
+}
+.skills li[data-set-aside="true"] .skills__title { color: var(--text-dim); }
+.skills__title { font-size: 12px; }
+.skills__meta { grid-column: 1; font-size: 10.5px; color: var(--text-faint); }
+.skills__forget {
+  grid-row: 1 / span 2; grid-column: 2; font-family: var(--mono); font-size: 9.5px;
+  background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px;
+  color: var(--text-dim);
+}
+.skills__forget:hover { color: var(--warn); border-color: rgba(240, 180, 88, 0.4); }
+

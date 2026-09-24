@@ -406,6 +406,21 @@ class AutomationConfig(BaseModel):
     max_download_mb: int = 2048
 
 
+class SkillsConfig(BaseModel):
+    """Recipes for common errands (``skills/``).
+
+    A skill that fits an errand runs its steps without a model deciding each
+    one — through the same tools and permission gate as anything else — and
+    hands over to the operator the moment a step doesn't fit.
+    """
+
+    enabled: bool = True
+    #: Save a recipe from an errand that finished and proved it.
+    learn: bool = True
+    #: Skill ids never to use.
+    disabled: list[str] = Field(default_factory=list)
+
+
 class ScreenAwarenessConfig(BaseModel):
     """The background screen watcher (``capabilities.screen_awareness``).
 
@@ -525,6 +540,7 @@ class Config(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     intelligence: IntelligenceConfig = IntelligenceConfig()
     automation: AutomationConfig = AutomationConfig()
+    skills: SkillsConfig = SkillsConfig()
     browser: BrowserConfig = BrowserConfig()
     screen_awareness: ScreenAwarenessConfig = ScreenAwarenessConfig()
     ui: UIConfig = UIConfig()

@@ -1,0 +1,72 @@
+# Shopping recipes. Each step says what's on screen, never a handle; the
+# runner grounds it in the page as it is, and hands over to the operator
+# the moment a step doesn't fit (a size to choose, a sign-in wall).
+skills:
+  - id: amazon-add-to-basket
+    title: Add a product to the Amazon basket
+    description: Search Amazon, open the result that best matches, and add it to the basket.
+    sites: [amazon]
+    requires: [[basket, cart, trolley], [add, put, stick, pop, chuck, throw, grab, get me, "get a"]]
+    params:
+      query: {description: what to buy, in a few words, from: target}
+      domain: {from: domain, default: www.amazon.co.uk}
+    steps:
+      - go: "https://{domain}/s?k={query|url}"
+      - click: {role: link, href: /dp/, best_match: "{query}"}
+      - click: {text: [Add to Basket, Add to Cart], role: button}
+    done_when: [Added to Basket, Added to Cart]
+    summary: "I've added {query} to your Amazon basket."
+
+  - id: amazon-search
+    title: Search Amazon
+    description: Show Amazon's search results for something.
+    sites: [amazon]
+    words: [search, find, look, show, price, cost]
+    excludes: [basket, cart]
+    params:
+      query: {description: what to search for, from: target}
+      domain: {from: domain, default: www.amazon.co.uk}
+    steps:
+      - go: "https://{domain}/s?k={query|url}"
+    done_when: [results for]
+    summary: "Here are Amazon's results for {query}."
+
+  - id: amazon-open-basket
+    title: Open the Amazon basket
+    description: Open the Amazon basket to see what's in it.
+    sites: [amazon]
+    requires: [[basket, cart]]
+    words: ["what", show, open, view, see, look]
+    excludes: [add, put, stick, pop, remove, delete, empty, check out, checkout, buy, order, pay]
+    params:
+      domain: {from: domain, default: www.amazon.co.uk}
+    steps:
+      - go: "https://{domain}/gp/cart/view.html"
+    done_when: [Shopping Basket, Basket is empty, Shopping Cart, Cart is empty]
+    summary: "Your Amazon basket is open."
+
+  - id: amazon-orders
+    title: Open Amazon orders
+    description: Open the list of Amazon orders.
+    sites: [amazon]
+    requires: [[my order, my orders, my amazon order, orders, delivery, deliveries, parcel, package,
+                tracking]]
+    words: [show, open, where, when, track, see, view, list, check, what, arrive]
+    excludes: [cancel, return, refund]
+    params:
+      domain: {from: domain, default: www.amazon.co.uk}
+    steps:
+      - go: "https://{domain}/gp/css/order-history"
+    summary: "Your Amazon orders are open."
+
+  - id: ebay-search
+    title: Search eBay
+    description: Show eBay's listings for something.
+    sites: [ebay]
+    words: [search, find, look, show, buy, price]
+    params:
+      query: {description: what to search for, from: target}
+      domain: {from: domain, default: www.ebay.co.uk}
+    steps:
+      - go: "https://{domain}/sch/i.html?_nkw={query|url}"
+    summary: "Here are eBay's listings for {query}."
