@@ -47,6 +47,8 @@ interface StoreState {
   reasoningTrace: TraceEntry[]
   telemetry: TelemetrySpan[]
   timings: RequestTiming[]
+  /** The latest picture of the page each task is working on. */
+  views: Record<string, string>
   notices: { id: string; level: string; message: string; ts: number }[]
   devMode: boolean
   showSettings: boolean
@@ -83,6 +85,7 @@ export const useStore = create<StoreState>((set, get) => ({
   reasoningTrace: [],
   telemetry: [],
   timings: [],
+  views: {},
   notices: [],
   devMode: false,
   showSettings: false,
@@ -223,7 +226,12 @@ export const useStore = create<StoreState>((set, get) => ({
             .filter((t) => t.status !== 'running' && t.status !== 'pending')
             .sort((a, b) => (b.finished ?? 0) - (a.finished ?? 0))
           for (const stale of finished.slice(MAX_FINISHED_TASKS)) delete tasks[stale.id]
-          return { tasks }
+          // A finished task's live view has served its purpose.
+          const views = { ...s.views }
+          for (const id of Object.keys(views)) {
+            if (!tasks[id] || (tasks[id].status !== 'running' && tasks[id].status !== 'pending')) delete views[id]
+          }
+          return { tasks, views }
         })
         break
 
@@ -286,6 +294,12 @@ export const useStore = create<StoreState>((set, get) => ({
         set((s) => ({
           telemetry: [...s.telemetry, event as unknown as TelemetrySpan].slice(-120),
         }))
+        break
+
+      case EV.TASK_VIEW:
+        if (typeof event.task_id === 'string' && typeof event.image === 'string') {
+          set((s) => ({ views: { ...s.views, [event.task_id]: event.image } }))
+        }
         break
 
       case EV.REQUEST_TIMING: {

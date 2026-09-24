@@ -150,6 +150,8 @@ class ToolContext:
     #: Set when the tool runs inside a background task.
     task_id: str | None = None
     cancel_event: asyncio.Event | None = None
+    #: Set while the task may run (cleared while the user has it paused).
+    resume_event: asyncio.Event | None = None
     #: Report intermediate progress ("Opening result 2 of 5…").
     progress: Callable[[str, dict[str, Any] | None], None] | None = None
     models: Any = None
@@ -163,6 +165,16 @@ class ToolContext:
 
         if self.cancelled():
             raise Cancelled()
+
+    async def checkpoint(self) -> bool:
+        """Between steps: stop if stopped, wait while paused. Returns True
+        when it waited — the user may have changed things in the meantime."""
+        self.raise_if_cancelled()
+        if self.resume_event is None or self.resume_event.is_set():
+            return False
+        await self.resume_event.wait()
+        self.raise_if_cancelled()
+        return True
 
     def report(self, message: str, **meta: Any) -> None:
         if self.progress:

@@ -287,6 +287,32 @@ class PlaywrightDriver(BrowserDriver):
     async def can_execute_js(self) -> bool:
         return (await self.run_js("1+1")).strip() == "2"
 
+    async def picture(self, *, scale: float = 0.5, quality: int = 60) -> bytes | None:
+        """What the page looks like now, as a small JPEG — for the task
+        card's live view and the audit trail. Rendered at *scale* by Chrome
+        itself, so a thumbnail is a few kilobytes, not a full screenshot."""
+        page = self.browser.page
+        if page is None or page.is_closed():
+            return None
+        import base64
+
+        try:
+            session = await page.context.new_cdp_session(page)
+            try:
+                size = await page.evaluate("[innerWidth, innerHeight]")
+                shot = await session.send("Page.captureScreenshot", {
+                    "format": "jpeg", "quality": int(quality), "captureBeyondViewport": False,
+                    "clip": {"x": 0, "y": 0, "width": size[0], "height": size[1], "scale": scale}})
+                return base64.b64decode(shot["data"])
+            finally:
+                with contextlib.suppress(Exception):
+                    await session.detach()
+        except Exception as exc:
+            log.debug("picture via the DevTools protocol failed: %s", exc)
+        with contextlib.suppress(Exception):
+            return await page.screenshot(type="jpeg", quality=int(quality))
+        return None
+
     async def bring_to_front(self) -> None:
         with contextlib.suppress(Exception):
             page = await self.browser.ensure_page()

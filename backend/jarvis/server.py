@@ -184,6 +184,28 @@ def create_app(jarvis: JarvisApp | None = None, *, host: str | None = None,
     async def cancel_task(task_id: str) -> dict[str, Any]:
         return {"cancelled": jarvis.tasks.cancel(task_id)}
 
+    @app.post("/api/tasks/{task_id}/pause")
+    async def pause_task(task_id: str) -> dict[str, Any]:
+        return {"paused": jarvis.tasks.pause(task_id)}
+
+    @app.post("/api/tasks/{task_id}/resume")
+    async def resume_task(task_id: str) -> dict[str, Any]:
+        return {"resumed": jarvis.tasks.resume(task_id)}
+
+    @app.post("/api/tasks/{task_id}/take-over")
+    async def take_over_task(task_id: str) -> dict[str, Any]:
+        return {"taken_over": await jarvis.orchestrator.take_over(task_id)}
+
+    @app.get("/api/audit")
+    async def audit_recent() -> dict[str, Any]:
+        """The latest audit records (security/audit.py)."""
+        return {"records": jarvis.deps.audit.recent() if jarvis.deps.audit else []}
+
+    @app.get("/api/audit/{key}")
+    async def audit_entries(key: str) -> dict[str, Any]:
+        """Every action taken for one task (or one request outside a task)."""
+        return {"key": key, "entries": jarvis.deps.audit.entries(key) if jarvis.deps.audit else []}
+
     @app.get("/api/telemetry")
     async def telemetry() -> dict[str, Any]:
         return {"summary": jarvis.telemetry.summary(), "recent": jarvis.telemetry.recent(),
@@ -323,6 +345,15 @@ async def _handle_command(jarvis: JarvisApp, message: dict[str, Any],
             jarvis.tasks.cancel_latest()
         if jarvis.voice is not None:
             await jarvis.voice.stop_speaking()
+
+    elif kind == "pause" and message.get("task_id"):
+        jarvis.tasks.pause(str(message["task_id"]))
+
+    elif kind == "resume" and message.get("task_id"):
+        jarvis.tasks.resume(str(message["task_id"]))
+
+    elif kind == "take_over" and message.get("task_id"):
+        await jarvis.orchestrator.take_over(str(message["task_id"]))
 
     elif kind == "confirm.response":
         jarvis.permissions.resolve(

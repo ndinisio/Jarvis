@@ -17,10 +17,12 @@ from ..capabilities.registry import build_capabilities
 from ..memory.store import MemoryStore
 from ..models.registry import ModelRouter, Slot
 from ..router.router import Router
+from ..security.audit import AuditLog
 from ..security.permissions import PermissionBroker
 from ..surfaces.native import NativeSurface
 from ..surfaces.web.hub import BrowserHub
 from ..tasks.manager import TaskManager
+from ..tasks.views import TaskViews
 from ..tools.files.sandbox import FileSandbox
 from ..tools.macos.apps import AppCatalog
 from ..tools.macos.controller import MacOSController
@@ -77,6 +79,8 @@ class JarvisApp:
         self.deps.browsers = BrowserHub(self.deps)
         self.deps.native = NativeSurface(self.deps)
         self.deps.skills = _skill_library(config)
+        self.deps.audit = AuditLog(config.workspace_path / "audit", self.config_store)
+        self.deps.audit_picture = self.deps.browsers.picture
         self.deps.registry = build_registry(self.deps)
         self.capabilities = build_capabilities(self.deps)
         self.personality = Personality(config)
@@ -95,6 +99,9 @@ class JarvisApp:
         # Construction is cheap and side-effect free; start()/stop() below are
         # what actually gate on the config flag.
         self.screen_watcher = ScreenWatcher(self.deps)
+        # A live picture of the page each errand is working on, for its card.
+        self.task_views = TaskViews(self.deps)
+        self.task_views.attach()
 
         self.orchestrator = Orchestrator(
             self.deps, self.router, self.capabilities, self.personality, self.voice
@@ -112,6 +119,8 @@ class JarvisApp:
             return
         self._started = True
         log.info("JARVIS %s starting on %s", _version(), platform.platform())
+        with contextlib.suppress(OSError):
+            self.deps.audit.prune()
         if self.voice is not None:
             await self.voice.probe()
             if self.config.voice.enabled:

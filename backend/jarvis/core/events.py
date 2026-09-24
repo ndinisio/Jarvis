@@ -63,6 +63,13 @@ class EventType:
     #: One request's timeline (core/latency.py): published when the turn
     #: returns, when background work delivers, and when its answer is spoken.
     REQUEST_TIMING = "request.timing"
+    #: A small live picture of the page a task is working on (tasks/views.py).
+    TASK_VIEW = "task.view"
+
+
+#: Events sent to whoever is connected but never kept in the replay history
+#: (a picture every step would push everything else out of it).
+TRANSIENT = frozenset({EventType.TASK_VIEW})
 
 
 class AssistantState:
@@ -132,7 +139,8 @@ class EventBus:
     # -- publishing --------------------------------------------------------
     def publish(self, type_: str, **payload: Any) -> Event:
         event = Event(type=type_, payload=payload, seq=next(self._counter))
-        self._history.append(event)
+        if type_ not in TRANSIENT:
+            self._history.append(event)
         for sub in list(self._subscribers):
             sub._offer(event)
         for hook in list(self._hooks):

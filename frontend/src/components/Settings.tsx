@@ -29,6 +29,7 @@ export function Settings() {
   const [voices, setVoices] = useState<{ name: string; locale: string }[]>([])
   const [models, setModels] = useState<string[]>([])
   const [skills, setSkills] = useState<SkillRow[]>([])
+  const [audits, setAudits] = useState<number | null>(null)
 
   useEffect(() => {
     if (show && config) setDraft(JSON.parse(JSON.stringify(config)))
@@ -42,6 +43,8 @@ export function Settings() {
       setModels(installed as string[])
     }).catch(() => {})
     apiFetch('/api/skills').then((r) => r.json()).then((d) => setSkills(d.skills ?? [])).catch(() => {})
+    apiFetch('/api/audit').then((r) => r.json()).then((d) => setAudits((d.records ?? []).length))
+      .catch(() => {})
   }, [show])
 
   const forget = async (id: string) => {
@@ -168,6 +171,65 @@ export function Settings() {
                     onChange={(v) => set(['security', 'allow_screen_capture'], v)} />
           </Group>
 
+          <Group title="Safety">
+            <Field label="Ask me before">
+              <select value={draft.security.autonomy ?? 'consequential_only'}
+                      onChange={(e) => set(['security', 'autonomy'], e.target.value)}>
+                <option value="consequential_only">Paying, ordering, sending, deleting, installing</option>
+                <option value="confirm_start">…and before each errand starts</option>
+                <option value="confirm_each_step">Every step that changes anything</option>
+              </select>
+            </Field>
+            <ListField label="Never read or operate these apps" items={draft.security.blocked_apps ?? []}
+                       onChange={(v) => set(['security', 'blocked_apps'], v)} />
+            <ListField label="…these windows (App: part of its title)"
+                       items={draft.security.blocked_windows ?? []}
+                       onChange={(v) => set(['security', 'blocked_windows'], v)} />
+            <ListField label="…or these sites (“bank” matches any bank)"
+                       items={draft.security.blocked_sites ?? []}
+                       onChange={(v) => set(['security', 'blocked_sites'], v)} />
+            <Toggle label="Keep a record of every action" value={draft.security.audit ?? true}
+                    onChange={(v) => set(['security', 'audit'], v)} />
+            <Toggle label="With a picture of the page after each action"
+                    value={draft.security.audit_screenshots ?? false}
+                    onChange={(v) => set(['security', 'audit_screenshots'], v)} />
+            <p className="sheet__hint">
+              Records are kept for {draft.security.audit_days ?? 30} days in {draft.workspace}/audit
+              {audits ? ` — ${audits} recent` : ''}. JARVIS never types passwords or card details.
+            </p>
+          </Group>
+
+          <Group title="Browsers">
+            <Toggle label="Run errands in JARVIS Chrome" value={draft.browser?.jarvis_browser ?? true}
+                    onChange={(v) => set(['browser', 'jarvis_browser'], v)} />
+            <ListField label="Sites always in one browser (site = everyday or jarvis)"
+                       items={Object.entries(draft.browser?.site_overrides ?? {}).map(([k, v]) => `${k} = ${v}`)}
+                       onChange={(lines) => set(['browser', 'site_overrides'], Object.fromEntries(
+                         lines.map((line) => line.split('=').map((part) => part.trim()))
+                           .filter(([site, where]) => site && (where === 'everyday' || where === 'jarvis'))))} />
+            <p className="sheet__hint">
+              Your own browser is used for the page you're on; errands that go somewhere run in a
+              separate JARVIS Chrome window, so your tabs are never touched.
+            </p>
+          </Group>
+
+          <Group title="Privacy and free cloud models">
+            <ListField label="Keep on this Mac (local models only)"
+                       items={draft.models?.cloud_exclusions ?? []}
+                       onChange={(v) => set(['models', 'cloud_exclusions'], v)} />
+            <ListField label="Try these first when operating (provider: model)"
+                       items={(draft.models?.operator?.chain ?? []).map((link: any) => `${link.provider}: ${link.model}`)}
+                       onChange={(lines) => set(['models', 'operator', 'chain'], lines
+                         .map((line) => line.split(':'))
+                         .filter((parts) => parts.length >= 2 && parts[0].trim())
+                         .map(([provider, ...model]) => ({ provider: provider.trim(), model: model.join(':').trim() })))} />
+            <p className="sheet__hint">
+              {CLOUD.map(([key, env]) => `${key}: ${draft.models?.providers?.[key]?.enabled ? 'key set' : `set ${env}`}`)
+                .join(' · ')}. Optional and free-tier; the local model is always the last resort, and
+              anything listed above stays on this Mac.
+            </p>
+          </Group>
+
           <Group title="Intelligence">
             <Toggle label="Agentic reasoning" value={draft.intelligence?.enabled ?? true}
                     onChange={(v) => set(['intelligence', 'enabled'], v)} />
@@ -263,6 +325,31 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     </label>
   )
 }
+
+/**
+ * A list edited as lines of text. Committed when the field loses focus, so
+ * typing a new line isn't undone by the empty line being tidied away.
+ */
+function ListField({ label, items, onChange }: {
+  label: string
+  items: string[]
+  onChange: (items: string[]) => void
+}) {
+  return (
+    <label className="settings__field settings__field--list">
+      <span>{label}</span>
+      <textarea rows={Math.min(6, Math.max(2, items.length + 1))} defaultValue={items.join('\n')}
+                spellCheck={false}
+                onBlur={(e) => onChange(e.target.value.split('\n').map((line) => line.trim()).filter(Boolean))} />
+    </label>
+  )
+}
+
+/** The free cloud tiers JARVIS knows, and where each one's key comes from. */
+const CLOUD: [string, string][] = [
+  ['groq', 'JARVIS_GROQ_API_KEY'], ['openrouter', 'JARVIS_OPENROUTER_API_KEY'],
+  ['cerebras', 'JARVIS_CEREBRAS_API_KEY'], ['gemini', 'JARVIS_GEMINI_API_KEY'],
+]
 
 function Toggle({ label, value, onChange }: {
   label: string

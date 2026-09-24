@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ...security import untrusted
+
 #: Attributes read for every node, in one round trip where the backend can.
 ATTRIBUTES = (
     "AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXPlaceholderValue",
@@ -305,13 +307,21 @@ def render(snap: WindowSnapshot, *, changes: str = "", text_chars: int = 700) ->
     shown = len(snap.controls)
     if snap.total > shown:
         lines.append(f"Showing {shown} of {snap.total} controls (read_window with an offset shows more).")
-    lines.extend(snap.lines())
     if not snap.controls:
         lines.append("No controls were readable here. mark_screen reads the window's text from "
                      "a screenshot instead.")
+    # What the window shows is the app's (and whoever wrote its content's)
+    # words: fenced, like a web page's (security/untrusted.py).
+    said = list(snap.lines())
     if snap.texts:
         text = " · ".join(snap.texts)
-        lines.append(f"Text on screen: {text[:text_chars]}" + ("…" if len(text) > text_chars else ""))
+        said.append(f"Text on screen: {text[:text_chars]}" + ("…" if len(text) > text_chars else ""))
+    if said:
+        content = "\n".join(said)
+        note = untrusted.warning(content, "the window")
+        if note:
+            lines.append(note)
+        lines.append(untrusted.fence(content, "the window"))
     if snap.menus:
         lines.append("Menus: " + ", ".join(snap.menus) + " — use choose_menu_item.")
     return "\n".join(lines)

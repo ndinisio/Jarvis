@@ -36,6 +36,7 @@ from typing import Any
 from ...core.logging import get_logger
 from ...models.base import ToolCall, ToolDef, strip_thinking
 from ...models.registry import Slot
+from ...security import untrusted
 from ..catalog import ToolCatalog
 from ..schema import Objective
 from ..state import ConversationState
@@ -261,7 +262,8 @@ class _Run:
         if self.trace is not None and self.checklist.items:
             self.trace.checklist(self.checklist.as_dicts())
         while True:
-            self.ctx.raise_if_cancelled()
+            if await self.ctx.checkpoint():
+                self._resumed()
             exhausted = self._exhausted()
             if exhausted:
                 return self._result(Status.BUDGET, reason=exhausted)
@@ -342,6 +344,9 @@ class _Run:
             turn.calls.append(call)
             if not halted and call.name not in CONTROL_NAMES and self.steps >= self.budget.steps:
                 halted = "the action limit for this task has been reached"
+            if not halted and call.name not in CONTROL_NAMES and await self.ctx.checkpoint():
+                self._resumed()
+                halted = "the user paused the task and may have changed things since — look again"
             if halted:
                 self._answer(turn, call, f"Not run: {halted}.")
                 continue
@@ -370,6 +375,17 @@ class _Run:
         turn.digest = "; ".join(digest)[:300]
         self.conversation.add(turn)
         return None
+
+    def _resumed(self) -> None:
+        """Back from a pause: whatever was on screen may have changed (the
+        user may have taken over), so nothing seen before is trusted as
+        current and the next look waits in full."""
+        from ...tools.browser.observe import acted
+
+        acted()
+        self.screen = ""
+        self.hint = ("The user paused this task and has just resumed it; they may have changed "
+                     "things. Look at the page or window again before acting.")
 
     def _answer(self, turn: Turn, call: ToolCall, text: str, short: str = "") -> None:
         turn.full.append(text)
@@ -478,6 +494,10 @@ class _Run:
         if self.trace is not None:
             self.trace.verify(verification)
         text = result.for_model(RESULT_CHARS)
+        if result.ok and (spec.category in untrusted.CONTENT_CATEGORIES or name in untrusted.CONTENT_TOOLS):
+            # Someone else's words (a page, an email, a file): information,
+            # never instructions — see security/untrusted.py.
+            text = untrusted.fence_result(text, _source(spec.category, name))
         ok = result.ok and verification.verified
         if result.ok and not verification.verified:
             text += f"\n(Checked afterwards: this did not work — {verification.problem})"
@@ -624,6 +644,19 @@ def _skill_def(skill) -> ToolDef:
     return ToolDef(name=skill.tool_name,
                    description=f"Recipe: {skill.description.rstrip('.')}. Several steps in one call.",
                    parameters=skill.parameter_schema())
+
+
+_SOURCES = {"research": "the web", "email": "the email", "messages": "the messages",
+            "files": "the file", "clipboard": "the clipboard", "calendar": "the calendar",
+            "contacts": "the contacts", "reminders": "the reminders"}
+
+
+def _source(category: str, tool: str) -> str:
+    if tool == "get_current_page":
+        return "the page"
+    if category == "screen":
+        return "the screen"
+    return _SOURCES.get(category, "the content")
 
 
 def _arguments(value: Any) -> dict[str, Any]:

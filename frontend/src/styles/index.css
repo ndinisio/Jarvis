@@ -451,12 +451,20 @@ button { cursor: pointer; }
   display: block; height: 100%; background: var(--violet);
   transition: width 0.4s ease; box-shadow: 0 0 10px rgba(176, 140, 255, 0.8);
 }
-.task__cancel {
-  margin-top: 9px; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em;
-  background: transparent; border: 1px solid var(--line); border-radius: 6px;
-  padding: 3px 9px; color: var(--text-dim);
+.task[data-paused] { border-color: rgba(240, 180, 88, 0.35); background: rgba(240, 180, 88, 0.05); }
+.task[data-paused] .task__elapsed { color: var(--warn); letter-spacing: 0.12em; }
+.task__view {
+  display: block; width: 100%; margin: 7px 0 4px; border-radius: 5px;
+  border: 1px solid var(--line); background: rgba(0, 0, 0, 0.3);
 }
-.task__cancel:hover { color: var(--warn); border-color: rgba(240, 180, 88, 0.4); }
+.task__controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.task__control {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em;
+  background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 9px; color: var(--text-dim); cursor: pointer;
+}
+.task__control:hover { color: var(--text); border-color: rgba(176, 140, 255, 0.45); }
+.task__control--stop:hover { color: var(--warn); border-color: rgba(240, 180, 88, 0.4); }
 
 .activity__log { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 7px; }
 .activity__log li { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; font-size: 11.5px; }
@@ -702,8 +710,17 @@ button { cursor: pointer; }
   border-radius: 7px; padding: 6px 9px; outline: none; width: 100%;
 }
 .settings__field input:focus, .settings__field select:focus { border-color: rgba(95, 211, 243, 0.5); }
+.settings__field--list { align-items: start; }
+.settings__field textarea {
+  background: rgba(8, 13, 20, 0.9); border: 1px solid var(--line-strong); border-radius: 7px;
+  padding: 6px 9px; outline: none; width: 100%; resize: vertical; color: inherit;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+}
+.settings__field textarea:focus { border-color: rgba(95, 211, 243, 0.5); }
 .settings__field input[type='range'] { width: 100%; accent-color: var(--accent); }
-.settings__toggle { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-dim); text-transform: capitalize; }
+.settings__toggle { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-dim); }
+.settings__toggle span { display: inline-block; }
+.settings__toggle span::first-letter { text-transform: uppercase; }
 .settings__toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
 
 .onboarding__intro p { color: var(--text-dim); }

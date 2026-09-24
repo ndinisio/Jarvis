@@ -114,6 +114,7 @@ class PermissionBroker:
         handoff: bool = False,
         timeout_s: float | None = None,
         task_id: str | None = None,
+        record: dict[str, Any] | None = None,
     ) -> bool:
         """Authorise *action*, asking the user when policy demands it.
 
@@ -140,9 +141,14 @@ class PermissionBroker:
         for them — and *timeout_s* replaces the usual confirmation window,
         because signing in takes longer than saying yes.
 
+        *record*, when given, is filled in with how the action was allowed —
+        ``{"how": "setting" | "autonomy" | "task grant" | "session grant" |
+        "user"}`` — for the audit trail.
+
         Raises :class:`ConfirmationDeclined` if the user says no or does not
         answer within the configured window.
         """
+        record = record if record is not None else {}
         details = dict(details or {})
         details["offer_remember"] = not consequential and not handoff
         if handoff:
@@ -151,19 +157,23 @@ class PermissionBroker:
         # An explicit auto_approve setting is the user's own override and is
         # honoured as written — for everything at that risk level.
         if not handoff and risk in security.auto_approve and risk not in security.always_confirm:
+            record["how"] = "setting"
             return True
         # The autonomy default is not an override: it never waves through a
         # consequential action or a privacy consent — agreeing to be watched
         # is not a routine step of some other request.
         if not handoff and not consequential and not consent and self.policy_for(risk) == "allow":
+            record["how"] = "autonomy"
             return True
         step_by_step = self._config.autonomy == "confirm_each_step" and not consent
         if not handoff and not consequential and allow_session_grant and not step_by_step:
             if task_id and task_id in self._task_grants:
                 log.debug("task grant %s covers %s", task_id, action)
+                record["how"] = "task grant"
                 return True
             if action in self._session_grants:
                 log.debug("session grant covers %s", action)
+                record["how"] = "session grant"
                 return True
 
         confirmation = PendingConfirmation(
@@ -191,6 +201,7 @@ class PermissionBroker:
             self._bus.publish(
                 EventType.CONFIRM_RESOLVED, id=confirmation.id, approved=False, reason="timeout"
             )
+            record.update(how="user", declined=True, timed_out=True)
             raise ConfirmationDeclined(
                 "I didn't receive confirmation, so I've left it.", detail=f"{action} timed out"
             )
@@ -199,7 +210,9 @@ class PermissionBroker:
 
         if approved and remember and not consequential and not handoff:
             self._session_grants.add(action)
+        record["how"] = "user"
         if not approved:
+            record["declined"] = True
             raise ConfirmationDeclined(detail=action)
         return True
 

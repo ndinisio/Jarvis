@@ -31,6 +31,12 @@ class TaskStatus:
     TERMINAL = {SUCCEEDED, FAILED, CANCELLED}
 
 
+def _running() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass
 class Task:
     id: str
@@ -44,6 +50,11 @@ class Task:
     result: Any = None
     error: str | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    #: Set while the task may run; cleared while it's paused (the user
+    #: paused it, or took over to do something themselves).
+    resume_event: asyncio.Event = field(default_factory=_running)
+    #: "" when running, else why it's paused: "paused" or "taken over".
+    paused: str = ""
     _runner: asyncio.Task | None = field(default=None, repr=False)
 
     @property
@@ -67,6 +78,7 @@ class Task:
             "elapsed_s": round(self.elapsed, 2),
             "error": self.error,
             "cancellable": self.cancellable,
+            "paused": self.paused,
             "result": _summarise(self.result),
         }
 
@@ -140,11 +152,39 @@ class TaskManager:
         self._bus.publish(EventType.TASK_UPDATED, **payload)
 
     # -- control -----------------------------------------------------------
+    def pause(self, task_id: str, *, reason: str = "paused") -> bool:
+        """Hold the task before its next step — the step in flight finishes."""
+        task = self._tasks.get(task_id)
+        if task is None or task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            return False
+        task.paused = reason
+        task.resume_event.clear()
+        self.step(task, "Over to you — say “carry on” when you're done." if reason == "taken over"
+                  else "Paused.")
+        return True
+
+    def resume(self, task_id: str) -> bool:
+        task = self._tasks.get(task_id)
+        if task is None or not task.paused:
+            return False
+        task.paused = ""
+        task.resume_event.set()
+        self.step(task, "Carrying on.")
+        return True
+
+    def latest(self, *, paused: bool | None = None) -> Task | None:
+        """The newest unfinished task (only paused ones, or only running ones)."""
+        active = [t for t in self._tasks.values() if t.cancellable
+                  and (paused is None or bool(t.paused) == paused)]
+        return max(active, key=lambda t: t.started) if active else None
+
     def cancel(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
         if task is None or not task.cancellable:
             return False
         task.cancel_event.set()
+        task.paused = ""
+        task.resume_event.set()              # a paused task wakes to see it's stopped
         self.step(task, "Cancelling…")
         if task._runner is not None:
             # Give the coroutine a moment to notice the flag, then force it.

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.logging import get_logger
+from ...security import denylist
 from . import ax
 from .ax import Control, Frame, WindowSnapshot
 from .input import PASTE_THRESHOLD, Clipboard, Keystroke, NativeInput, resolve_key
@@ -127,6 +128,7 @@ class NativeSurface:
         window = backend.front_window(application)
         if window is None:
             raise NativeError(f"{name} has no window open.", detail="no window")
+        self._guard(name, _title(backend, window))
         dialogs = [w for w in backend.windows(application)
                    if not backend.same(w, window) and _is_dialog(backend, w)]
         snap = ax.snapshot(backend, window, app=name, pid=pid, offset=offset,
@@ -256,7 +258,10 @@ class NativeSurface:
         return name
 
     async def press_key(self, stroke: Keystroke, repeat: int = 1) -> None:
-        self._require()
+        backend = self._require()
+        front = backend.frontmost()               # a key goes to whatever is in front
+        if front is not None:
+            self._guard(front[1])
         await asyncio.to_thread(self.input.press, stroke, repeat)
 
     async def choose_option(self, handle: str, option: str) -> str:
@@ -400,8 +405,16 @@ class NativeSurface:
         if found is None:
             raise NativeError(f"{app} doesn't appear to be running." if app.strip()
                               else "I couldn't tell which app is in front.", wrong_tool=bool(app.strip()))
+        self._guard(found[1])
         self.last_app = found[1]
         return found
+
+    def _guard(self, app: str, window: str = "") -> None:
+        """Never read or operate a password manager, the Keychain or a
+        permissions pane (security/denylist.py)."""
+        reason = denylist.app_refusal(getattr(self._deps, "config", None), app, window)
+        if reason:
+            raise NativeError(reason, detail="denylist")
 
     def _front(self, pid: int) -> None:
         front = self.backend.frontmost()
@@ -468,6 +481,8 @@ class NativeSurface:
         if not attrs.get("AXRole"):
             raise NativeError(f"[{cleaned}] isn't on screen any more — read_window again.")
         pid = self._handle_app.get(cleaned, 0)
+        window = self.backend.attribute(element, "AXWindow")
+        self._guard(self._app_name(pid), _title(self.backend, window) if window is not None else "")
         self.last_app = self._app_name(pid) or self.last_app
         return element, pid
 

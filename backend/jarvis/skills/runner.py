@@ -62,7 +62,11 @@ class SkillRunner:
         outcome = SkillOutcome(ok=False, view=view)
         web = skill.surface != "native"
         for index, step in enumerate(skill.steps, 1):
-            self.ctx.raise_if_cancelled()
+            if await self.ctx.checkpoint():
+                # A recipe replays steps against the page as it was; after a
+                # pause the user may have changed it — the operator looks.
+                outcome.reason = "the user paused it partway and may have changed things since"
+                return outcome
             kind = kind_of(step)
             optional = bool(step.get("optional"))
             try:

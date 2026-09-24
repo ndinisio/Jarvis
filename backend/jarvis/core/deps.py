@@ -49,6 +49,10 @@ class Deps:
     native: Any = None
     #: SkillLibrary — recipes for common errands (skills/).
     skills: Any = None
+    #: AuditLog — every action, per task (security/audit.py).
+    audit: Any = None
+    #: ``async () -> bytes | None``: the page JARVIS just acted on, for the audit.
+    audit_picture: Any = None
 
     @property
     def config(self) -> Config:
@@ -75,6 +79,7 @@ class Deps:
             base.update(
                 task_id=task.id,
                 cancel_event=task.cancel_event,
+                resume_event=task.resume_event,
                 progress=lambda message, meta=None: self.tasks.step(
                     task, message, **(meta or {})
                 ),

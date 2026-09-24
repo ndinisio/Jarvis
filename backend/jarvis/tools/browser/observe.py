@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...core import latency
+from ...security import untrusted
 from . import manifest_js
 
 #: What the page listing says when a page needs the user, not JARVIS.
@@ -41,28 +42,38 @@ SIGNAL_LINES = {
 
 
 def render_manifest(manifest: dict[str, Any], *, text_chars: int = 900, changes: str = "") -> str:
+    """The page as the model sees it. JARVIS's own lines (where it is, what
+    kind of page, how much is shown) come first; everything the page itself
+    says — its elements, dialogs and text — is fenced as the page's words
+    (``security/untrusted.py``), with a warning outside the fence if any of
+    it is addressed to an AI assistant."""
     elements = manifest.get("elements") or []
-    title = manifest.get("title") or "untitled page"
+    title = untrusted.defang(str(manifest.get("title") or "untitled page"))[:120]
     lines = [f"Page: {title} — {manifest.get('url', '')}"]
     signals = manifest.get("signals") or {}
     for name, line in SIGNAL_LINES.items():
         if signals.get(name):
             lines.append(line)
-    if changes:
-        lines.append(changes)
     total = manifest.get("total")
     offset = int(manifest.get("offset") or 0)
     if isinstance(total, int) and total > offset + len(elements):
         lines.append(f"Showing elements {offset + 1}–{offset + len(elements)} of {total} "
                      f"(visible content first; read_page_manifest with offset={offset + len(elements)} "
                      "shows more).")
+    said: list[str] = [changes] if changes else []
     for element in elements:
-        lines.append(render_element(element))
+        said.append(render_element(element))
     for dialog in manifest.get("dialogs") or []:
-        lines.append(f"Open dialog: {dialog}")
+        said.append(f"Open dialog: {dialog}")
     text = (manifest.get("text") or "").strip()
     if text and text_chars > 0:
-        lines.append(f"Page text: {text[:text_chars]}" + ("…" if len(text) > text_chars else ""))
+        said.append(f"Page text: {text[:text_chars]}" + ("…" if len(text) > text_chars else ""))
+    if said:
+        content = "\n".join(said)
+        note = untrusted.warning(" ".join([title, content]), "the page")
+        if note:
+            lines.append(note)
+        lines.append(untrusted.fence(content, "the page"))
     return "\n".join(lines)
 
 

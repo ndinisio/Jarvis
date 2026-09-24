@@ -37,6 +37,7 @@ regardless of which path answered the turn before.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from dataclasses import dataclass
@@ -247,6 +248,8 @@ class Orchestrator:
             return await self._respond(f"That's {value}.", decision)
         if name == "affirm":
             return await self._handle_affirm(decision)
+        if name in {"pause_task", "resume_task", "take_over"}:
+            return await self._task_control(name, text, decision)
         if name == "decline":
             resolved = self._resolve_pending(False)
             return await self._respond(
@@ -260,9 +263,50 @@ class Orchestrator:
             return await self._handle_capability(text, decision)
         return await self._handle_intelligently(text, decision)
 
+    async def _task_control(self, name: str, text: str, decision: RouteDecision) -> TurnResult:
+        """Pause the task in progress, carry on with a paused one, or hand it
+        to the user for a moment ("let me do it") — the same controls as the
+        task card's buttons."""
+        tasks = self.deps.tasks
+        if name == "resume_task":
+            task = tasks.latest(paused=True)
+            if task is not None and tasks.resume(task.id):
+                return await self._respond("Carrying on.", decision)
+            if text.strip().lower().startswith("resume"):
+                return await self._music("play", text)
+            return await self._respond("Nothing's paused, sir.", decision)
+        task = tasks.latest(paused=False)
+        if task is None:
+            if name == "pause_task" and text.strip().lower().startswith("pause"):
+                return await self._music("pause", text)       # "pause" with no errand: the music
+            return await self._respond("Nothing's running just now, sir.", decision)
+        if name == "pause_task":
+            tasks.pause(task.id)
+            return await self._respond("Paused — say “carry on” when you're ready.", decision)
+        await self.take_over(task.id)
+        return await self._respond("It's yours — say “carry on” when you're done.", decision)
+
+    async def _music(self, action: str, text: str) -> TurnResult:
+        return await self._handle_tool(text, RouteDecision(RouteKind.TOOL, "media_control",
+                                                           {"action": action}))
+
+    async def take_over(self, task_id: str) -> bool:
+        """Pause *task_id* and put its window in front of the user."""
+        if not self.deps.tasks.pause(task_id, reason="taken over"):
+            return False
+        hub = getattr(self.deps, "browsers", None)
+        driver = hub.bound(task_id) if hub is not None else None
+        if driver is not None:
+            with contextlib.suppress(Exception):
+                await driver.bring_to_front()
+        return True
+
     async def _handle_affirm(self, decision: RouteDecision) -> TurnResult:
         if self._resolve_pending(True):
             return await self._respond("Confirmed.", decision, speak=True)
+        taken = self.deps.tasks.latest(paused=True)
+        if taken is not None and taken.paused == "taken over" and self.deps.tasks.resume(taken.id):
+            return await self._respond("Carrying on.", decision)          # "done" after taking over
         if self._last_draft:
             draft = self._last_draft
             self._last_draft = None

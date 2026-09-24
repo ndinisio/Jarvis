@@ -327,6 +327,9 @@ async def test_clicking_on_a_page_makes_the_look_after_it_wait_in_full(app, ctx)
         app_name = "JARVIS Chrome"
         owned = True
 
+        async def current_page(self):
+            return {"url": "https://shop.example/", "title": "Shop"}
+
         async def click_handle(self, handle):
             return {"ok": True, "text": "Add to Basket", "url": "https://shop.example/",
                     "title": "Shop"}

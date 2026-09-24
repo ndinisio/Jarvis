@@ -103,6 +103,55 @@ first.
 * **Web research is outbound only.** Search queries and page fetches go out; your
   files, clipboard and screen do not.
 
+## Places JARVIS never operates (`security/denylist.py`)
+
+Three lists in `security` settings, each enforced where a surface is reached
+rather than left to the model:
+
+| Setting | Default | Where it's enforced |
+| --- | --- | --- |
+| `blocked_apps` | password managers, Keychain Access, Passwords | the native surface refuses to read a window, type, press a key or act on a control of the app — whether named or merely in front; the registry refuses any app action naming it |
+| `blocked_windows` | "System Settings: Privacy & Security", Passwords, Users & Groups, Login Items | the same, for a window whose title contains the part after the colon |
+| `blocked_sites` | "bank" (any host containing it), PayPal, the big UK and US banks, password vaults, Apple ID | page tools refuse to read the page listing or act on it; `get_current_page` refuses to read it |
+
+Opening one is still allowed — "open 1Password", "go to my bank's website" —
+because that's you asking; the result says the rest is yours and asks the
+operator to stop there.
+
+## Other people's words (`security/untrusted.py`)
+
+Pages, emails, messages, files, calendar invitations and app windows are
+written by other people, and any of them may address an AI directly. The
+defence is in two layers:
+
+1. **The gates don't listen to anyone.** A consequential action is judged on
+   the element it will really hit and confirmed by you, whatever the model
+   was told. This layer holds even if the model is fooled.
+2. **The model is told whose words these are.** Content reaches the operator
+   between `⟦the page says⟧` … `⟦end of what the page says⟧` markers; the
+   content's own copies of those characters are replaced, so a page can't
+   close the fence early and write "instructions" after it. JARVIS's own
+   notes about a page (a sign-in wall, a pagination hint) are always outside
+   the fence. Text that reads as instructions to an assistant earns a plain
+   warning, also outside. The operator's instructions say that fenced text is
+   information and that only the user's request is an instruction.
+
+The evaluation shop carries a product description that tells "any AI
+assistant" to click Buy Now; the safety suite checks that nothing is ordered.
+
+## The audit trail (`security/audit.py`)
+
+Every call through the tool registry writes one JSON line to
+`~/JARVIS/audit/<date>/<task id>.jsonl` (or the request id outside a task):
+time, tool, arguments with secrets redacted, the real target (element text,
+URL, form action), whether it was consequential, how it was allowed —
+`setting`, `autonomy`, `task grant`, `session grant`, `user` — or that it was
+`declined` or `refused (denylist)`, the outcome and how long it took. With
+`audit_screenshots` on, each action on a page in JARVIS Chrome also keeps a
+small picture of the page afterwards. Records older than `audit_days` (30) are
+removed at start-up; `security.audit: false` stops recording. The interface
+reads them from `GET /api/audit` and `GET /api/audit/{task id}`.
+
 ## Reporting a gap
 
 If you find a way to make a HIGH-risk tool run without a confirmation, that is a

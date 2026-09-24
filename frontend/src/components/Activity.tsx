@@ -108,25 +108,44 @@ export function Activity({ send }: { send: (m: Record<string, unknown>) => boole
 
 function TaskCard({ task, send }: { task: Task; send: (m: Record<string, unknown>) => boolean }) {
   const step = task.steps?.[task.steps.length - 1]
+  const view = useStore((s) => s.views[task.id])
   // The latest checklist any step reported: what "done" means for this
   // errand, ticked off only as each item is proven.
   const checklist = [...(task.steps ?? [])].reverse().find((s) => s.checklist?.length)?.checklist
+  const paused = task.paused ?? ''
+  const control = (type: string) => () => send({ type, task_id: task.id })
   return (
-    <div className="task">
+    <div className="task" data-paused={paused ? 'true' : undefined}>
       <div className="task__head">
         <span className="task__kind">{task.kind.toUpperCase()}</span>
-        <span className="task__elapsed">{task.elapsed_s.toFixed(1)}s</span>
+        <span className="task__elapsed">
+          {paused ? (paused === 'taken over' ? 'YOURS' : 'PAUSED') : `${task.elapsed_s.toFixed(1)}s`}
+        </span>
       </div>
       <p className="task__title">{task.title}</p>
+      {view && task.cancellable && (
+        <img className="task__view" src={view} alt="What JARVIS is looking at" />
+      )}
       {checklist && <Checklist items={checklist} />}
       {step && <p className="task__step">{step.message}</p>}
       <div className="task__bar">
         <span style={{ width: `${Math.max(4, task.progress * 100)}%` }} />
       </div>
       {task.cancellable && (
-        <button className="task__cancel" onClick={() => send({ type: 'cancel', task_id: task.id })}>
-          Cancel
-        </button>
+        <div className="task__controls">
+          {paused ? (
+            <button className="task__control" onClick={control('resume')}>Carry on</button>
+          ) : (
+            <>
+              <button className="task__control" onClick={control('pause')}>Pause</button>
+              <button className="task__control" onClick={control('take_over')}
+                      title="Pause and bring the window forward, so you can do a bit yourself">
+                Take over
+              </button>
+            </>
+          )}
+          <button className="task__control task__control--stop" onClick={control('cancel')}>Stop</button>
+        </div>
       )}
     </div>
   )

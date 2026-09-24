@@ -27,6 +27,7 @@ export const EV = {
   MEMORY: 'memory',
   TELEMETRY: 'telemetry',
   REQUEST_TIMING: 'request.timing',
+  TASK_VIEW: 'task.view',
 } as const
 
 export type AssistantState =
@@ -91,6 +92,8 @@ export interface Task {
   elapsed_s: number
   error?: string | null
   cancellable: boolean
+  /** "" while running; "paused" or "taken over" while held. */
+  paused?: string
 }
 
 export interface Panel {

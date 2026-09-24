@@ -193,6 +193,9 @@ class _FakeDriver:
     async def can_execute_js(self):
         return self._js_ok
 
+    async def current_page(self):
+        return {"url": self._manifest.get("url", ""), "title": self._manifest.get("title", "")}
+
     async def run_js(self, script, *, timeout=20.0):
         return "complete" if self._js_ok else ""
 

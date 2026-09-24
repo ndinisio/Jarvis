@@ -164,6 +164,14 @@ COMMANDS: list[QuickCommand] = [
        RouteKind.CONTROL, "thanks"),
     _c(r"^\s*(?:stop|cancel|abort|halt|nevermind|never mind|forget it|quiet|shut up|"
        r"stop that|stop it|cancel that|that's enough)[.!]?\s*$", RouteKind.CONTROL, "cancel"),
+    # A task in progress: hold it, let the user do a bit, carry on.
+    _c(r"^\s*(?:pause|pause (?:that|it|there)|hold on|hang on|wait(?: a (?:sec|second|moment|minute))?)"
+       r"[.!]?\s*$", RouteKind.CONTROL, "pause_task"),
+    _c(r"^\s*(?:carry on|continue|resume|keep going|go on|carry on then|you can carry on)[.!]?\s*$",
+       RouteKind.CONTROL, "resume_task"),
+    _c(r"^\s*(?:let me (?:do (?:it|that|this)|take over|have a go)|i'?ll (?:do (?:it|that)|take (?:it|over))"
+       r"(?: from here| myself)?|take over|you pause,? i'?ll do it)[.!]?\s*$",
+       RouteKind.CONTROL, "take_over"),
     _c(r"^\s*(?:are you (?:there|awake|online)|you there)\??\s*$", RouteKind.CONTROL, "presence"),
     _c(r"^\s*(?:goodbye|bye|good night|goodnight|that'?s all)[.!]?\s*$",
        RouteKind.CONTROL, "farewell"),

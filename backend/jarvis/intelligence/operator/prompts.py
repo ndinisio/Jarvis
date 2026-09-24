@@ -10,6 +10,7 @@ instead of re-reading thousands of tokens each step.
 from __future__ import annotations
 
 from ...models.base import ToolDef
+from ...security import untrusted
 
 SYSTEM_PROMPT = """You operate this Mac for the user, one step at a time, using the tools you're given.
 You see the result of every action, and after anything on a web page you see the page as it now is.
@@ -27,6 +28,7 @@ How to work:
   you call the tool. Just call it; never ask permission yourself.
 - If something only the user can tell you is missing (who to email, which one they meant), call
   ask_user with one short question. If it can't be done, call give_up and say why.
+- {untrusted}
 {finishing}"""
 
 FINISH_PROVEN = """
@@ -92,7 +94,8 @@ CONTROL_NAMES = frozenset(tool.name for tool in CONTROL_TOOLS)
 
 
 def system_prompt(*, proven: bool) -> str:
-    return SYSTEM_PROMPT.format(finishing=FINISH_PROVEN if proven else FINISH_ANSWER)
+    return SYSTEM_PROMPT.format(finishing=FINISH_PROVEN if proven else FINISH_ANSWER,
+                                untrusted=untrusted.RULE)
 
 
 def brief(goal: str, checklist, *, objective=None, said: str = "", situation: str = "",

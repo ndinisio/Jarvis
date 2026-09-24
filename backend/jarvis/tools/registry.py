@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import platform
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 from ..core.errors import Cancelled, ConfirmationDeclined, JarvisError, NetworkUnavailable
@@ -12,7 +12,7 @@ from ..core.events import EventType
 from ..core.logging import get_logger
 from ..core.tracing import current_turn_id
 from ..models.base import ToolDef
-from ..security import consequence
+from ..security import consequence, denylist
 from .base import Tool, ToolContext, ToolResult
 
 log = get_logger("jarvis.tools")
@@ -24,6 +24,11 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
         self._observers: list[Callable[[str, dict[str, Any], ToolResult, str], None]] = []
+        #: AuditLog (security/audit.py): one line per call, per task.
+        self.audit: Any = None
+        #: Optional ``async () -> bytes | None``: a picture of the page JARVIS
+        #: just acted on, for the audit trail when screenshots are on.
+        self.audit_picture: Callable[[], Awaitable[bytes | None]] | None = None
 
     def observe(self, callback: Callable[[str, dict[str, Any], ToolResult, str], None]) -> None:
         """Watch every call with its *structured* result.
@@ -129,6 +134,16 @@ class ToolRegistry:
         except ValueError as exc:
             return ToolResult.failure("I'm missing something for that request.", detail=str(exc))
 
+        # An app action naming a password manager or the Keychain is refused
+        # before anything runs (the native surface also checks what's really
+        # in front — security/denylist.py).
+        if spec.category == "screen" and cleaned.get("app"):
+            refused = denylist.app_refusal(ctx.config, str(cleaned["app"]))
+            if refused:
+                self._audit(ctx, name, spec, cleaned, None, False, {"how": "refused"},
+                            ToolResult.failure(refused, detail="denylist"))
+                return ToolResult.failure(refused, detail="denylist", wrong_tool=False)
+
         ctx.bus.publish(
             EventType.TOOL_CALL, tool=name, args=_redact(cleaned), category=spec.category,
             risk=spec.risk, task_id=ctx.task_id,
@@ -154,10 +169,12 @@ class ToolRegistry:
             from .browser.observe import acted
 
             acted()
+        target = None
+        consequential = False
+        allowed: dict[str, Any] = {}
         try:
             # What the call will really touch, read before it runs — the gate
             # judges that, not the model's description of it.
-            target = None
             if spec.risk != "low":
                 try:
                     target = await tool.inspect(cleaned, ctx)
@@ -176,6 +193,7 @@ class ToolRegistry:
                              **({"target": target} if target else {})},
                     consequential=consequential,
                     task_id=ctx.task_id,
+                    record=allowed,
                 )
             result = await tool.run(cleaned, ctx)
         except Cancelled:
@@ -219,7 +237,42 @@ class ToolRegistry:
                 observer(name, cleaned, result, spec.category)
             except Exception:  # pragma: no cover - an observer must never break a tool
                 log.exception("tool observer failed for %s", name)
+        picture = ""
+        if (self.audit is not None and self.audit.screenshots and self.audit_picture is not None
+                and result.ok and spec.category == "browser" and spec.changes_state):
+            try:
+                data = await self.audit_picture()
+            except Exception:  # pragma: no cover - a picture is a nicety
+                data = None
+            if data:
+                picture = self.audit.save_picture(ctx.task_id or turn_id, data)
+        self._audit(ctx, name, spec, cleaned, target, consequential, allowed, result, picture)
         return result
+
+    def _audit(self, ctx: ToolContext, name: str, spec, arguments: dict[str, Any], target,
+               consequential: bool, allowed: dict[str, Any], result: ToolResult,
+               picture: str = "") -> None:
+        if self.audit is None:
+            return
+        how = allowed.get("how", "")
+        if allowed.get("declined"):
+            how = "declined" + (" (no answer)" if allowed.get("timed_out") else "")
+        elif result.error == "denylist":
+            how = "refused (denylist)"
+        entry = {
+            "turn": current_turn_id(), "task": ctx.task_id, "tool": name,
+            "category": spec.category, "risk": spec.risk, "args": _redact(arguments),
+            "consequential": bool(consequential), "allowed": how or "no gate",
+            "ok": bool(result.ok), "summary": (result.summary or "")[:240],
+            "ms": round(result.duration_ms or 0.0),
+        }
+        if target:
+            entry["target"] = {k: v for k, v in target.items()
+                               if k in {"text", "role", "tag", "url", "href", "action", "app", "label",
+                                        "title", "name"}}
+        if picture:
+            entry["picture"] = picture
+        self.audit.record(ctx.task_id or current_turn_id(), entry)
 
 
 #: JSON-schema keys a model doesn't need to call a tool correctly.
@@ -303,6 +356,8 @@ def build_registry(deps) -> ToolRegistry:
     from .web.tools import web_tools
 
     registry = ToolRegistry()
+    registry.audit = getattr(deps, "audit", None)
+    registry.audit_picture = getattr(deps, "audit_picture", None)
     caps = deps.config.capabilities
     registry.register_all(macos_tools(deps))
     registry.register_all(everyday_tools(deps))

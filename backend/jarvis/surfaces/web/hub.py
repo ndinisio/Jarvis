@@ -131,6 +131,10 @@ class BrowserHub:
         while len(self._bound) > _MAX_BOUND:
             self._bound.popitem(last=False)
 
+    def bound(self, task_id: str | None):
+        """The browser a task is working in, if it has one."""
+        return self._bound.get(task_id) if task_id else None
+
     def release(self, task_id: str | None) -> None:
         if task_id:
             self._bound.pop(task_id, None)
@@ -205,6 +209,17 @@ class BrowserHub:
         self._jarvis_error = f"JARVIS Chrome didn't start: {last}"
         log.info(self._jarvis_error)
         return None
+
+    async def picture(self, task_id: str | None = None, *, scale: float = 0.5,
+                      quality: int = 60) -> bytes | None:
+        """A small picture of the page a task (or JARVIS generally) is working
+        on — only from a browser JARVIS drives itself, and never by starting
+        one. ``None`` when there's nothing to show."""
+        driver = self._pinned or (self._bound.get(task_id) if task_id else None) or self._jarvis_driver
+        take = getattr(driver, "picture", None)
+        if take is None:
+            return None
+        return await take(scale=scale, quality=quality)
 
     async def close(self) -> None:
         if self._jarvis_browser is not None:

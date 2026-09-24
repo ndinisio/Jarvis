@@ -12,6 +12,7 @@ import abc
 import json
 from typing import Any
 
+from ...security import denylist
 from ...security.permissions import RiskLevel
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
 from ..macos.tools import normalise_url
@@ -232,9 +233,14 @@ async def navigate(deps, ctx: ToolContext | None, target: str, browser: str = ""
         if not await driver.open(target):
             return ToolResult.failure(f"{label[:1].upper() + label[1:]} didn't load in {driver.app_name}.")
         page = await driver.current_page()
+        observation = f"Opened {page.get('title') or label} — {page.get('url') or target}"
+        refused = denylist.site_refusal(ctx.config if ctx is not None else deps.config,
+                                        str(page.get("url") or target))
+        if refused:
+            # Opening it was asked for; operating it isn't JARVIS's to do.
+            observation = f"Opened {label} — {page.get('url') or target}. {refused}"
         return ToolResult(data={"url": page.get("url") or target, "browser": driver.app_name},
-                          summary=f"Opened {label}.",
-                          observation=f"Opened {page.get('title') or label} — {page.get('url') or target}",
+                          summary=f"Opened {label}.", observation=observation,
                           display={"kind": "link", "url": target})
     # The everyday browser: the system opens it, exactly as a link would.
     result = await deps.controller.open_url(target, browser or None)
@@ -309,6 +315,9 @@ class CurrentPageTool(Tool):
                 f"{driver.app_name} didn't respond to the automation request. "
                 "It may not be running, or automation permission is missing."
             )
+        refused = denylist.site_refusal(ctx.config, page["url"])
+        if refused:
+            return ToolResult.failure(refused, detail="denylist", wrong_tool=False)
         text = ""
         if args.get("include_text", True):
             from .observe import settle

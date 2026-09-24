@@ -30,6 +30,7 @@ import time
 from typing import Any
 
 from ...core.errors import ConfirmationDeclined
+from ...security import denylist
 from ...security.permissions import RiskLevel
 from ...surfaces.web.hub import hub_of
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
@@ -96,6 +97,8 @@ class ReadPageManifestTool(Tool):
         manifest = await driver.page_manifest(limit=int(args.get("limit") or 50),
                                               roles=args.get("roles") or None,
                                               offset=int(args.get("offset") or 0))
+        # Banking, payments, password vaults: not read, whatever's asked.
+        denylist.refuse_site(ctx.config, str(manifest.get("url") or ""))
         elements = manifest.get("elements")
         if not elements:
             return ToolResult.failure(
@@ -129,10 +132,13 @@ class _PageTool(Tool):
 
     async def _ready(self, args: dict[str, Any], ctx: ToolContext | None = None):
         """The driver, once the page has stopped changing — a handle read
-        from a page mid-re-render may point at an element about to go."""
+        from a page mid-re-render may point at an element about to go — and
+        only if the page isn't one JARVIS never operates."""
         driver = await self._driver(args, ctx)
         if driver is not None:
             await settle(driver)
+            if ctx is not None:
+                denylist.refuse_site(ctx.config, str((await driver.current_page()).get("url") or ""))
         return driver
 
 

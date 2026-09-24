@@ -234,6 +234,31 @@ class PersonalityConfig(BaseModel):
     )
 
 
+# Where JARVIS never reads or operates (security/denylist.py).
+#: Password managers and the Keychain.
+BLOCKED_APPS = [
+    "1Password", "Bitwarden", "Dashlane", "LastPass", "KeePassXC", "Keychain Access",
+    "Passwords", "Enpass", "NordPass", "Proton Pass", "Keeper",
+]
+#: Windows of an app, by "App: part of the window title": where permissions
+#: and accounts are granted.
+BLOCKED_WINDOWS = [
+    "System Settings: Privacy & Security", "System Settings: Passwords",
+    "System Settings: Users & Groups", "System Settings: Login Items",
+    "System Preferences: Security & Privacy", "System Preferences: Users & Groups",
+]
+#: Banking, payments and password vaults on the web — by host. An entry
+#: without a dot ("bank") matches any host containing it.
+BLOCKED_SITES = [
+    "bank", "paypal.com", "revolut.com", "monzo.com", "wise.com", "starlingbank.com",
+    "hsbc.co.uk", "hsbc.com", "barclays.co.uk", "natwest.com", "santander.co.uk",
+    "nationwide.co.uk", "halifax.co.uk", "lloydsbank.com", "chase.com", "wellsfargo.com",
+    "americanexpress.com", "capitalone.com", "klarna.com", "coinbase.com",
+    "vault.bitwarden.com", "my.1password.com", "passwords.google.com", "lastpass.com",
+    "appleid.apple.com",
+]
+
+
 class SecurityConfig(BaseModel):
     #: How much JARVIS asks while carrying out something you asked it to do.
     #:
@@ -247,6 +272,21 @@ class SecurityConfig(BaseModel):
     #:
     #: HIGH-risk actions and privacy consents ask whatever this says.
     autonomy: Literal["consequential_only", "confirm_start", "confirm_each_step"] = "consequential_only"
+    #: Apps JARVIS never reads or operates (it can still open them for you):
+    #: password managers and the Keychain. See security/denylist.py.
+    blocked_apps: list[str] = Field(default_factory=lambda: list(BLOCKED_APPS))
+    #: Windows it never operates, as "App: part of the title" — where
+    #: permissions and accounts are granted.
+    blocked_windows: list[str] = Field(default_factory=lambda: list(BLOCKED_WINDOWS))
+    #: Sites it never reads or operates, by host ("bank" matches any host
+    #: containing it): banking, payments, password vaults.
+    blocked_sites: list[str] = Field(default_factory=lambda: list(BLOCKED_SITES))
+    #: Keep a per-task record of every action JARVIS took (~/JARVIS/audit).
+    audit: bool = True
+    #: …with a small screenshot of JARVIS Chrome after each action on a page.
+    audit_screenshots: bool = False
+    #: Days of audit records to keep.
+    audit_days: int = 30
     #: Risk levels that execute without asking.
     auto_approve: list[str] = Field(default_factory=lambda: ["low"])
     #: Risk levels that always require an explicit confirmation.
@@ -624,11 +664,17 @@ _ENV_MAP: dict[str, tuple[str, ...]] = {
 }
 
 
-def _deep_merge(base: dict, overlay: dict) -> dict:
+#: Settings that are the user's own maps (site → browser): an update
+#: replaces them whole, so an entry removed in Settings is really removed.
+_REPLACED_MAPS = {("browser", "site_overrides")}
+
+
+def _deep_merge(base: dict, overlay: dict, _path: tuple[str, ...] = ()) -> dict:
     out = dict(base)
     for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
+        path = (*_path, key)
+        if isinstance(value, dict) and isinstance(out.get(key), dict) and path not in _REPLACED_MAPS:
+            out[key] = _deep_merge(out[key], value, path)
         else:
             out[key] = value
     return out
