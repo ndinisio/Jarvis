@@ -108,7 +108,8 @@ export function Settings() {
             <Field label="Whisper model">
               <select value={draft.voice.stt_model}
                       onChange={(e) => set(['voice', 'stt_model'], e.target.value)}>
-                {['tiny.en', 'base.en', 'small.en', 'medium.en', 'large-v3'].map((m) => (
+                <option value="">Automatic — best for this Mac</option>
+                {['tiny.en', 'base.en', 'small.en', 'medium.en', 'large-v3-turbo', 'large-v3'].map((m) => (
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>

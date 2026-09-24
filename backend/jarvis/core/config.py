@@ -511,7 +511,13 @@ class EmailConfig(BaseModel):
     sent_mailbox: str = "Sent"
 
 
+#: The shape and defaults of the settings file. A file written by an older
+#: JARVIS is upgraded once when it is loaded (see :func:`_upgrade`).
+CONFIG_VERSION = 3
+
+
 class Config(BaseModel):
+    config_version: int = CONFIG_VERSION
     workspace: str = "~/JARVIS"
     log_level: str = "INFO"
     server: ServerConfig = ServerConfig()
@@ -722,13 +728,62 @@ class ConfigStore:
             tmp.replace(self._path)
 
 
+#: Defaults that changed in v3.0, with every value they had before. JARVIS
+#: saves every setting the first time it runs, so a file still holding one of
+#: these old values never chose it — it is moved to today's default. Anything
+#: else in the file is the user's own choice and is left exactly as it is.
+_V3_OLD_DEFAULTS: dict[tuple[str, ...], list[Any]] = {
+    ("models", "fast", "model"): ["llama3.2:1b"],
+    ("models", "general", "model"): ["llama3.1:8b"],
+    ("models", "vision", "model"): ["llava:7b"],
+    ("models", "vision", "num_ctx"): [0],
+    ("models", "fallbacks", "fast"): [
+        ["llama3.2:1b", "qwen2.5:1.5b", "gemma3:1b", "qwen2.5:3b", "phi3:mini", "llama3.2:3b"]],
+    ("models", "fallbacks", "general"): [
+        ["llama3.1:8b", "qwen2.5:7b", "gemma3:4b", "mistral:7b", "llama3.2:3b", "qwen2.5:3b"]],
+    ("models", "fallbacks", "vision"): [
+        ["llava:7b", "qwen2.5vl:7b", "llama3.2-vision:11b", "moondream", "minicpm-v"]],
+    ("voice", "stt_engine"): ["faster-whisper"],
+    ("voice", "stt_model"): ["base.en"],
+}
+
+
+def _get_path(data: dict, path: tuple[str, ...]) -> Any:
+    for key in path:
+        if not isinstance(data, dict) or key not in data:
+            return _MISSING
+        data = data[key]
+    return data
+
+
+_MISSING = object()
+
+
+def _upgrade(saved: dict) -> list[str]:
+    """Bring a settings file written by an older JARVIS up to date, in
+    place. Returns the settings that moved to a new default."""
+    if int(saved.get("config_version") or 1) >= CONFIG_VERSION:
+        return []
+    defaults = Config().model_dump()
+    moved = []
+    for path, old_values in _V3_OLD_DEFAULTS.items():
+        if _get_path(saved, path) in old_values:
+            _set_path(saved, path, _get_path(defaults, path))
+            moved.append(".".join(path))
+    saved["config_version"] = CONFIG_VERSION
+    return moved
+
+
 def load_config(path: Path | None = None) -> Config:
     """Build the effective configuration: defaults ← file ← environment."""
     data = Config().model_dump()
     path = path or default_config_path()
     if path.exists():
         with contextlib.suppress(json.JSONDecodeError, OSError):
-            data = _deep_merge(data, json.loads(path.read_text(encoding="utf-8")))
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                _upgrade(saved)
+                data = _deep_merge(data, saved)
     data = _deep_merge(data, _env_overlay())
     config = Config.model_validate(data)
     # `say` only exists on macOS; fall back to browser speech synthesis so the
@@ -743,6 +798,16 @@ def create_store(path: Path | None = None) -> ConfigStore:
     config = load_config(path)
     config.ensure_workspace()
     store = ConfigStore(config, path)
-    if not path.exists():
+    if not path.exists() or _saved_version(path) < CONFIG_VERSION:
+        # First run, or a file from an older JARVIS that load_config has just
+        # upgraded: write it back so the upgrade happens once.
         store.save()
     return store
+
+
+def _saved_version(path: Path) -> int:
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        return int(saved.get("config_version") or 1) if isinstance(saved, dict) else 1
+    except (OSError, ValueError, TypeError, AttributeError):
+        return CONFIG_VERSION  # unreadable: leave the file alone

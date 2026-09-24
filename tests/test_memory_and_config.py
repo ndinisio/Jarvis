@@ -155,3 +155,66 @@ def test_workspace_directories_are_created(config: Config):
     root = config.ensure_workspace()
     for directory in ("config", "memory", "logs", "tasks", "notes", "captures"):
         assert (root / directory).is_dir()
+
+
+# -- upgrading a settings file written by an older JARVIS --------------------------
+
+def _v13_settings_file(tmp_path, **overrides):
+    """What JARVIS 1.3 wrote on first run: every setting, at its 1.3 default."""
+    saved = Config().model_dump()
+    del saved["config_version"]
+    saved["models"]["fast"]["model"] = "llama3.2:1b"
+    saved["models"]["general"]["model"] = "llama3.1:8b"
+    saved["models"]["vision"]["model"] = "llava:7b"
+    saved["models"]["fallbacks"]["general"] = [
+        "llama3.1:8b", "qwen2.5:7b", "gemma3:4b", "mistral:7b", "llama3.2:3b", "qwen2.5:3b"]
+    saved["voice"]["stt_engine"] = "faster-whisper"
+    saved["voice"]["stt_model"] = "base.en"
+    for dotted, value in overrides.items():
+        cursor = saved
+        *parents, last = dotted.split(".")
+        for part in parents:
+            cursor = cursor[part]
+        cursor[last] = value
+    path = tmp_path / "config" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    return path
+
+
+def test_old_defaults_move_to_the_new_ones_and_choices_are_kept(tmp_path, monkeypatch):
+    from jarvis.core.config import CONFIG_VERSION, create_store
+
+    for name in ("JARVIS_GENERAL_MODEL", "JARVIS_FAST_MODEL", "JARVIS_VISION_MODEL", "JARVIS_STT_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    path = _v13_settings_file(tmp_path, **{"models.vision.model": "llama3.2-vision:11b",
+                                           "personality.address_user_as": "boss",
+                                           "workspace": str(tmp_path / "JARVIS")})
+    config = create_store(path).current
+    assert config.models.general.model == "qwen3:8b"
+    assert config.models.fast.model == "", "the separate 1B model is dropped; fast uses general"
+    assert config.models.fallbacks["general"][0] == "qwen3:8b"
+    assert (config.voice.stt_engine, config.voice.stt_model) == ("auto", "")
+    # What the user chose is theirs.
+    assert config.models.vision.model == "llama3.2-vision:11b"
+    assert config.personality.address_user_as == "boss"
+    # Written back once, so it doesn't happen again.
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["config_version"] == CONFIG_VERSION
+    assert saved["models"]["general"]["model"] == "qwen3:8b"
+
+
+def test_a_model_chosen_after_the_upgrade_is_never_changed_back(tmp_path, monkeypatch):
+    from jarvis.core.config import create_store
+
+    monkeypatch.delenv("JARVIS_GENERAL_MODEL", raising=False)
+    path = _v13_settings_file(tmp_path, workspace=str(tmp_path / "JARVIS"))
+    store = create_store(path)
+    store.update({"models": {"general": {"model": "llama3.1:8b"}}})
+    assert create_store(path).current.models.general.model == "llama3.1:8b"
+
+
+def test_the_environment_still_overrides_an_upgraded_file(tmp_path, monkeypatch):
+    path = _v13_settings_file(tmp_path, workspace=str(tmp_path / "JARVIS"))
+    monkeypatch.setenv("JARVIS_GENERAL_MODEL", "mistral:7b")
+    assert load_config(path).models.general.model == "mistral:7b"

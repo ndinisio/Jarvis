@@ -11,14 +11,35 @@ warn() { printf "\033[38;5;214m▸\033[0m %s\n" "$1"; }
 say "JARVIS setup — $ROOT"
 
 # --- Python ------------------------------------------------------------------
-PYTHON="${PYTHON:-python3}"
-if ! command -v "$PYTHON" >/dev/null; then
-  warn "python3 was not found. Install it from python.org or with: brew install python@3.12"
+# JARVIS needs Python 3.10+. The python3 that ships with macOS is 3.9, so look
+# for a newer one (Homebrew, python.org) before giving up.
+python_ok() { "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; }
+python_version() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "none"; }
+
+if [ -n "${PYTHON:-}" ]; then
+  CANDIDATES="$PYTHON"
+else
+  CANDIDATES="python3.12 python3.11 python3.13 python3.10 python3 /opt/homebrew/bin/python3 /usr/local/bin/python3"
+fi
+PYTHON=""
+for candidate in $CANDIDATES; do
+  if command -v "$candidate" >/dev/null 2>&1 && python_ok "$candidate"; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+if [ -z "$PYTHON" ]; then
+  warn "JARVIS needs Python 3.10 or newer; this Mac's python3 is $(python_version python3)."
+  warn "Install one with: brew install python@3.12  (or from python.org), then run this again."
   exit 1
 fi
+say "Using Python $(python_version "$PYTHON") ($(command -v "$PYTHON"))"
 
-VERSION=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-say "Using Python $VERSION"
+# An environment built on an older Python can't run this version: rebuild it.
+if [ -x .venv/bin/python ] && ! python_ok .venv/bin/python; then
+  say "Rebuilding the virtual environment (it was Python $(python_version .venv/bin/python))"
+  rm -rf .venv
+fi
 
 if [ ! -d .venv ]; then
   say "Creating the virtual environment"
@@ -33,6 +54,11 @@ if [ "${WITH_VOICE:-1}" = "1" ]; then
   say "Installing local voice support (Whisper + wake word)"
   ./.venv/bin/pip install --quiet -e ".[voice]" || \
     warn "Voice extras failed to install — JARVIS will run without local speech input."
+  if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    say "Installing speech recognition for the Apple Silicon GPU (Whisper large-v3-turbo)"
+    ./.venv/bin/pip install --quiet -e ".[mlx]" || \
+      warn "mlx-whisper failed to install — speech recognition will run on the CPU instead."
+  fi
 fi
 
 if [ "${WITH_BROWSER:-1}" = "1" ]; then
@@ -65,9 +91,8 @@ if command -v ollama >/dev/null; then
     say "Ollama is running. Installed models:"
     ollama list | sed 's/^/    /'
     printf "\n"
-    say "Recommended for JARVIS:  ollama pull llama3.2:1b   (fast)"
-    say "                         ollama pull llama3.1:8b   (general)"
-    say "                         ollama pull llava:7b      (vision)"
+    say "Recommended for JARVIS:  ./scripts/pull-models.sh --vision"
+    say "                         (qwen3:8b for everything, qwen2.5vl:7b to see the screen)"
   else
     warn "Ollama is installed but not running. Start it with: ollama serve"
   fi

@@ -88,7 +88,8 @@ def _serve(args) -> int:
     print(BANNER)
     print(f"  Workspace : {config.workspace_path}")
     print(f"  Interface : http://{host}:{port}")
-    print(f"  Models    : fast={config.models.fast.model}  general={config.models.general.model}")
+    print(f"  Models    : general={config.models.general.model}  "
+          f"fast={config.models.fast.model or '(general)'}  vision={config.models.vision.model}")
     print(f"  Voice     : wake “{config.voice.wake_word}”, {config.voice.tts_engine} speech\n")
 
     from .server import FRONTEND_DIST, create_app

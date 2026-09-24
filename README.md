@@ -474,6 +474,21 @@ cd frontend && npm install && npm run build && cd ..
 ```
 </details>
 
+### Upgrading an existing copy
+
+```bash
+git pull
+./scripts/setup.sh
+./scripts/pull-models.sh --vision
+```
+
+`setup.sh` finds a Python 3.10 or newer by itself (the `python3` that comes
+with macOS is 3.9 — `brew install python@3.12` if it can't find one) and
+rebuilds an environment made with an older Python. Your settings file is
+upgraded on the next start: anything still at an old default (the llama
+models, small Whisper) moves to the new default, and anything you chose
+yourself is kept.
+
 ### What `setup.sh` installs
 
 | Package | Why | Optional? |
