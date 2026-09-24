@@ -65,8 +65,11 @@ async def run(args) -> list[TaskResult]:
                 result = await harness.run_task(task, phrasing)
                 results.append(result)
                 mark = "PASS" if result.ok else "FAIL"
+                first = "—" if result.first_action_s is None else f"{result.first_action_s:.1f}s"
                 print(f"{mark}  {task.id:<28} {result.wall_s:6.1f}s  tools={result.tool_calls:<3} "
-                      f"models={result.model_calls:<3} {phrasing[:60]}", flush=True)
+                      f"models={result.model_calls:<3} first={first:<5} "
+                      f"[model {result.model_s:.1f} act {result.act_s:.1f} look {result.look_s:.1f} "
+                      f"wait {result.wait_s:.1f}] {phrasing[:48]}", flush=True)
                 if not result.ok and args.verbose:
                     for failure in result.failures:
                         print(f"      - {failure}")
@@ -83,6 +86,13 @@ def summarise(results: list[TaskResult]) -> dict:
         stats[0] += r.ok
         stats[1] += 1
     walls = sorted(r.wall_s for r in results if r.ok) or [0.0]
+    firsts = sorted(r.first_action_s for r in results if r.first_action_s is not None) or [0.0]
+
+    def share(key: str) -> float:
+        spent = sum(getattr(r, f"{key}_s") for r in results)
+        whole = sum(r.wall_s for r in results)
+        return round(spent / whole, 3) if whole else 0.0
+
     return {
         "total": total, "passed": passed,
         "success_rate": round(passed / total, 3) if total else 0.0,
@@ -90,6 +100,10 @@ def summarise(results: list[TaskResult]) -> dict:
         "p50_wall_s_passed": walls[len(walls) // 2],
         "mean_model_calls": round(sum(r.model_calls for r in results) / total, 2) if total else 0.0,
         "mean_tool_calls": round(sum(r.tool_calls for r in results) / total, 2) if total else 0.0,
+        "p50_first_action_s": firsts[len(firsts) // 2],
+        # Where the wall-clock time went, across the whole run.
+        "time_share": {key: share(key) for key in ("model", "act", "look", "wait", "other")},
+        "mean_prompt_tokens": round(sum(r.prompt_tokens for r in results) / total) if total else 0,
     }
 
 

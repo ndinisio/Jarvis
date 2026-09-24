@@ -113,7 +113,7 @@ class ModelsConfig(BaseModel):
     #: Qwen3-class model with native tool calling; ``evals/bake_off.py``
     #: measures the alternatives on your own Mac.
     general: ModelSlotConfig = ModelSlotConfig(model="qwen3:8b", max_tokens=900, timeout_s=120.0,
-                                               num_ctx=8192, think=False)
+                                               num_ctx=12288, think=False)
     #: Vision model: screen understanding and visual grounding.
     vision: ModelSlotConfig = ModelSlotConfig(model="qwen2.5vl:7b", max_tokens=600, timeout_s=180.0,
                                               num_ctx=8192)
@@ -129,7 +129,7 @@ class ModelsConfig(BaseModel):
     #: than conversation needs. A longer timeout is deliberate — this slot is
     #: asked for structured output, which is worth waiting a little longer for.
     reasoning: ModelSlotConfig = ModelSlotConfig(
-        model="", temperature=0.1, max_tokens=700, timeout_s=90.0, num_ctx=8192, think=False
+        model="", temperature=0.1, max_tokens=700, timeout_s=90.0, num_ctx=12288, think=False
     )
     #: The model that operates the computer step by step (v3.0). Empty
     #: defers to ``reasoning``. This is the slot a free cloud accelerator is
@@ -522,7 +522,7 @@ class EmailConfig(BaseModel):
 
 #: The shape and defaults of the settings file. A file written by an older
 #: JARVIS is upgraded once when it is loaded (see :func:`_upgrade`).
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 
 class Config(BaseModel):
@@ -738,10 +738,12 @@ class ConfigStore:
             tmp.replace(self._path)
 
 
-#: Defaults that changed in v3.0, with every value they had before. JARVIS
-#: saves every setting the first time it runs, so a file still holding one of
-#: these old values never chose it — it is moved to today's default. Anything
-#: else in the file is the user's own choice and is left exactly as it is.
+#: Defaults that changed, by the settings version that changed them, with
+#: every value they had before. JARVIS saves every setting the first time it
+#: runs, so a file still holding one of these old values never chose it — it
+#: is moved to today's default, once, when a file older than that version is
+#: loaded. Anything else in the file is the user's own choice and is left
+#: exactly as it is (including an old value chosen again after the upgrade).
 _V3_OLD_DEFAULTS: dict[tuple[str, ...], list[Any]] = {
     ("models", "fast", "model"): ["llama3.2:1b"],
     ("models", "general", "model"): ["llama3.1:8b"],
@@ -755,6 +757,15 @@ _V3_OLD_DEFAULTS: dict[tuple[str, ...], list[Any]] = {
         ["llava:7b", "qwen2.5vl:7b", "llama3.2-vision:11b", "moondream", "minicpm-v"]],
     ("voice", "stt_engine"): ["faster-whisper"],
     ("voice", "stt_model"): ["base.en"],
+}
+_OLD_DEFAULTS: dict[int, dict[tuple[str, ...], list[Any]]] = {
+    3: _V3_OLD_DEFAULTS,
+    # v3.0 Phase 8: room for a page listing and the tools beside it (the KV
+    # cache is quantised by setup.sh, so this costs about what 8k did).
+    4: {
+        ("models", "general", "num_ctx"): [8192],
+        ("models", "reasoning", "num_ctx"): [8192],
+    },
 }
 
 
@@ -772,14 +783,18 @@ _MISSING = object()
 def _upgrade(saved: dict) -> list[str]:
     """Bring a settings file written by an older JARVIS up to date, in
     place. Returns the settings that moved to a new default."""
-    if int(saved.get("config_version") or 1) >= CONFIG_VERSION:
+    version = int(saved.get("config_version") or 1)
+    if version >= CONFIG_VERSION:
         return []
     defaults = Config().model_dump()
     moved = []
-    for path, old_values in _V3_OLD_DEFAULTS.items():
-        if _get_path(saved, path) in old_values:
-            _set_path(saved, path, _get_path(defaults, path))
-            moved.append(".".join(path))
+    for changed_in, table in sorted(_OLD_DEFAULTS.items()):
+        if changed_in <= version:
+            continue
+        for path, old_values in table.items():
+            if _get_path(saved, path) in old_values:
+                _set_path(saved, path, _get_path(defaults, path))
+                moved.append(".".join(path))
     saved["config_version"] = CONFIG_VERSION
     return moved
 

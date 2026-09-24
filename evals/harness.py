@@ -52,6 +52,18 @@ class TaskResult:
     tools: list[str] = field(default_factory=list)
     error: str = ""
     target_phase: int = 1
+    #: Where the time went (core/latency.py), in seconds: to the first
+    #: action, then model / acting / looking / waiting for pages / the rest.
+    first_action_s: float | None = None
+    model_s: float = 0.0
+    act_s: float = 0.0
+    look_s: float = 0.0
+    wait_s: float = 0.0
+    other_s: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    #: Each model call and tool, when it started and how long it took.
+    timeline: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -243,6 +255,16 @@ async def drive_turn(app, text: str, record: TaskResult, *, approve: list[str],
     summary = app.telemetry.summary()
     record.model_calls = sum(int(summary.get(name, {}).get("count", 0))
                              for name in ("model.stream", "model.chat"))
+    timings = app.telemetry.requests(1)
+    if timings:
+        timing = timings[-1]
+        if timing.get("first_action_ms") is not None:
+            record.first_action_s = round(timing["first_action_ms"] / 1000.0, 2)
+        for key in ("model", "act", "look", "wait", "other"):
+            setattr(record, f"{key}_s", round((timing.get(f"{key}_ms") or 0) / 1000.0, 2))
+        record.prompt_tokens = int(timing.get("prompt_tokens") or 0)
+        record.completion_tokens = int(timing.get("completion_tokens") or 0)
+        record.timeline = list(timing.get("steps") or [])
 
 
 async def _converse(app, text: str, record: TaskResult) -> None:

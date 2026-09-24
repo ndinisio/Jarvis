@@ -461,7 +461,14 @@ _SIGNATURE_SCRIPT = """(function(){
 function watch(win) {
   if (!win.__jarvisObserver) {
     win.__jarvisMutations = 0;
-    win.__jarvisObserver = new win.MutationObserver(function(records) { win.__jarvisMutations += records.length; });
+    // JARVIS's own element tags (data-jarvis-id, set when it reads the
+    // page) aren't the page changing.
+    win.__jarvisObserver = new win.MutationObserver(function(records) {
+      for (var r = 0; r < records.length; r++) {
+        var name = records[r].attributeName || '';
+        if (records[r].type !== 'attributes' || name.indexOf('data-jarvis') !== 0) win.__jarvisMutations++;
+      }
+    });
     win.__jarvisObserver.observe(win.document, {subtree: true, childList: true, attributes: true, characterData: true});
   }
   return win.__jarvisMutations;
@@ -479,9 +486,61 @@ for (var i = 0; i < frames.length; i++) {
   } catch (e) {}
 }
 var body = document.body;
+// Work the page still has queued (see PENDING_WORK_INIT): -1 where it
+// isn't being counted.
+function queued(win) {
+  var timers = win.__jarvisPending;
+  if (!timers) return -1;
+  var n = timers.size;
+  try {
+    if (win.document.getAnimations) {
+      n += win.document.getAnimations().filter(function(a) { return a.playState === 'running'; }).length;
+    }
+  } catch (e) {}
+  return n;
+}
+var pending = queued(window);
+for (var j = 0; j < frames.length && pending >= 0; j++) {
+  try {
+    var fwin = frames[j].contentWindow;
+    if (fwin && fwin.document && fwin.document.documentElement) {
+      var more = queued(fwin);
+      pending = more < 0 ? -1 : pending + more;
+    }
+  } catch (e) {}
+}
 return state + ':' + window.location.href + ':' + total + ':' +
-       (body ? body.getElementsByTagName('*').length : 0);
+       (body ? body.getElementsByTagName('*').length : 0) + '|' + pending;
 })()"""
+
+#: Installed at the start of every document in JARVIS Chrome (every frame):
+#: keeps count of the short timers a page has queued. A single-page app that
+#: renders "in a moment" usually does it from one — so a page with nothing
+#: queued, no animation running, no request in flight and no change for a
+#: beat really is finished, and needn't be watched for the full half-second.
+PENDING_WORK_INIT = """(function () {
+  if (window.__jarvisPending) return;
+  var pending = new Set();
+  var nativeSet = window.setTimeout, nativeClear = window.clearTimeout;
+  window.__jarvisPending = pending;
+  window.setTimeout = function (handler, delay) {
+    var ms = Number(delay) || 0;
+    if (typeof handler !== 'function' || ms > 1500) {
+      return nativeSet.apply(window, arguments);
+    }
+    var rest = Array.prototype.slice.call(arguments, 2);
+    var id = nativeSet.call(window, function () {
+      pending.delete(id);
+      return handler.apply(this, rest);
+    }, ms);
+    pending.add(id);
+    return id;
+  };
+  window.clearTimeout = function (id) {
+    pending.delete(id);
+    return nativeClear.apply(window, arguments);
+  };
+})();"""
 
 
 def build_scroll_script(direction: str = "down", handle: str = "") -> str:

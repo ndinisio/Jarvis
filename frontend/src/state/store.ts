@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type {
   Activity, AssistantState, Confirmation, JarvisEvent, Message, Panel,
-  Reasoning, RouteTrace, Task, TelemetrySpan, TraceEntry, VoiceState,
+  Reasoning, RequestTiming, RouteTrace, Task, TelemetrySpan, TraceEntry, VoiceState,
 } from '../lib/events'
 import { EV } from '../lib/events'
 
@@ -46,6 +46,7 @@ interface StoreState {
   reasoning: Reasoning | null
   reasoningTrace: TraceEntry[]
   telemetry: TelemetrySpan[]
+  timings: RequestTiming[]
   notices: { id: string; level: string; message: string; ts: number }[]
   devMode: boolean
   showSettings: boolean
@@ -81,6 +82,7 @@ export const useStore = create<StoreState>((set, get) => ({
   reasoning: null,
   reasoningTrace: [],
   telemetry: [],
+  timings: [],
   notices: [],
   devMode: false,
   showSettings: false,
@@ -285,6 +287,16 @@ export const useStore = create<StoreState>((set, get) => ({
           telemetry: [...s.telemetry, event as unknown as TelemetrySpan].slice(-120),
         }))
         break
+
+      case EV.REQUEST_TIMING: {
+        // The same request is published again as it progresses (replied,
+        // answered in the background, spoken): keep the latest of each.
+        const timing = event as unknown as RequestTiming
+        set((s) => ({
+          timings: [...s.timings.filter((t) => t.id !== timing.id), timing].slice(-20),
+        }))
+        break
+      }
 
       case EV.ERROR:
       case EV.NOTICE:

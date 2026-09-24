@@ -47,6 +47,7 @@ from ..intelligence.state import ConversationState, PendingClarification, attach
 from ..router.router import Router
 from ..router.schema import RouteDecision, RouteKind, RoutePath
 from ..tasks.manager import Task
+from . import latency
 from .context import ContextBuilder
 from .errors import Cancelled, ConfirmationDeclined, JarvisError
 from .events import AssistantState, EventType
@@ -131,6 +132,8 @@ class Orchestrator:
         log.info("turn_id=%s stage=received source=%s text=%r", turn_id, source, text[:60])
 
         turn = self.deps.telemetry.mark("turn.total", source=source)
+        timeline, timing = self.deps.telemetry.begin_request(
+            turn_id, text, source=source, stt_ms=self._recognition_ms(source))
         bus = self.deps.bus
         bus.publish(EventType.TRANSCRIPT, text=text, final=True, source=source)
 
@@ -179,6 +182,8 @@ class Orchestrator:
 
         span = turn.stop(route=f"{decision.kind}:{decision.name}", path=decision.path)
         result.duration_ms = span.duration_ms if span else 0.0
+        self.deps.telemetry.end_turn(timeline, timing, route=f"{decision.kind}:{decision.name}",
+                                     task_id=result.task_id)
         bus.emit_state(AssistantState.IDLE)
         return result
 
@@ -418,6 +423,7 @@ class Orchestrator:
             self.deps.bus.publish(EventType.ASSISTANT_DELTA, delta=delta,
                                   task_id=task.id if task else None)
             if self.voice is not None and task is None:
+                latency.answering()
                 spoken_buffer.append(delta)
                 buffered = "".join(spoken_buffer)
                 if re.search(r"[.!?]\s$|[.!?]$", buffered) and len(buffered) > 40:
@@ -579,15 +585,19 @@ class Orchestrator:
         # the same moment the acknowledgement is spoken.
         task = self.deps.tasks.create(kind, title)
         await self._respond(acknowledgement, decision, speak=True, store=False,
-                            keep_state=True, task_id=task.id)
+                            keep_state=True, task_id=task.id, result=False)
 
         async def run(task_ref: Task):
             started = time.perf_counter()
-            outcome = await runner(task_ref)
-            duration = (time.perf_counter() - started) * 1000.0
-            self.deps.telemetry.record(f"task.{task_ref.kind}", duration, ok=True)
-            await self._deliver_background(outcome, decision, task_ref)
-            return outcome
+            try:
+                outcome = await runner(task_ref)
+                duration = (time.perf_counter() - started) * 1000.0
+                self.deps.telemetry.record(f"task.{task_ref.kind}", duration, ok=True)
+                await self._deliver_background(outcome, decision, task_ref)
+                return outcome
+            finally:
+                # Delivered, failed or stopped: the request is over either way.
+                self.deps.telemetry.finish_request()
 
         task._runner = asyncio.create_task(self.deps.tasks._run(task, run))
         return TurnResult(acknowledgement, acknowledgement, decision, 0.0, task_id=task.id)
@@ -627,9 +637,14 @@ class Orchestrator:
     async def _respond(self, text: str, decision: RouteDecision, *, spoken: str | None = None,
                        display: dict | None = None, error: str | None = None,
                        speak: bool = True, store: bool = True, task_id: str | None = None,
-                       already_streamed: bool = False, keep_state: bool = False) -> TurnResult:
+                       already_streamed: bool = False, keep_state: bool = False,
+                       result: bool = True) -> TurnResult:
+        """Show, store and speak a reply. ``result`` is false for an
+        acknowledgement of work still to come — its speech isn't the answer."""
         bus = self.deps.bus
         spoken_text = spoken if spoken is not None else speakable(text)
+        if result:
+            latency.answering()
 
         bus.publish(
             EventType.ASSISTANT_MESSAGE,
@@ -679,6 +694,13 @@ class Orchestrator:
     # ------------------------------------------------------------------
     def _tool_context(self, task: Task | None = None):
         return self.deps.tool_context(task=task)
+
+    def _recognition_ms(self, source: str) -> float:
+        """How long speech recognition took for the sentence that just
+        arrived, when it came from the microphone."""
+        if source != "voice" or self.voice is None:
+            return 0.0
+        return float(getattr(self.voice, "last_recognition_ms", 0.0) or 0.0)
 
     def _recent_context(self) -> str:
         messages = self.deps.memory.recent_messages(4)

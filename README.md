@@ -315,7 +315,11 @@ to the agent, which works out that the BBC is a website. A launch that was
 *refused* says something different, and is reported plainly instead.
 
 Developer mode (the `DEV` button) shows the path, the model and the latency of
-every request, so a slow path is obvious rather than mysterious.
+every request, so a slow path is obvious rather than mysterious — and, for
+each request, **where the time went**: how long until JARVIS did something,
+then model / acting / looking / waiting for pages, as one bar per request,
+followed into any background errand and on to the moment its answer is
+spoken (see [What it costs](#what-it-costs)).
 
 ---
 
@@ -538,6 +542,23 @@ Measured per turn and visible in developer mode: intent latency, model latency,
 tool latency, total task latency, model calls, tool calls and repairs. The
 `intelligence.turn` telemetry span carries the same numbers.
 
+Every request also gets a **timeline** (`core/latency.py`) that follows it
+from the sentence arriving — through any background task it starts — to its
+answer: **time to first action**; model time (and tokens), acting, looking
+(the page or window read again) and waiting for pages; when the answer was
+ready; and, with voice, from the end of your sentence (recognition included)
+to hearing it. The web benchmark reports the same split for every task.
+
+**Waiting is where the time went, so that's what was cut.** A page must be
+loaded, finished fetching and still before JARVIS acts on it or reads it —
+but not twice: a look straight after an action's own wait, or the check before
+the next action, costs one glance at the page when nothing has changed since.
+JARVIS Chrome counts the work each page still has queued (short timers,
+running animations, requests in flight), so a page that shows it's finished
+needs a quarter of a second of stillness, while one that's about to re-render
+still gets the full wait. On the benchmark's shop errands that took a
+three-step recipe from 5 seconds to 1.1, with every task still passing.
+
 | Path | Model calls | Typical |
 | --- | --- | --- |
 | Quick command | 0 | 3–5 ms |
@@ -660,7 +681,17 @@ feel slow:
 
 Thinking is switched off by default (`"think": false`) — a Qwen3-class model
 that deliberates before every click is accurate and slow; per slot you can
-turn it back on. **Which model is best on your Mac is measured, not guessed:**
+turn it back on.
+
+**Memory on a 16 GB Mac.** The resident model gets a 12k-token context — room
+for a page's elements *and* the tools beside them. `setup.sh` switches Ollama
+to flash attention with an 8-bit KV cache (`OLLAMA_FLASH_ATTENTION=1`,
+`OLLAMA_KV_CACHE_TYPE=q8_0`, via `launchctl setenv`; quit and reopen Ollama
+once), which halves that context's memory: `qwen3:8b` then needs about 6 GB in
+all. Running `ollama serve` yourself? Export the same two variables first.
+JARVIS keeps the model loaded for `keep_alive` (30 minutes) and loads it again
+the moment it hears the wake word, so the model is ready by the time your
+sentence has been transcribed. **Which model is best on your Mac is measured, not guessed:**
 `python -m evals.bake_off --pull` runs the understanding corpus and the web
 tasks against each candidate and prints success, latency and memory side by
 side (see [`evals/README.md`](evals/README.md)).
@@ -827,7 +858,7 @@ file) override the file — see [`.env.example`](.env.example).
   "workspace": "~/JARVIS",
   "models": {
     "fast":       { "provider": "ollama", "model": "" },           // empty → uses general
-    "general":    { "provider": "ollama", "model": "qwen3:8b", "num_ctx": 8192, "think": false },
+    "general":    { "provider": "ollama", "model": "qwen3:8b", "num_ctx": 12288, "think": false },
     "reasoning":  { "provider": "ollama", "model": "" },           // empty → uses general
     "operator":   { "provider": "ollama", "model": "", "chain": [] },  // empty → uses reasoning
     "vision":     { "provider": "ollama", "model": "qwen2.5vl:7b" },
@@ -1007,7 +1038,8 @@ backend/jarvis/
 │   ├── config.py              defaults ← config file ← environment
 │   ├── context.py             layered prompt context (never the whole history)
 │   ├── personality.py         the phrasebook and system prompt
-│   └── telemetry.py           spans: router, model TTFT, tools, tasks
+│   ├── telemetry.py           spans: router, model TTFT, tools, tasks
+│   └── latency.py             one timeline per request: first action, where the time went
 ├── router/
 │   ├── quick.py               deterministic command engine (the fast path)
 │   └── router.py              heuristics and fast-model classification

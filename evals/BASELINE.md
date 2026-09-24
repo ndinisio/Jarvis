@@ -252,3 +252,47 @@ What changed:
   confirmation — "order me the earbuds" no longer finds the *orders* recipe.
 
 39 tests, including one per guard proven by reverting it.
+
+
+## Phase 8 — Speed, and where the time goes
+
+**Web tasks, oracle: every phrasing 72 / 72, median task 1.07 s** (Phase 7:
+5.37 s — five times faster, same model calls). A recipe errand ("add a desk
+lamp to my Amazon basket": search, open the result, add it) went from 5.0 s to
+1.1 s.
+
+The benchmark now reports, per task, the time to the first action and the
+split between model, acting, looking and waiting (`time_share` in the
+summary; each task's `timeline` in the results file). Before this phase the
+oracle's wall time was **95% waiting for pages** — on a local mock site that
+loads instantly. Three things were costing it:
+
+- **Settling twice per action.** Every action settled the page, then the look
+  after it settled it again. A full settle is now remembered; the next one
+  returns at once if nothing has acted on the page since (every page tool
+  marks it, any other tool marks every page), no request has gone out, and
+  the DOM is unchanged — JARVIS's own `data-jarvis-id` tags, added whenever it
+  reads a page, used to count as a change and defeated exactly this.
+- **Waiting for the network, then for stillness.** 0.25 s of network quiet
+  followed by 0.5 s of stillness, one after the other, even on a page that
+  had finished long before. Now one loop checks both: 0.5 s still, and 0.75 s
+  since the last request (the same margin as before for a render that follows
+  its data), with "since the last request" measured from the request itself.
+- **Not knowing when a page is done.** JARVIS Chrome now counts each page's
+  pending short timers (installed at document start) and running animations.
+  A page with nothing queued and the network idle needs 0.25 s of stillness;
+  one with a timer pending — the mock single-page app renders 500 ms after its
+  data — still gets the full wait, and still passes.
+
+Model side (measured on the Mac, not here): the model is loaded when the wake
+word is heard, so a model Ollama unloaded after a quiet spell is ready by the
+time the sentence is transcribed; the resident model's context is 12k tokens,
+with `setup.sh` switching Ollama to flash attention and an 8-bit KV cache so
+it costs about what 8k did.
+
+Timelines follow a request into its background task and to the moment its
+answer is spoken; the developer panel shows one bar per request.
+
+17 tests, one per guard proven by reverting it (including two against a real
+Chromium: a render queued on a timer is waited for; reading the page isn't
+mistaken for it changing).

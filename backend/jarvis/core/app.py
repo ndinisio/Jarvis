@@ -9,6 +9,7 @@ workspace and every subsystem comes with it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import platform
 from typing import Any
 
@@ -120,6 +121,20 @@ class JarvisApp:
             asyncio.create_task(self.screen_watcher.start())
         # Warm the fast model so the first real request isn't the cold one.
         asyncio.create_task(self._warmup())
+        self.bus.add_hook(self._preload_when_spoken_to)
+
+    def _preload_when_spoken_to(self, event) -> None:
+        """The wake word (or the microphone opening) means a request is
+        coming: make sure the model that will read it is in memory while the
+        user is still talking. (``ModelRouter.preload`` makes it cheap, and
+        at most once a minute.)"""
+        starting = event.type == EventType.WAKE or (
+            event.type == EventType.VOICE_STATE and event.payload.get("state") == "listening"
+            and "level" not in event.payload)
+        if not starting:
+            return
+        with contextlib.suppress(RuntimeError):            # no running loop
+            asyncio.get_running_loop().create_task(self.models.preload(Slot.OPERATOR))
 
     async def _teach_vocabulary(self) -> None:
         """Teach the recogniser this Mac's app names, so "open Spotify" isn't

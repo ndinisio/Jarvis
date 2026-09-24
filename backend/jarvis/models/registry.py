@@ -109,6 +109,8 @@ class ModelRouter:
         self._lock = asyncio.Lock()
         #: provider name → monotonic time it may be tried again.
         self._resting: dict[str, float] = {}
+        #: When each provider:model was last preloaded (monotonic).
+        self._preloaded: dict[str, float] = {}
         self._build_providers()
 
     # -- construction ------------------------------------------------------
@@ -470,6 +472,24 @@ class ModelRouter:
                 entry.update({"resolved": None, "ready": False, "reason": exc.user_message})
             slots[slot] = entry
         return {"providers": providers, "slots": slots}
+
+    async def preload(self, slot: str = Slot.OPERATOR, *, min_interval_s: float = 60.0) -> bool:
+        """Make sure *slot*'s model is loaded — cheaply, and at most once a
+        minute. Called when the user starts talking (the wake word), so a
+        model Ollama unloaded after a quiet spell is back in memory by the
+        time the sentence has been transcribed, not after."""
+        try:
+            resolution = await self.resolve(slot)
+        except Exception:
+            return False
+        key = f"{resolution.provider.name}:{resolution.model}"
+        now = time.monotonic()
+        if now - self._preloaded.get(key, -1e9) < min_interval_s:
+            return False
+        self._preloaded[key] = now
+        runtime = _runtime(resolution.provider, self.slot_config(slot))
+        runtime.pop("think", None)
+        return await resolution.provider.preload(resolution.model, **runtime)
 
     async def warmup(self, slot: str = Slot.FAST) -> bool:
         """Load a model into memory so the first real request isn't the cold one."""

@@ -1,3 +1,3 @@
 """JARVIS — a local-first AI operating layer for macOS."""
 
-__version__ = "3.0.dev7"
+__version__ = "3.0.dev8"

@@ -26,6 +26,7 @@ export const EV = {
   RESULT_PANEL: 'result.panel',
   MEMORY: 'memory',
   TELEMETRY: 'telemetry',
+  REQUEST_TIMING: 'request.timing',
 } as const
 
 export type AssistantState =
@@ -156,4 +157,32 @@ export interface TelemetrySpan {
   ok: boolean
   ts: number
   [key: string]: any
+}
+
+/** One request, from the sentence arriving to its result (core/latency.py). */
+export interface RequestTiming {
+  id: string
+  text: string
+  source: string
+  route: string
+  started: number
+  background: boolean
+  finished: boolean
+  stt_ms: number | null
+  first_action_ms: number | null
+  replied_ms: number | null
+  answered_ms: number | null
+  spoken_ms: number | null
+  heard_to_spoken_ms: number | null
+  total_ms: number
+  model_ms: number
+  act_ms: number
+  look_ms: number
+  wait_ms: number
+  other_ms: number
+  model_calls: number
+  tool_calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  steps: { kind: string; name: string; at_ms: number; ms: number; tokens?: number; waited?: number }[]
 }

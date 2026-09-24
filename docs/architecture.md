@@ -257,9 +257,33 @@ page and everything it saw.
 
 Spans for: `router.quick`, `router.heuristic`, `router.model`, `model.stream`,
 `model.ttft`, `tool.<name>`, `task.<kind>`, `voice.wake`, `voice.stt`,
-`voice.tts`, `turn.total`. The developer panel shows p50/p95 per span and the
-routing path of recent requests — the point being to make an expensive path for
-a cheap question immediately visible.
+`voice.tts`, `turn.total`, and per request `request.total`,
+`request.first_action` and `request.spoken`. The developer panel shows p50/p95
+per span and the routing path of recent requests — the point being to make an
+expensive path for a cheap question immediately visible.
+
+**Request timelines** (`core/latency.py`). `turn.total` stops when the turn
+returns, which for an errand is the acknowledgement. A timeline follows the
+whole request instead: it rides a context variable (like the turn id), so the
+background task a turn starts — which copies the context — records onto the
+same timeline without anything being passed around. Every model and tool span
+lands on the current timeline; page waits inside a tool (`latency.waiting()`,
+used by `observe.settle` and the JARVIS Chrome driver) are counted as waiting,
+not acting. Speech is tagged when it's queued: only speech of the *result*
+(not "on it", not a progress line) marks the request as spoken. The timeline
+is published as `request.timing` when the turn returns, when a background task
+delivers, and when the answer starts playing.
+
+**Settling** (`tools/browser/observe.py`). Acting on or reading a page first
+waits until it's loaded, finished fetching and still. A full settle is
+remembered (when, and the page's DOM signature — JARVIS's own `data-jarvis-id`
+tags don't count as changes); the next one returns at once if nothing has
+acted on the page since (every page tool marks it; any tool outside the
+browser toolkit marks every page), no request has gone out and the signature
+is unchanged. JARVIS Chrome installs a counter of each document's pending
+short timers at document start; a page with nothing queued, no animation
+running and the network idle for 0.25 s needs 0.25 s of stillness, otherwise
+the full rule applies (0.5 s still, and 0.75 s since the last request).
 
 ---
 

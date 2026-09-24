@@ -5,7 +5,9 @@ execution path visible*, so a request that could have been answered
 deterministically in 20 ms is never quietly sent to a 2-second model.
 
 Spans are cheap (a perf_counter pair), retained in a ring buffer, and surfaced
-in the developer panel.
+in the developer panel. Each span also lands on the request it belongs to
+(``core/latency.py``), so a slow request can be taken apart afterwards: time
+to first action, and model / acting / looking / waiting.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+from . import latency
 
 
 @dataclass(slots=True)
@@ -43,6 +47,7 @@ class Telemetry:
         self._bus = bus
         self._spans: deque[Span] = deque(maxlen=capacity)
         self._totals: dict[str, list[float]] = defaultdict(list)
+        self._requests: deque[latency.RequestTimeline] = deque(maxlen=40)
 
     @contextmanager
     def span(self, name: str, **meta: Any) -> Iterator[dict[str, Any]]:
@@ -65,6 +70,9 @@ class Telemetry:
         span = Span(name=name, duration_ms=duration_ms, started=started or time.time(),
                     meta=meta, ok=ok)
         self._spans.append(span)
+        timeline = latency.current()
+        if timeline is not None:
+            timeline.note_span(name, duration_ms, span.started, meta)
         series = self._totals[name]
         series.append(duration_ms)
         if len(series) > 200:
@@ -77,6 +85,69 @@ class Telemetry:
 
     def mark(self, name: str, **meta: Any) -> _Stopwatch:
         return _Stopwatch(self, name, meta)
+
+    # -- requests ------------------------------------------------------------
+    def begin_request(self, request_id: str, text: str, *, source: str = "text",
+                      stt_ms: float = 0.0) -> tuple[latency.RequestTimeline, Any]:
+        """Open the timeline for a sentence that just arrived, and make it
+        current for everything this turn (and any task it starts) does."""
+        timeline = latency.RequestTimeline(id=request_id, text=text[:120], source=source,
+                                           stt_ms=stt_ms)
+        self._requests.append(timeline)
+        return timeline, latency.activate(timeline)
+
+    def end_turn(self, timeline: latency.RequestTimeline, token: Any, *, route: str,
+                 task_id: str | None = None) -> None:
+        """The turn returned. Without background work that's the answer;
+        with it, the request stays open until the task delivers."""
+        latency.deactivate(token)
+        timeline.route = route
+        timeline.replied_ms = timeline.elapsed_ms()
+        if task_id:
+            timeline.background = True
+            timeline.task_id = task_id
+            self._publish_request(timeline)
+        else:
+            self.finish_request(timeline)
+
+    def finish_request(self, timeline: latency.RequestTimeline | None = None) -> None:
+        """The result has been delivered."""
+        timeline = timeline or latency.current()
+        if timeline is None or timeline.finished:
+            return
+        timeline.answered_ms = timeline.elapsed_ms()
+        timeline.total_ms = timeline.answered_ms
+        timeline.finished = True
+        self.record("request.total", timeline.total_ms, started=timeline.started,
+                    route=timeline.route, background=timeline.background)
+        if timeline.first_action_ms is not None:
+            self.record("request.first_action", timeline.first_action_ms,
+                        started=timeline.started, route=timeline.route)
+        self._publish_request(timeline)
+
+    def request_spoken(self, timeline: latency.RequestTimeline) -> None:
+        """Speech of the request's result began. The span is what the user
+        waited: from the end of their sentence (recognition included) to
+        hearing the answer."""
+        if timeline.spoken_ms is not None:
+            return
+        timeline.spoken_ms = timeline.elapsed_ms()
+        self.record("request.spoken", timeline.spoken_ms + timeline.stt_ms,
+                    started=timeline.started, route=timeline.route)
+        self._publish_request(timeline)
+
+    def requests(self, limit: int = 20) -> list[dict[str, Any]]:
+        return [t.as_dict() for t in list(self._requests)[-limit:]]
+
+    def request(self, request_id: str) -> dict[str, Any] | None:
+        found = next((t for t in reversed(self._requests) if t.id == request_id), None)
+        return found.as_dict() if found is not None else None
+
+    def _publish_request(self, timeline: latency.RequestTimeline) -> None:
+        if self._bus is not None:
+            from .events import EventType
+
+            self._bus.publish(EventType.REQUEST_TIMING, **timeline.as_dict())
 
     # -- reporting ---------------------------------------------------------
     def recent(self, limit: int = 60) -> list[dict[str, Any]]:
@@ -100,6 +171,7 @@ class Telemetry:
     def clear(self) -> None:
         self._spans.clear()
         self._totals.clear()
+        self._requests.clear()
 
 
 class _Stopwatch:

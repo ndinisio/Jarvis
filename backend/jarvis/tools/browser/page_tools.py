@@ -33,7 +33,7 @@ from ...core.errors import ConfirmationDeclined
 from ...security.permissions import RiskLevel
 from ...surfaces.web.hub import hub_of
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
-from .observe import PageMemory, render_manifest, settle
+from .observe import PageMemory, acted, render_manifest, settle
 from .tools import PAGE_KEYS, normalise_key
 
 _JS_PERMISSION_HINT = (
@@ -190,6 +190,7 @@ class ClickPageElementTool(_HandleTool):
         if driver is None:
             return ToolResult.failure(_NO_BROWSER)
         result = await driver.click_handle(args["handle"])
+        acted(driver)
         name = self._name(args, result)
         if not result.get("ok"):
             return self._stale("click", name, result)
@@ -235,6 +236,7 @@ class FillPageFieldTool(_HandleTool):
         if driver is None:
             return ToolResult.failure(_NO_BROWSER)
         result = await driver.fill_handle(args["handle"], args["text"], submit=bool(args.get("submit")))
+        acted(driver)
         name = self._name(args, result)
         if not result.get("ok"):
             return self._stale("fill in", name, result)
@@ -281,6 +283,7 @@ class SubmitPageFormTool(_HandleTool):
         if driver is None:
             return ToolResult.failure(_NO_BROWSER)
         result = await driver.submit_handle(args["handle"])
+        acted(driver)
         name = self._name(args, result)
         if not result.get("ok"):
             return self._stale("submit", name, result)
@@ -335,6 +338,7 @@ class PressPageKeyTool(_PageTool):
         if driver is None:
             return ToolResult.failure(_NO_BROWSER)
         result = await driver.press_key(key, args.get("handle") or "")
+        acted(driver)
         if not result.get("ok"):
             return ToolResult.failure(f"Couldn’t press {args['key']} — {result.get('reason', 'no response')}.")
         await settle(driver)
@@ -369,6 +373,7 @@ class ScrollPageTool(_PageTool):
         if driver is None:
             return ToolResult.failure(_NO_BROWSER)
         result = await driver.scroll(args.get("direction") or "down", args.get("handle") or "")
+        acted(driver)
         if not result.get("ok"):
             return ToolResult.failure(f"Couldn’t scroll — {result.get('reason', 'no response')}.")
         await settle(driver)
@@ -398,6 +403,7 @@ class PageGoBackTool(_PageTool):
         if driver is None:
             return ToolResult.failure(_NO_BROWSER)
         result = await driver.go_back()
+        acted(driver)
         if not result.get("ok"):
             return ToolResult.failure(f"Couldn’t go back — {result.get('reason', 'no response')}.")
         await settle(driver)
@@ -496,6 +502,7 @@ class TakeOverTool(_PageTool):
                 f"The user didn't take over ({reason}), so the task can't go past this point.",
                 wrong_tool=False,
             )
+        acted(driver)                         # the user has been at the page
         await settle(driver)
         page = await driver.current_page()
         return ToolResult(data={"handed_back": True, **page}, summary="You're done — carrying on.",

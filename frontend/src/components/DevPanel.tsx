@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../state/store'
 import { apiFetch } from '../lib/api'
+import type { RequestTiming } from '../lib/events'
 
 /**
  * Developer mode.
@@ -13,8 +14,10 @@ export function DevPanel() {
   const traces = useStore((s) => s.traces)
   const reasoningTrace = useStore((s) => s.reasoningTrace)
   const telemetry = useStore((s) => s.telemetry)
+  const live = useStore((s) => s.timings)
   const status = useStore((s) => s.status)
   const [summary, setSummary] = useState<Record<string, any>>({})
+  const [loaded, setLoaded] = useState<RequestTiming[]>([])
 
   useEffect(() => {
     let alive = true
@@ -22,7 +25,10 @@ export function DevPanel() {
       try {
         const response = await apiFetch('/api/telemetry')
         const data = await response.json()
-        if (alive) setSummary(data.summary ?? {})
+        if (alive) {
+          setSummary(data.summary ?? {})
+          setLoaded(data.requests ?? [])
+        }
       } catch {
         /* the socket is the source of truth; this is a convenience */
       }
@@ -36,6 +42,10 @@ export function DevPanel() {
   }, [])
 
   const recent = traces.slice(-8).reverse()
+  // What the server remembers, updated by what the socket has said since.
+  const byId = new Map<string, RequestTiming>()
+  for (const timing of [...loaded, ...live]) byId.set(timing.id, timing)
+  const requests = [...byId.values()].sort((a, b) => b.started - a.started).slice(0, 6)
   const spans = telemetry.slice(-10).reverse()
   const thinking = reasoningTrace.slice(-12).reverse()
 
@@ -55,6 +65,12 @@ export function DevPanel() {
             <span className="dev__ms">{trace.latency_ms.toFixed(1)} ms</span>
           </li>
         ))}
+      </ul>
+
+      <h3 className="dev__heading">Requests</h3>
+      <ul className="dev__requests">
+        {requests.length === 0 && <li className="dev__empty">No requests yet.</li>}
+        {requests.map((timing) => <RequestRow key={timing.id} timing={timing} />)}
       </ul>
 
       <h3 className="dev__heading">Reasoning</h3>
@@ -108,6 +124,46 @@ export function DevPanel() {
         ))}
       </ul>
     </section>
+  )
+}
+
+const SHARES: { key: 'model_ms' | 'act_ms' | 'look_ms' | 'wait_ms' | 'other_ms'; label: string }[] = [
+  { key: 'model_ms', label: 'model' },
+  { key: 'act_ms', label: 'acting' },
+  { key: 'look_ms', label: 'looking' },
+  { key: 'wait_ms', label: 'waiting for pages' },
+  { key: 'other_ms', label: 'other' },
+]
+
+/**
+ * One request: how long until JARVIS did something, and where the rest of
+ * the time went — the answer to "why was that slow?".
+ */
+function RequestRow({ timing }: { timing: RequestTiming }) {
+  const total = Math.max(1, timing.total_ms)
+  const seconds = (ms: number | null | undefined) => (ms == null ? '—' : `${(ms / 1000).toFixed(1)}s`)
+  const facts = [
+    `first action ${seconds(timing.first_action_ms)}`,
+    timing.background ? `answered ${seconds(timing.answered_ms)}` : '',
+    timing.heard_to_spoken_ms != null ? `heard→spoken ${seconds(timing.heard_to_spoken_ms)}` : '',
+    `${timing.model_calls} model · ${timing.tool_calls} tool`,
+    timing.prompt_tokens ? `${timing.prompt_tokens + timing.completion_tokens} tok` : '',
+  ].filter(Boolean)
+  return (
+    <li className="dev__request">
+      <div className="dev__request-head">
+        <span className="dev__route" title={timing.text}>{timing.text}</span>
+        <span className="dev__ms">{timing.finished ? seconds(timing.total_ms) : 'running'}</span>
+      </div>
+      <div className="dev__bar" role="img"
+           aria-label={SHARES.map((s) => `${s.label} ${seconds(timing[s.key])}`).join(', ')}>
+        {SHARES.map((s) => timing[s.key] > 0 && (
+          <span key={s.key} data-share={s.key} style={{ width: `${(100 * timing[s.key]) / total}%` }}
+                title={`${s.label}: ${seconds(timing[s.key])}`} />
+        ))}
+      </div>
+      <div className="dev__request-facts">{facts.join(' · ')}</div>
+    </li>
   )
 }
 

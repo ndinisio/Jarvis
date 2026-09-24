@@ -148,6 +148,12 @@ class ToolRegistry:
         # (the side effect really did run repeatedly) or it doesn't (the
         # duplication is somewhere else — voice capture, TTS, the UI).
         log.info("turn_id=%s stage=tool_start tool=%s", turn_id, name)
+        if spec.category != "browser":
+            # System-level input, an app action or a link opened elsewhere can
+            # change a web page too: the next look at one waits for it in full.
+            from .browser.observe import acted
+
+            acted()
         try:
             # What the call will really touch, read before it runs — the gate
             # judges that, not the model's description of it.
@@ -196,7 +202,8 @@ class ToolRegistry:
         result.duration_ms = (time.perf_counter() - t0) * 1000.0
         log.info("turn_id=%s stage=tool_end tool=%s ok=%s duration_ms=%.1f",
                  turn_id, name, result.ok, result.duration_ms)
-        ctx.telemetry.record(f"tool.{name}", result.duration_ms, ok=result.ok, category=spec.category)
+        ctx.telemetry.record(f"tool.{name}", result.duration_ms, ok=result.ok, category=spec.category,
+                             started=time.time() - result.duration_ms / 1000.0)
         ctx.bus.publish(
             EventType.TOOL_RESULT,
             tool=name,

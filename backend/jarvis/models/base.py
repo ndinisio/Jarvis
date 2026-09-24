@@ -148,6 +148,12 @@ class ModelProvider(abc.ABC):
             ttft_ms=ttft,
         )
 
+    async def preload(self, model: str, **runtime: Any) -> bool:
+        """Load *model* ahead of a request, without generating anything.
+        Only a self-hosted server has anything to load; the default is a
+        no-op."""
+        return False
+
     async def close(self) -> None:  # pragma: no cover - default no-op
         return None
 

@@ -222,8 +222,10 @@ async def navigate(deps, ctx: ToolContext | None, target: str, browser: str = ""
                    label: str = "") -> ToolResult:
     """Open *target* in whichever browser the hub picks for this call."""
     from ...surfaces.web.hub import hub_of
+    from .observe import acted
 
     label = label or _domain(target)
+    acted()                                   # whichever page this lands in
     driver = await hub_of(deps).for_action(ctx, navigating=True, url=target, browser=browser)
     if driver is not None and driver.owned:
         # JARVIS Chrome: the call returns once the page has loaded.
@@ -309,6 +311,9 @@ class CurrentPageTool(Tool):
             )
         text = ""
         if args.get("include_text", True):
+            from .observe import settle
+
+            await settle(driver)          # loaded, fetched and still — at once if it already is
             text = await driver.page_text()
             if not text:
                 # JavaScript-from-AppleScript is off by default in Safari; fall

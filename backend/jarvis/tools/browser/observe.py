@@ -22,10 +22,13 @@ full rather than as a one-line summary.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
+import weakref
 from typing import Any
 from urllib.parse import urlparse
 
+from ...core import latency
 from . import manifest_js
 
 #: What the page listing says when a page needs the user, not JARVIS.
@@ -163,7 +166,21 @@ async def wait_until_ready(driver, *, timeout_s: float = 6.0, settle_s: float = 
     return ready
 
 
-async def wait_until_quiet(driver, *, quiet_s: float = 0.5, timeout_s: float = 4.0) -> bool:
+#: How long the network must have been idle, on top of the page being
+#: still, after any request: a render often follows its data by a beat.
+NETWORK_QUIET_S = 0.25
+#: How long a page must be still when it can show it has nothing queued —
+#: no short timer pending, no animation running, no request in flight
+#: (JARVIS Chrome counts these; see ``manifest_js.PENDING_WORK_INIT``).
+IDLE_QUIET_S = 0.25
+#: A full settle this recent still holds when nothing has acted on the page
+#: since and it hasn't changed at all.
+REUSE_S = 1.5
+_settled: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def wait_until_quiet(driver, *, quiet_s: float = 0.5, timeout_s: float = 4.0,
+                           network_idle=None) -> bool:
     """Wait (bounded) until the page stops changing.
 
     A single-page app re-renders after its data arrives — often a few
@@ -172,34 +189,93 @@ async def wait_until_quiet(driver, *, quiet_s: float = 0.5, timeout_s: float = 4
     it shows the page as it was. So before JARVIS acts, and before it looks,
     the page must have been still for ``quiet_s``: the mutation-counting
     signature from :func:`manifest_js.signature_script` unchanged across
-    polls that long. Returns whether it settled before the timeout.
+    polls that long. With ``network_idle`` (seconds since the browser last
+    had a request in flight) the network must also have been idle for
+    ``quiet_s`` plus :data:`NETWORK_QUIET_S` — so a render that follows its
+    data by half a second is still waited for. A page that shows it has
+    nothing queued (no pending timer or animation, the network idle) needs
+    only :data:`IDLE_QUIET_S` of stillness. Returns whether it settled
+    before the timeout.
     """
+    return bool(await _quiet(driver, quiet_s=quiet_s, timeout_s=timeout_s, network_idle=network_idle))
+
+
+async def _quiet(driver, *, quiet_s: float, timeout_s: float, network_idle=None) -> str:
+    """The page's signature once it has been still long enough, or ""."""
     deadline = time.monotonic() + timeout_s
     last = None
     stable_since = time.monotonic()
     silent = 0
     while time.monotonic() < deadline:
-        signature = (await driver.run_js(manifest_js.signature_script(), timeout=5.0)).strip()
-        silent = silent + 1 if not signature else 0
+        raw = (await driver.run_js(manifest_js.signature_script(), timeout=5.0)).strip()
+        silent = silent + 1 if not raw else 0
         if silent >= 3:
-            return False
+            return ""
+        signature, _, queued = raw.partition("|")
         now = time.monotonic()
         if signature != last:
             last, stable_since = signature, now
-        elif signature.startswith("complete") and now - stable_since >= quiet_s:
-            return True
-        await asyncio.sleep(0.12)
-    return False
+        elif signature.startswith("complete"):
+            still = now - stable_since
+            idle = network_idle() if network_idle is not None else None
+            if idle is not None and queued == "0" and idle >= NETWORK_QUIET_S and still >= IDLE_QUIET_S:
+                return signature                          # finished, and shows it
+            if still >= quiet_s and (idle is None or idle >= quiet_s + NETWORK_QUIET_S):
+                return signature
+        await asyncio.sleep(0.06)
+    return ""
+
+
+def acted(driver=None) -> None:
+    """Something was done to the page (or, with no driver, possibly to any
+    page — a key pressed at the system level, a link opened): the next
+    settle waits in full."""
+    if driver is None:
+        _settled.clear()
+        return
+    with contextlib.suppress(TypeError):
+        _settled.pop(driver, None)
+
+
+async def _still_settled(driver) -> bool:
+    """Nothing has acted on the page since its last full settle, moments
+    ago, and nothing about it has changed — not a node, not a request."""
+    try:
+        record = _settled.get(driver)
+    except TypeError:
+        return False
+    if record is None:
+        return False
+    at, signature = record
+    since = time.monotonic() - at
+    if since > REUSE_S:
+        return False
+    network_idle = getattr(driver, "network_idle_s", None)
+    if network_idle is not None and network_idle() < since:
+        return False                                   # a request since then
+    now = (await driver.run_js(manifest_js.signature_script(), timeout=5.0)).strip()
+    return now.partition("|")[0] == signature
 
 
 async def settle(driver) -> None:
     """Loaded, finished fetching, and still — the precondition for acting on
-    or reading a page."""
-    await wait_until_ready(driver, settle_s=0.0)
-    network = getattr(driver, "settle", None)
-    if network is not None:
-        await network()
-    await wait_until_quiet(driver)
+    or reading a page. (Timed as waiting, not acting: ``core/latency.py``.)
+
+    A settle right after another, with nothing done in between — the look
+    after an action's own wait, the check before the next action — returns
+    at once when the page is exactly as it was."""
+    with latency.waiting():
+        if await _still_settled(driver):
+            return
+        await wait_until_ready(driver, settle_s=0.0)
+        network_idle = getattr(driver, "network_idle_s", None)
+        network = getattr(driver, "settle", None)
+        if network_idle is None and network is not None:
+            await network()
+        signature = await _quiet(driver, quiet_s=0.5, timeout_s=6.0, network_idle=network_idle)
+        if signature:
+            with contextlib.suppress(TypeError):
+                _settled[driver] = (time.monotonic(), signature)
 
 
 async def observe_page(driver, *, limit: int = 50, text_chars: int = 900) -> tuple[dict[str, Any], str]:

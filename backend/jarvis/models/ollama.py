@@ -67,6 +67,21 @@ class OllamaProvider(ModelProvider):
         except Exception:
             return {}
 
+    async def preload(self, model: str, *, num_ctx: int = 0, keep_alive: str = "30m",
+                      **_: Any) -> bool:
+        """Load *model* into memory (a generate request with no prompt). The
+        context size must match the chat calls', or the next one would load
+        it all over again."""
+        payload: dict[str, Any] = {"model": model, "keep_alive": keep_alive or "30m"}
+        if num_ctx:
+            payload["options"] = {"num_ctx": int(num_ctx)}
+        try:
+            resp = await self._http().post("/api/generate", json=payload, timeout=120.0)
+            return resp.status_code < 400
+        except Exception as exc:
+            log.debug("preload %s failed: %s", model, exc)
+            return False
+
     async def pull(self, model: str) -> bool:  # pragma: no cover - network side effect
         try:
             async with self._http().stream(

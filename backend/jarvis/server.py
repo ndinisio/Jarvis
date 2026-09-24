@@ -186,7 +186,8 @@ def create_app(jarvis: JarvisApp | None = None, *, host: str | None = None,
 
     @app.get("/api/telemetry")
     async def telemetry() -> dict[str, Any]:
-        return {"summary": jarvis.telemetry.summary(), "recent": jarvis.telemetry.recent()}
+        return {"summary": jarvis.telemetry.summary(), "recent": jarvis.telemetry.recent(),
+                "requests": jarvis.telemetry.requests()}
 
     @app.get("/api/memory")
     async def memory() -> dict[str, Any]:

@@ -60,6 +60,9 @@ class EventType:
     RESULT_PANEL = "result.panel"        # rich result rendered in the UI
     MEMORY = "memory"
     TELEMETRY = "telemetry"
+    #: One request's timeline (core/latency.py): published when the turn
+    #: returns, when background work delivers, and when its answer is spoken.
+    REQUEST_TIMING = "request.timing"
 
 
 class AssistantState:

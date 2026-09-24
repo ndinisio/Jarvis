@@ -442,10 +442,15 @@ async def test_live_neither_path_types_a_password_or_card_number(lab):
 
 
 @live
-async def test_live_a_click_waits_for_the_request_it_started(lab):
+async def test_live_the_look_after_a_click_waits_for_the_request_it_started(lab):
+    from jarvis.tools.browser.observe import acted, settle
+
     handle, _ = await _handle(lab, "Save")
     assert (await lab.click_handle(handle))["ok"]
-    # The click returns only after the page's own fetch has finished.
+    acted(lab)
+    # The page's own fetch takes 0.8s; the look after the click (every
+    # look settles first) waits for it and for the page to update.
+    await settle(lab)
     assert await lab.has_text("saved")
 
 

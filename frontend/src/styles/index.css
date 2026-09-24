@@ -574,7 +574,7 @@ button { cursor: pointer; }
   color: var(--text-faint); font-weight: 600;
 }
 .dev__heading:first-of-type { margin-top: 0; }
-.dev__routes, .dev__metrics { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+.dev__routes, .dev__metrics { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; }
 .dev__routes li, .dev__metrics li { display: flex; align-items: baseline; gap: 7px; font-size: 10.5px; }
 .dev__path {
   font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.08em; text-transform: uppercase;
@@ -593,11 +593,26 @@ button { cursor: pointer; }
 .dev__stage[data-stage='verify'] { color: var(--ok); border-color: rgba(87, 217, 163, 0.3); }
 .dev__stage[data-stage='recover'] { color: var(--warn); border-color: rgba(240, 180, 88, 0.3); }
 .dev__stage[data-stage='clarify'] { color: var(--violet); border-color: rgba(176, 140, 255, 0.3); }
-.dev__route, .dev__metric { flex: 1; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev__route, .dev__metric { flex: 1; min-width: 0; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dev__ms { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
 .dev__ms.is-warn { color: var(--warn); }
 .dev__ms em { font-style: normal; opacity: 0.55; }
 .dev__empty { color: var(--text-faint); font-size: 11px; }
+.dev__requests { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; }
+.dev__request { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.dev__request-head { display: flex; align-items: baseline; gap: 7px; font-size: 10.5px; }
+.dev__request-facts { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); overflow-wrap: anywhere; }
+.dev__request-head .dev__ms { flex-shrink: 0; }
+.dev__bar {
+  display: flex; height: 5px; border-radius: 3px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+}
+.dev__bar span { display: block; height: 100%; min-width: 1px; }
+.dev__bar [data-share='model_ms'] { background: var(--violet); }
+.dev__bar [data-share='act_ms'] { background: var(--accent); }
+.dev__bar [data-share='look_ms'] { background: var(--ok); }
+.dev__bar [data-share='wait_ms'] { background: var(--warn); }
+.dev__bar [data-share='other_ms'] { background: rgba(255, 255, 255, 0.18); }
 
 /* --- confirmation --------------------------------------------------------- */
 

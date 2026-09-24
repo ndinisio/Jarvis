@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ..core import latency
 from ..core.config import Config
 from ..core.events import AssistantState, EventBus, EventType
 from ..core.logging import get_logger
@@ -66,7 +67,11 @@ class VoiceManager:
         self.state = VoiceState.OFF
         self._listen_task: asyncio.Task | None = None
         self._speech_task: asyncio.Task | None = None
-        self._speech_queue: asyncio.Queue[str] = asyncio.Queue()
+        #: Sentences to speak, each with the request whose result it is
+        #: (core/latency.py) — so "spoken" is timed when speech really starts.
+        self._speech_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        #: How long the latest transcription took (for request timings).
+        self.last_recognition_ms = 0.0
         self._conversation_until = 0.0
         self._status: dict[str, Any] = {}
         self._speaking = False
@@ -293,6 +298,7 @@ class VoiceManager:
         self._emit_state(VoiceState.TRANSCRIBING)
         watch = self._telemetry.mark("voice.stt")
         text = (await self.stt.transcribe(audio)).strip()
+        self.last_recognition_ms = watch.elapsed_ms
         watch.stop(chars=len(text))
         if not text:
             self._emit_state(VoiceState.WAITING_FOR_WAKE)
@@ -317,6 +323,7 @@ class VoiceManager:
         """Transcribe audio captured elsewhere (the browser's microphone)."""
         watch = self._telemetry.mark("voice.stt", source="browser")
         text = (await self.stt.transcribe(data, sample_rate)).strip()
+        self.last_recognition_ms = watch.elapsed_ms
         watch.stop(chars=len(text))
         return text
 
@@ -360,13 +367,15 @@ class VoiceManager:
         # piece of text, however many turns' worth of speech end up queued
         # together.
         log.info("turn_id=%s stage=tts_enqueue text=%r", current_turn_id(), text[:60])
-        self._speech_queue.put_nowait(text)
+        self._speech_queue.put_nowait((text, latency.speech_marker()))
         if self._speech_task is None or self._speech_task.done():
             self._speech_task = asyncio.create_task(self._drain_speech())
 
     async def _drain_speech(self) -> None:
         while not self._speech_queue.empty():
-            text = await self._speech_queue.get()
+            text, request = await self._speech_queue.get()
+            if request is not None:
+                self._telemetry.request_spoken(request)
             await self.speak(text)
 
     async def stop_speaking(self) -> bool:

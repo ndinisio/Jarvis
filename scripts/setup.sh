@@ -92,6 +92,19 @@ else
 fi
 
 # --- Models ------------------------------------------------------------------
+# On a 16 GB Mac the model's context memory matters as much as the model:
+# flash attention plus an 8-bit KV cache halves it, so JARVIS's 12k-token
+# context costs about what 8k did, with no measurable loss in quality. The
+# Ollama app reads these from launchd; `ollama serve` from your shell.
+if [ "$(uname)" = "Darwin" ] && command -v launchctl >/dev/null; then
+  if [ -z "$(launchctl getenv OLLAMA_FLASH_ATTENTION)" ] && [ -z "$(launchctl getenv OLLAMA_KV_CACHE_TYPE)" ]; then
+    launchctl setenv OLLAMA_FLASH_ATTENTION 1
+    launchctl setenv OLLAMA_KV_CACHE_TYPE q8_0
+    say "Set Ollama to flash attention with an 8-bit KV cache (saves memory; quit and"
+    say "reopen Ollama to apply). Undo: launchctl unsetenv OLLAMA_FLASH_ATTENTION OLLAMA_KV_CACHE_TYPE"
+  fi
+fi
+
 if command -v ollama >/dev/null; then
   if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then
     say "Ollama is running. Installed models:"

@@ -35,8 +35,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...core import latency
 from ...core.logging import get_logger
-from ...tools.browser import sensitive
+from ...tools.browser import manifest_js, sensitive
 from ...tools.browser.tools import BrowserDriver, normalise_key
 
 log = get_logger("jarvis.surfaces.web.cdp")
@@ -70,6 +71,8 @@ class PlaywrightBrowser:
         self._lock = asyncio.Lock()
         #: Requests the pages have started and not yet finished.
         self._inflight: set[Any] = set()
+        #: When a request last started or finished.
+        self._last_activity = time.monotonic()
 
     @staticmethod
     def installed() -> bool:
@@ -101,6 +104,9 @@ class PlaywrightBrowser:
                 if self._browser is None or not self._browser.is_connected():
                     self._browser = await chromium.launch(**options)
                 self.context = await self._browser.new_context(viewport=self.viewport)
+            # Every document counts the work it has queued, so settling can
+            # tell a finished page from one about to re-render.
+            await self.context.add_init_script(manifest_js.PENDING_WORK_INIT)
             self.context.on("page", self._adopt)
             self.context.on("close", self._closed)
             self.context.on("request", self._request_started)
@@ -120,23 +126,29 @@ class PlaywrightBrowser:
     def _request_started(self, request) -> None:
         if request.resource_type not in _LONG_LIVED:
             self._inflight.add(request)
+            self._last_activity = time.monotonic()
 
     def _request_done(self, request) -> None:
-        self._inflight.discard(request)
+        if request in self._inflight:
+            self._inflight.discard(request)
+            self._last_activity = time.monotonic()
+
+    def network_idle_s(self) -> float:
+        """Seconds since the pages last had a request in flight (0 while
+        one is)."""
+        return 0.0 if self._inflight else time.monotonic() - self._last_activity
 
     async def network_quiet(self, *, quiet_s: float = 0.25, timeout_s: float = 4.0) -> bool:
-        """Wait (bounded) until no request has been in flight for *quiet_s*."""
+        """Wait (bounded) until no request has been in flight for *quiet_s* —
+        at once, when none has been for that long already."""
         deadline = time.monotonic() + timeout_s
-        quiet_since = None
-        while time.monotonic() < deadline:
-            if not self._inflight:
-                quiet_since = quiet_since or time.monotonic()
-                if time.monotonic() - quiet_since >= quiet_s:
-                    return True
-            else:
-                quiet_since = None
-            await asyncio.sleep(0.05)
-        return False
+        while True:
+            idle = self.network_idle_s()
+            if idle >= quiet_s:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(min(0.05, max(0.01, quiet_s - idle)))
 
     def _adopt(self, page) -> None:
         """A new tab or popup becomes the one JARVIS is looking at — the same
@@ -232,9 +244,21 @@ class PlaywrightDriver(BrowserDriver):
                     continue
                 log.debug("navigation to %s failed: %s", url, exc)
                 return False
-            await self.settle()
             return True
         return False
+
+    def network_idle_s(self) -> float:
+        return self.browser.network_idle_s()
+
+    async def _loaded(self, timeout_s: float = 5.0) -> None:
+        """After an action: the document it led to has loaded. Waiting for
+        its requests and its stillness is the next look's job (observe.settle
+        — every look and every next action does it), so it isn't done twice."""
+        page = self.browser.page
+        if page is None:
+            return
+        with latency.waiting(), contextlib.suppress(Exception):
+            await page.wait_for_load_state("domcontentloaded", timeout=timeout_s * 1000)
 
     async def settle(self, timeout_s: float = 5.0) -> None:
         """Wait until the page has loaded and its requests have finished —
@@ -242,10 +266,11 @@ class PlaywrightDriver(BrowserDriver):
         page = self.browser.page
         if page is None:
             return
-        with contextlib.suppress(Exception):
-            await page.wait_for_load_state("domcontentloaded", timeout=timeout_s * 1000)
-        with contextlib.suppress(Exception):
-            await self.browser.network_quiet(timeout_s=min(timeout_s, 4.0))
+        with latency.waiting():
+            with contextlib.suppress(Exception):
+                await page.wait_for_load_state("domcontentloaded", timeout=timeout_s * 1000)
+            with contextlib.suppress(Exception):
+                await self.browser.network_quiet(timeout_s=min(timeout_s, 4.0))
 
     async def tabs(self) -> list[dict[str, str]]:
         await self.browser.start()
@@ -283,7 +308,7 @@ class PlaywrightDriver(BrowserDriver):
         return None
 
     async def _outcome(self, info: dict[str, Any], **extra: Any) -> dict[str, Any]:
-        await self.settle()
+        await self._loaded()
         page = await self.current_page()
         return {"ok": True, "text": info.get("text", ""), "url": page.get("url", ""),
                 "title": page.get("title", ""), **extra}
@@ -298,7 +323,7 @@ class PlaywrightDriver(BrowserDriver):
             except Exception as exc:
                 log.debug("genuine click on %s failed, using the page script: %s", handle, exc)
         result = await super().click_handle(handle)
-        await self.settle()
+        await self._loaded()
         return result
 
     async def fill_handle(self, handle: str, text: str, *, submit: bool = False) -> dict[str, Any]:
@@ -313,7 +338,7 @@ class PlaywrightDriver(BrowserDriver):
             # Choosing an option: the in-page script matches the option the
             # way a person would describe it ("blue" for "Blue — £12.99").
             result = await super().fill_handle(handle, text, submit=submit)
-            await self.settle()
+            await self._loaded()
             return result
         timeout = self.action_timeout_s * 1000
         try:
@@ -327,7 +352,7 @@ class PlaywrightDriver(BrowserDriver):
         except Exception as exc:
             log.debug("genuine typing into %s failed, using the page script: %s", handle, exc)
             result = await super().fill_handle(handle, text, submit=submit)
-            await self.settle()
+            await self._loaded()
             return result
         submitted = False
         if submit:
@@ -341,7 +366,7 @@ class PlaywrightDriver(BrowserDriver):
 
     async def submit_handle(self, handle: str) -> dict[str, Any]:
         result = await super().submit_handle(handle)
-        await self.settle()
+        await self._loaded()
         return result
 
     async def press_key(self, key: str, handle: str = "") -> dict[str, Any]:
@@ -360,7 +385,7 @@ class PlaywrightDriver(BrowserDriver):
                 await page.keyboard.press(name)
         except Exception as exc:
             return {"ok": False, "reason": f"the key press didn't go through ({exc})"}
-        await self.settle()
+        await self._loaded()
         return {"ok": True}
 
     async def go_back(self) -> dict[str, Any]:
@@ -369,5 +394,5 @@ class PlaywrightDriver(BrowserDriver):
             await page.go_back(wait_until="domcontentloaded", timeout=self.navigation_timeout_s * 1000)
         except Exception as exc:
             return {"ok": False, "reason": f"couldn't go back ({exc})"}
-        await self.settle()
+        await self._loaded()
         return {"ok": True}
