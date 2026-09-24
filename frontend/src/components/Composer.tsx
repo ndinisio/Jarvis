@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../state/store'
 import { usePushToTalk } from '../hooks/usePushToTalk'
+import { offerPushToTalk } from '../lib/native'
 
 interface Props {
   send: (message: Record<string, unknown>) => boolean
@@ -50,6 +51,9 @@ export function Composer({ send }: Props) {
       await start()
     }
   }
+
+  // Inside the Mac app, its global shortcut (⌥Space) does what the mic button does.
+  useEffect(() => offerPushToTalk(() => { void toggleRecording() }))
 
   const busy = ['processing', 'executing', 'researching'].includes(assistantState)
 

@@ -70,3 +70,23 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+
+  macapp:
+    # The Mac app shell (macapp/) can only be compiled on macOS: build it,
+    # assemble JARVIS.app and sign it ad hoc, exactly as build.sh does on a Mac.
+    name: Mac app
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: macapp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build JARVIS.app
+        run: ./build.sh
+      - name: Check the bundle
+        run: |
+          test -x build/JARVIS.app/Contents/MacOS/JARVIS
+          plutil -lint build/JARVIS.app/Contents/Info.plist
+          codesign --verify --verbose build/JARVIS.app

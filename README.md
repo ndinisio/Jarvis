@@ -776,7 +776,23 @@ jarvis config             # the effective configuration
 | Type | the composer, or press `/` |
 | Stop everything | say "stop", press `Escape`, or use the Cancel button |
 | See what it's doing | the Activity panel (right) |
+| Pause, take over, stop a task | the buttons on its card, or "hold on" / "let me do it" / "carry on" |
 | See why it chose a path | the `DEV` toggle (top right) |
+
+### The Mac app
+
+JARVIS can also be a proper Mac app instead of a browser tab: its own window,
+a menu-bar item, **⌥Space** from anywhere to talk to it, notifications when it
+needs your OK or finishes a task while you're in another app, and Open at
+Login. It's a small native shell that runs the JARVIS in your clone, so
+`git pull` still updates everything.
+
+```bash
+cd macapp && ./build.sh     # needs Xcode or its command-line tools
+open build/JARVIS.app       # first time: right-click → Open
+```
+
+Details, and what macOS will ask for: [`macapp/README.md`](macapp/README.md).
 
 ---
 
@@ -1059,6 +1075,7 @@ or ask: *"What do you remember about me?"* / *"Forget that."*
 ## Architecture
 
 ```
+macapp/                        the Mac app: window, menu bar, ⌥Space, notifications (Swift)
 frontend/                      React + TypeScript, one WebSocket, zero polling
 └── src/
     ├── components/            Core visualisation, conversation, activity, results

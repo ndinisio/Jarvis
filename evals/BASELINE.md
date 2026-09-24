@@ -334,3 +334,26 @@ What changed:
   Mac, and the free cloud accelerators for the operator.
 
 46 tests, one per guard proven by reverting it.
+
+
+## Phase 9.5 — JARVIS as a Mac app
+
+No change to the web suite (the backend is untouched). What's new is outside
+it: `macapp/`, a native Swift/AppKit shell — its own window around the same
+interface, a menu-bar item, ⌥Space push-to-talk from any app, notifications
+when JARVIS needs an OK or finishes a task while its window isn't in front,
+Open at Login, first-run setup without Terminal, and a backend it starts,
+restarts once after an unexpected stop, and stops cleanly. It runs the
+backend from the user's clone, so nothing is frozen into the app.
+
+How it's checked: CI now builds `JARVIS.app` on a macOS runner on every push
+(compile, bundle, ad-hoc signature, plist lint). The page's side of the bridge
+was checked live in Chromium against a real server: with the app's flag and
+message handler injected, a confirmation request and a finished task reach the
+handler, and push-to-talk is offered to the shortcut. Running it — microphone,
+permissions, the shortcut in another app — needs a Mac.
+
+Found on the way: `.env` was documented but never read (python-dotenv was a
+dependency nobody called). JARVIS_* settings in `.env` now apply — which an app
+opened from Finder, with no shell profile, depends on — and the real
+environment still wins.

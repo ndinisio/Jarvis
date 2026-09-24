@@ -234,3 +234,21 @@ def test_the_memory_database_uses_write_ahead_logging(tmp_path):
         assert other.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         other.close()
+
+
+def test_settings_and_keys_are_read_from_a_dotenv_file(tmp_path, monkeypatch):
+    """What .env.example promises: keys in .env are used (an app opened from
+    Finder sees no shell profile), and the real environment still wins."""
+    from jarvis.core import config as config_module
+
+    monkeypatch.undo()                      # the autouse fixture turned .env off
+    monkeypatch.chdir(tmp_path)
+    for name in ("JARVIS_GENERAL_MODEL", "JARVIS_GROQ_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text("JARVIS_GENERAL_MODEL=from-dotenv\nJARVIS_GROQ_API_KEY=gsk_test\n"
+                                   "UNRELATED=ignored\n", encoding="utf-8")
+    config = config_module.load_config(tmp_path / "missing.json")
+    assert config.models.general.model == "from-dotenv"
+    assert config.models.providers["groq"].enabled and config.models.providers["groq"].api_key == "gsk_test"
+    monkeypatch.setenv("JARVIS_GENERAL_MODEL", "from-shell")
+    assert config_module.load_config(tmp_path / "missing.json").models.general.model == "from-shell"

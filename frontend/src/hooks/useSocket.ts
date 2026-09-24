@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useStore } from '../state/store'
 import { sessionRefused, socketUrl } from '../lib/api'
 import type { JarvisEvent } from '../lib/events'
+import { notifyShell } from '../lib/native'
 
 const RECONNECT_MS = [500, 1000, 2000, 4000, 8000]
 
@@ -34,7 +35,9 @@ export function useSocket() {
     }
     socket.onmessage = (raw) => {
       try {
-        apply(JSON.parse(raw.data) as JarvisEvent)
+        const event = JSON.parse(raw.data) as JarvisEvent
+        apply(event)
+        notifyShell(event)
       } catch {
         /* a malformed frame must never break the UI */
       }

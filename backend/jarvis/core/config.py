@@ -704,10 +704,28 @@ def _coerce(raw: str) -> Any:
     return raw
 
 
+def _dotenv() -> dict[str, str]:
+    """``JARVIS_*`` settings from a ``.env`` file — the working directory's,
+    else the checkout's — for keys that shouldn't live in a shell profile
+    (and an app opened from Finder never sees one)."""
+    try:
+        from dotenv import dotenv_values
+    except ImportError:  # pragma: no cover - a declared dependency
+        return {}
+    for folder in (Path.cwd(), Path(__file__).resolve().parents[3]):
+        path = folder / ".env"
+        if path.is_file():
+            return {key: value for key, value in dotenv_values(path).items()
+                    if key.startswith(_ENV_PREFIX) and value}
+    return {}
+
+
 def _env_overlay() -> dict:
     overlay: dict = {}
+    # The real environment wins over .env.
+    environ = {**_dotenv(), **{k: v for k, v in os.environ.items() if k.startswith(_ENV_PREFIX)}}
     for suffix, path in _ENV_MAP.items():
-        raw = os.environ.get(_ENV_PREFIX + suffix)
+        raw = environ.get(_ENV_PREFIX + suffix)
         if raw not in (None, ""):
             # api keys / urls / credentials stay strings even if they look
             # numeric or boolean-ish — a password of "123456" or "true"
@@ -718,14 +736,14 @@ def _env_overlay() -> dict:
             if suffix == "PORT":
                 value = int(raw)
             _set_path(overlay, path, value)
-    if os.environ.get(_ENV_PREFIX + "OPENAI_API_KEY"):
+    if environ.get(_ENV_PREFIX + "OPENAI_API_KEY"):
         _set_path(overlay, ("models", "providers", "openai", "enabled"), True)
-    if os.environ.get(_ENV_PREFIX + "ANTHROPIC_API_KEY"):
+    if environ.get(_ENV_PREFIX + "ANTHROPIC_API_KEY"):
         _set_path(overlay, ("models", "providers", "anthropic", "enabled"), True)
     for free in ("GROQ", "OPENROUTER", "CEREBRAS", "GEMINI"):
-        if os.environ.get(_ENV_PREFIX + free + "_API_KEY"):
+        if environ.get(_ENV_PREFIX + free + "_API_KEY"):
             _set_path(overlay, ("models", "providers", free.lower(), "enabled"), True)
-    if os.environ.get(_ENV_PREFIX + "BRAVE_API_KEY"):
+    if environ.get(_ENV_PREFIX + "BRAVE_API_KEY"):
         _set_path(overlay, ("research", "search_provider"), "brave")
     return overlay
 

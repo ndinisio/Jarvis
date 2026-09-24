@@ -22,3 +22,7 @@ backend/jarvis/static/
 
 # Evaluation results are machine-specific
 evals/results/
+
+# The Mac app's build products (macapp/build.sh)
+macapp/.build/
+macapp/build/

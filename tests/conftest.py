@@ -13,9 +13,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jarvis.core import config as config_module
 from jarvis.core.app import JarvisApp
 from jarvis.core.config import Config, ConfigStore
 from jarvis.models.base import ModelProvider
+
+
+@pytest.fixture(autouse=True)
+def _no_dotenv(monkeypatch):
+    """A developer's own .env (API keys, a different model) never leaks
+    into the tests; the test of .env itself turns it back on."""
+    monkeypatch.setattr(config_module, "_dotenv", lambda: {})
 
 
 class FakeProvider(ModelProvider):
