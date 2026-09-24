@@ -1,9 +1,10 @@
-# JARVIS V1.3
+# JARVIS v3.0
 
-A local-first AI operating layer for macOS. You speak; it works out what you
-mean *in the context of what you were just doing*, decides the cheapest
-competent way to get there, and either answers instantly or goes away and does
-the work while you carry on.
+A local-first AI operator for macOS. You speak the way you'd speak to a
+person; it works out what you mean *in the context of what you were just
+doing*, and either answers instantly or goes and does it — in your browser,
+in its own, or in any Mac app — until the job is done and it can show you it
+is, while you carry on.
 
 ```
 You:     "Jarvis."
@@ -16,6 +17,11 @@ JARVIS:  "You have four new messages. Two look important."
 You:     "Anything from my brother?"                  ← no nouns, no app named
 JARVIS:  "Tom wrote about Sunday lunch."              ← the inbox is still context
 
+You:     "I need some AA batteries, stick a pack in my Amazon basket."
+JARVIS:  "On it."                                     ← a recipe: no model decides the steps
+         AUTOMATION  Opened amazon.co.uk · Clicked “Duracell Plus AA…” · Clicked “Add to Basket”
+JARVIS:  "I've added AA batteries to your Amazon basket."   ← only once the page said so
+
 You:     "Research the best current MacBook deals and compare them."
 JARVIS:  "I'll look into it, sir."                    ← immediate
          RESEARCH  Searching · Opening 5 results · Comparing · Preparing summary
@@ -25,6 +31,52 @@ You:     "Which of those is quietest?"                ← still the same five so
 
 Everything that can run on your machine does: wake word, speech recognition,
 reasoning, memory and speech output. **No paid API is required.**
+
+---
+
+## What's new in v3.0
+
+v2 could run commands; it couldn't reliably *finish* an errand. It never saw
+what its tools returned (a page's buttons were "60 elements found"), so the
+last steps — the ones that need the "Add to Basket" button — failed; it read
+colloquial requests as chat; and it made six serial model calls to decide
+anything. v3.0 is rebuilt around measured results (`evals/`, a mock shop,
+webmail, forms and a single-page app, 72 phrasings):
+
+* **It understands how people talk.** One interpreter call reads "stick a pack
+  in my basket", "pop a new tab open", "my desk is too dark, can you add a
+  lamp" — and a restated command still takes the instant path. Recognition
+  runs on the Mac's GPU with your apps' names in its vocabulary.
+* **One loop that operates the Mac** (`intelligence/operator/`). Native tool
+  calling, the full result of every action, the page or window read again
+  after each one — and **"done" must be proven**: every item on the errand's
+  checklist needs a quote from something JARVIS actually saw ("Added to
+  Basket"), so it can't stop one step short and call it finished.
+* **Two browsers, each where it's best**: yours for the page you're on,
+  JARVIS Chrome — genuine input, network-aware waiting, shadow DOM and frames
+  — for errands. Sign-ins and CAPTCHAs are handed to you.
+* **Any Mac app**, through the whole Accessibility tree, genuine key and mouse
+  events, menus by path, and on-device text recognition for windows that show
+  Accessibility nothing.
+* **Recipes** for the common errands run with no model calls at all; errands
+  that worked become new recipes.
+* **Fast**: the median benchmark errand went from 5.4 s to 1.1 s of JARVIS's
+  own time (it was 95% waiting for pages that had finished loading), and every
+  request shows where its time went.
+* **Safe by construction**: consequential actions are judged on the real
+  element and always confirmed; other people's words (pages, emails) are
+  fenced off as information, never instructions; password managers, banking
+  and permission settings are never operated; every action is on record; and
+  you can pause, take over or stop any task.
+* **Free**: local models by default (a 16 GB MacBook runs it), optional free
+  cloud tiers that fall back to local, and anything private stays on the Mac.
+* **An actual Mac app** (`macapp/`): its own window, menu bar, ⌥Space from
+  anywhere, notifications.
+
+Benchmarks and what each phase changed: [`evals/BASELINE.md`](evals/BASELINE.md).
+The release gate — run on your own Mac with your own models — is
+`scripts/bench_all.sh`; `scripts/release.sh` tags v3.0 only when every gate
+passes.
 
 ---
 
@@ -226,6 +278,8 @@ microphone and a Mac. See [Known limitations](#known-limitations).
 
 ## Contents
 
+- [What's new in v3.0](#whats-new-in-v30)
+- [What's new in V1.3](#whats-new-in-v13)
 - [What's new in V1.2](#whats-new-in-v12)
 - [What's new in V1.1](#whats-new-in-v11)
 - [What it does](#what-it-does)

@@ -64,6 +64,8 @@ class TaskResult:
     completion_tokens: int = 0
     #: Each model call and tool, when it started and how long it took.
     timeline: list[dict[str, Any]] = field(default_factory=list)
+    #: The recipe (skills/) that took the task on, if one did.
+    recipe: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -265,6 +267,8 @@ async def drive_turn(app, text: str, record: TaskResult, *, approve: list[str],
         record.prompt_tokens = int(timing.get("prompt_tokens") or 0)
         record.completion_tokens = int(timing.get("completion_tokens") or 0)
         record.timeline = list(timing.get("steps") or [])
+    record.recipe = next((str(span.get("skill") or "") for span in app.telemetry.recent(400)
+                          if span.get("name") in {"automation.skill", "intelligence.skill"}), "")
 
 
 async def _converse(app, text: str, record: TaskResult) -> None:

@@ -52,7 +52,8 @@ answer (streamed)
 `triage.py` is the one semantic authority for chat vs. action — nothing below
 it (`ToolCatalog`, the operator) runs until triage has said
 "action". It always uses the `reasoning` slot (defers to `general` —
-llama3.1:8b — never `fast`): `scripts/bench_triage.py` measured the 1B model
+qwen3:8b by default — never a separate small model): `scripts/bench_triage.py`
+measured a 1B model
 classifying every explicit action request as chat, with schema-validation
 failures on top, so speed is deliberately traded for reliability here. The
 fast gateway (`router/quick.py`, unchanged) is what keeps genuinely
@@ -298,6 +299,21 @@ change that already worked isn't repeated.
 **Privacy.** `privacy.py`: a task that touches `models.cloud_exclusions` or
 reads mail, messages, contacts, files or the clipboard is local-only from
 then on, whatever the operator slot's provider chain says.
+
+**Other people's words.** Pages, emails, messages, files and app windows
+reach the model fenced as what *they* say (`security/untrusted.py`), with
+JARVIS's own notes outside the fence and a warning when the text addresses
+an assistant; the instructions say fenced text is never an instruction.
+
+**Recipes first.** Before the loop starts, a recipe that fits the errand
+(`skills/`) runs its steps with no model calls; if one doesn't fit, the loop
+starts from that page with what the recipe did and saw. Fitting recipes are
+also offered to the loop as `skill_*` tools, and a proven run can become a
+learned recipe.
+
+**Pausing.** Between steps the loop waits while the user has the task paused
+(or has taken over); when it resumes it's told things may have changed and
+looks again before acting.
 
 ---
 

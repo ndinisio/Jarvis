@@ -211,7 +211,8 @@ class AutomationCapability(Capability):
         if found is None:
             return None
         skill, params = found
-        outcome = await SkillRunner(self.deps, request.ctx, report=progress.say).run(skill, params)
+        with self.deps.telemetry.span("automation.skill", skill=skill.id):
+            outcome = await SkillRunner(self.deps, request.ctx, report=progress.say).run(skill, params)
         library.record(skill, outcome.ok)
         if outcome.ok:
             summary = summary_for(skill, params, outcome)

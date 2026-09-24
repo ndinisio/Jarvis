@@ -22,5 +22,11 @@ else
   echo "▸ Native Mac tasks skipped (not on macOS)"
 fi
 
+echo "▸ The control channel, attacked for real"
+$PY -m evals.run_security
+
+echo "▸ The Mac app"
+$PY -m evals.run_app
+
 echo "▸ Gate report"
 $PY -m evals.report

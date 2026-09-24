@@ -27,9 +27,9 @@ and moved to the background.
              (a certainty)                   else        │
                     │                          │         │
              control / tool          intelligence agent   │
-                    │                  understand → plan  │
-                    │                  → decide → act     │
-              wrong tool? ─────────►   → verify → repair   │
+                    │                  understand → recipe│
+                    │                  or operator: act → │
+              wrong tool? ─────────►   look → prove → done │
                     │                          │         │
                    short?  ─────┬──────────────┘  long?  ─┘
                      │          │                    │

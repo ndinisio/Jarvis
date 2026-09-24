@@ -125,3 +125,36 @@ JARVIS_LOG_LEVEL=DEBUG ./scripts/start.sh
 
 Developer mode in the UI shows routing decisions, tool calls, model latency and
 time-to-first-token without touching the log.
+
+## The Mac app
+
+**"JARVIS is already running".** Only one JARVIS runs at a time. Quit the one
+started from Terminal (`Ctrl-C` in its window), then choose Restart JARVIS
+from the menu bar item.
+
+**It can't find its folder.** It looks where it was built (inside your clone)
+and in `~/Jarvis`; otherwise it asks. Menu bar → Restart JARVIS asks again if
+the clone moved.
+
+**macOS asks for permissions again after a rebuild.** The app is signed ad
+hoc, and macOS ties permissions to the signature. Grant them again (System
+Settings → Privacy & Security), or keep using the build you have.
+
+**Free cloud keys aren't picked up.** An app opened from Finder doesn't see
+your shell profile: put `JARVIS_GROQ_API_KEY=…` (etc.) in the `.env` file in
+your clone.
+
+**What happened?** Menu bar → Show Log opens `~/Library/Logs/JARVIS/backend.log`.
+
+## Models are slow, or the Mac is short of memory
+
+* `jarvis doctor` says which model each slot really uses. One resident text
+  model (qwen3:8b by default) serves everything; a second one being loaded
+  and unloaded is the usual cause of slowness on 16 GB.
+* Make sure Ollama runs with flash attention and an 8-bit KV cache
+  (`scripts/setup.sh` sets this up; check with
+  `launchctl getenv OLLAMA_KV_CACHE_TYPE` — it should say `q8_0` — and quit
+  and reopen Ollama after changing it).
+* Developer mode's **Requests** list shows where each request's time went:
+  model, acting, looking, or waiting for pages.
+

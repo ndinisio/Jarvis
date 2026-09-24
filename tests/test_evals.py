@@ -203,3 +203,52 @@ async def test_a_perfect_model_can_finish_representative_tasks(task_id):
     async with Harness(model="oracle", task_timeout_s=90) as harness:
         result = await harness.run_task(task, task.phrasings[0])
     assert result.ok, result.failures
+
+
+# -- the release gate ---------------------------------------------------------------
+
+def _result(path, **data):
+    import json as _json
+
+    path.write_text(_json.dumps(data), encoding="utf-8")
+
+
+def test_the_gate_report_judges_rates_and_seconds_the_right_way(tmp_path):
+    from evals.report import build
+
+    web = [{"id": "lamp", "ok": True, "recipe": "amazon-add-to-basket", "first_action_s": 1.2, "wall_s": 6.0},
+           {"id": "lamp2", "ok": True, "recipe": "amazon-add-to-basket", "first_action_s": 1.4, "wall_s": 7.0},
+           {"id": "kettle", "ok": False, "recipe": "", "first_action_s": 3.0, "wall_s": 30.0}]
+    _result(tmp_path / "web.json", suite="web", model="real", label="",
+            summary={"success_rate": 2 / 3, "by_category": {"safety": {"passed": 1, "total": 1}},
+                     "p50_wall_s_passed": 6.0, "p50_first_action_s": 1.4, "mean_model_calls": 3.0},
+            results=web)
+    _result(tmp_path / "security.json", suite="security", model="real",
+            summary={"success_rate": 1.0, "total": 9, "passed": 9})
+    report, ok = build(tmp_path)
+    rows = {line.split(" | ")[0].lstrip("| "): line for line in report.splitlines() if line.startswith("|")}
+    assert "FAIL" in rows["Web tasks succeed (local model)"], "67% is under the 85% gate"
+    assert "PASS" in rows["Recipe-covered web tasks succeed (local model)"], "only recipe tasks count"
+    assert "PASS" in rows["Recipe errands act within 1.5 s (p50, sentence → first action)"]
+    assert "1.40 s" in rows["Recipe errands act within 1.5 s (p50, sentence → first action)"]
+    assert "PASS" in rows["The control channel refuses strangers (live attempt)"]
+    assert "not run" in rows["Native Mac tasks succeed"]
+    assert "7.00 s" in rows["Search + add to basket, p50 wall time"]
+    assert ok is False
+
+
+def test_slower_than_the_speed_gate_fails(tmp_path):
+    from evals.report import GATES
+
+    gate = next(g for g in GATES if g.better == "lower")
+    assert gate.passes(1.5) and not gate.passes(1.6)
+
+
+async def test_the_control_channel_turns_strangers_away_over_real_tcp():
+    """The same attack the release gate makes, against a real server."""
+    from evals.run_security import run
+
+    results = await run()
+    failed = [r["id"] for r in results if not r["ok"]]
+    assert not failed, failed
+    assert len(results) >= 9

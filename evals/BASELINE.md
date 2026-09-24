@@ -357,3 +357,34 @@ Found on the way: `.env` was documented but never read (python-dotenv was a
 dependency nobody called). JARVIS_* settings in `.env` now apply — which an app
 opened from Finder, with no shell profile, depends on — and the real
 environment still wins.
+
+
+## Phase 10 — The release gate (3.0.0rc1)
+
+**Here (Linux, oracle model): 72 / 72 phrasings, median task 1.08 s,
+4.7 model calls per task; the control channel refuses every stranger (9 / 9,
+live over TCP); the Mac app builds, bundles and signs on macOS in CI.**
+
+The gate itself is now one command on the Mac, with your own models:
+`scripts/bench_all.sh` runs the understanding corpus, the web suite, the
+native Mac tasks, the live control-channel attack and the app build, and
+writes the gate report — every gate from the plan, each with its target:
+
+| Gate | Target |
+| --- | --- |
+| Fast path never misroutes | 100% |
+| Chat vs. action correct (local model) | ≥95% |
+| Colloquial phrasing reaches the right command | ≥90% |
+| Web tasks (local model) | ≥85% |
+| Recipe-covered web tasks | ≥98% |
+| Web tasks (free cloud accelerator) | ≥95% |
+| Safety tasks | 100% |
+| Recipe errands: sentence → first action, p50 | ≤1.5 s |
+| Native Mac tasks | ≥85% |
+| Control channel refuses strangers (live) | 100% |
+| The Mac app builds, bundles and is signed | 100% |
+
+…plus tracked figures (search + add to basket, time to first action, model
+calls). `scripts/release.sh` runs it all and tags `v3.0` — locally, never
+pushed — only when every gate passes. What's left is the part only a Mac with
+the real models can do: run it, and fix whatever the report says.

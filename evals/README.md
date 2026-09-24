@@ -19,8 +19,15 @@ scripts/bench_all.sh                    # all suites + the gate report
 ```
 
 `scripts/bench_all.sh` runs the understanding corpus, the web suite and the
-native suite with **your own JARVIS configuration**, then prints the v3.0
-gate report (`evals/results/report-*.md`).
+native suite with **your own JARVIS configuration**, attacks the control
+channel of a live JARVIS (`run_security`), builds the Mac app (`run_app`), then
+prints the v3.0 gate report (`evals/results/report-*.md`): each gate's result
+and target, plus tracked figures — search-and-add-to-basket time, time to
+first action, model calls per task.
+
+When everything passes, `scripts/release.sh` (which runs all of the above
+itself) sets the version to 3.0.0, commits and tags `v3.0` locally. It never
+pushes.
 
 ## Individual runners
 
@@ -31,6 +38,8 @@ PYTHONPATH=backend python -m evals.run_web --model oracle -v         # architect
 PYTHONPATH=backend python -m evals.run_web --model real -v           # your models
 PYTHONPATH=backend python -m evals.run_web --model real --label cloud  # a free cloud accelerator run
 PYTHONPATH=backend python -m evals.run_mac                           # native apps (Mac)
+PYTHONPATH=backend python -m evals.run_security                      # the control channel, live
+PYTHONPATH=backend python -m evals.run_app                           # build + check JARVIS.app (Mac)
 PYTHONPATH=backend python -m evals.bake_off --pull                   # compare local models
 PYTHONPATH=backend python -m evals.report                            # gates
 ```
