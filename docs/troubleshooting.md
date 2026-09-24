@@ -83,6 +83,17 @@ the report says what it could and couldn't read.
 The backend stopped or restarted. The socket retries with backoff; check the
 terminal and `~/JARVIS/logs/jarvis.log`.
 
+**It says "session ended".**
+That window belongs to an earlier run: each start of JARVIS has its own session
+token ([security](security.md#who-can-talk-to-jarvis)). Open the link the current
+run printed (`Interface : http://127.0.0.1:8765/?token=…`), or restart it to open
+a fresh window.
+
+**"JARVIS is already running."**
+Only one JARVIS runs at a time. Use the one that's already open, or stop it
+(Ctrl-C in its terminal) first. The process number in the message is the one
+holding `~/JARVIS/jarvis.lock`.
+
 **Nothing happens when I type.**
 Look for an open confirmation dialog — a pending high-risk action blocks its own
 turn (everything else keeps working).

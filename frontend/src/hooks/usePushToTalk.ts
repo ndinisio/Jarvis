@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import { apiFetch } from '../lib/api'
 
 /**
  * Browser microphone capture, used for push-to-talk and as the fallback when
@@ -37,7 +38,7 @@ export function usePushToTalk(onTranscript?: (text: string) => void) {
     const base64 = arrayBufferToBase64(pcm.buffer)
 
     try {
-      const response = await fetch('/api/voice/transcribe', {
+      const response = await apiFetch('/api/voice/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ audio: base64, sample_rate: 16000, dispatch: !onTranscript }),

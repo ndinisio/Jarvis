@@ -16,6 +16,7 @@ export function Composer({ send }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const pushLocalMessage = useStore((s) => s.pushLocalMessage)
   const connected = useStore((s) => s.connected)
+  const sessionExpired = useStore((s) => s.sessionExpired)
   const assistantState = useStore((s) => s.assistantState)
   const { recording, start, stop, error } = usePushToTalk()
 
@@ -70,7 +71,10 @@ export function Composer({ send }: Props) {
           className="composer__input"
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          placeholder={recording ? 'Listening…' : connected ? 'Ask JARVIS…  (press / to focus)' : 'Reconnecting…'}
+          placeholder={recording ? 'Listening…'
+            : connected ? 'Ask JARVIS…  (press / to focus)'
+            : sessionExpired ? 'This window is from an earlier JARVIS run — open the link JARVIS printed when it started'
+            : 'Reconnecting…'}
           disabled={!connected}
           spellCheck={false}
           autoComplete="off"

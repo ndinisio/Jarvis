@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useStore } from '../state/store'
+import { apiFetch } from '../lib/api'
 
 interface Permission {
   kind: string
@@ -27,7 +28,7 @@ export function Onboarding() {
   const check = useCallback(async () => {
     setChecking(true)
     try {
-      const response = await fetch('/api/permissions')
+      const response = await apiFetch('/api/permissions')
       const data = await response.json()
       setPermissions(data.permissions ?? [])
     } catch {
@@ -44,7 +45,7 @@ export function Onboarding() {
   if (!show) return null
 
   const finish = async () => {
-    await fetch('/api/config', {
+    await apiFetch('/api/config', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ onboarding_complete: true }),
@@ -112,7 +113,7 @@ export function Onboarding() {
                       <button
                         className="btn btn--ghost btn--small"
                         onClick={async () => {
-                          await fetch('/api/permissions/open', {
+                          await apiFetch('/api/permissions/open', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ kind: permission.kind }),

@@ -218,3 +218,19 @@ def test_the_environment_still_overrides_an_upgraded_file(tmp_path, monkeypatch)
     path = _v13_settings_file(tmp_path, workspace=str(tmp_path / "JARVIS"))
     monkeypatch.setenv("JARVIS_GENERAL_MODEL", "mistral:7b")
     assert load_config(path).models.general.model == "mistral:7b"
+
+
+def test_the_memory_database_uses_write_ahead_logging(tmp_path):
+    import sqlite3
+
+    from jarvis.memory.store import MemoryStore
+
+    path = tmp_path / "memory" / "jarvis.db"
+    store = MemoryStore(path)
+    store.close()
+    # WAL is a property of the file itself: any later reader sees it.
+    other = sqlite3.connect(str(path))
+    try:
+        assert other.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        other.close()

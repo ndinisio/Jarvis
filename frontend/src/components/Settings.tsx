@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../state/store'
+import { apiFetch } from '../lib/api'
 
 /**
  * Slots that fall back to another slot when left blank (mirrors
@@ -34,8 +35,8 @@ export function Settings() {
 
   useEffect(() => {
     if (!show) return
-    fetch('/api/voice/voices').then((r) => r.json()).then((d) => setVoices(d.voices ?? [])).catch(() => {})
-    fetch('/api/models').then((r) => r.json()).then((d) => {
+    apiFetch('/api/voice/voices').then((r) => r.json()).then((d) => setVoices(d.voices ?? [])).catch(() => {})
+    apiFetch('/api/models').then((r) => r.json()).then((d) => {
       const installed = Object.values(d.providers ?? {}).flatMap((p: any) => p.models ?? [])
       setModels(installed as string[])
     }).catch(() => {})
@@ -59,7 +60,7 @@ export function Settings() {
   const save = async () => {
     setSaving(true)
     try {
-      await fetch('/api/config', {
+      await apiFetch('/api/config', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(stripSecrets(draft)),

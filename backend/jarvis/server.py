@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .core import auth
 from .core.app import JarvisApp
 from .core.events import EventType
 from .core.logging import get_logger
@@ -28,12 +29,30 @@ log = get_logger("jarvis.server")
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
+#: API routes reachable without the session token: the health check a
+#: launcher polls before it has anything to authenticate with.
+PUBLIC_API_PATHS = {"/api/health"}
 
-def create_app(jarvis: JarvisApp | None = None) -> FastAPI:
+#: The Vite development server (``scripts/dev.sh``), which serves the
+#: interface on its own port and proxies /api and /ws here. Trusted for CORS
+#: and as a WebSocket Origin — the session token is still required.
+DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+
+
+def create_app(jarvis: JarvisApp | None = None, *, host: str | None = None,
+               port: int | None = None) -> FastAPI:
     jarvis = jarvis or JarvisApp()
+    # The address this server will actually be reached at — what a
+    # legitimate browser Origin header must name. Callers that bind
+    # somewhere other than the configured default (``jarvis serve --port``)
+    # pass it through; otherwise the configured one is right.
+    host = host or jarvis.config.server.host
+    port = port or jarvis.config.server.port
+    token = auth.session_token()
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        auth.redact_server_logs()  # uvicorn's logging is configured by now
         await jarvis.startup()
         try:
             yield
@@ -42,20 +61,47 @@ def create_app(jarvis: JarvisApp | None = None) -> FastAPI:
 
     app = FastAPI(title="JARVIS", version=__version__, lifespan=lifespan, docs_url="/api/docs")
     app.state.jarvis = jarvis
+    app.state.session_token = token
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=list(DEV_ORIGINS),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def require_session_token(request: Request, call_next):
+        # Every API call needs the token — reads included: /api/memory is
+        # your whole conversation history. The interface itself (/, assets)
+        # stays open: it has to load before it can know the token.
+        path = request.url.path
+        # A CORS preflight never carries custom headers; the request it
+        # clears the way for still has to bring the token.
+        if request.method != "OPTIONS" and path.startswith("/api/") and path not in PUBLIC_API_PATHS:
+            given = (request.headers.get(auth.TOKEN_HEADER)
+                     or request.query_params.get(auth.TOKEN_PARAM))
+            if not auth.tokens_match(given, token):
+                return JSONResponse({"error": "missing or invalid session token"}, status_code=401)
+        return await call_next(request)
 
     # ------------------------------------------------------------------
     # WebSocket: the live event stream
     # ------------------------------------------------------------------
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
+        # Checked before accepting, so a refused client never receives a
+        # single event — not even the status handshake.
+        if not auth.tokens_match(websocket.query_params.get(auth.TOKEN_PARAM), token):
+            log.warning("refused a WebSocket connection without a valid session token")
+            await websocket.close(code=1008)
+            return
+        origin = websocket.headers.get("origin")
+        if not auth.origin_allowed(origin, host=host, port=port, trusted=DEV_ORIGINS):
+            log.warning("refused a WebSocket connection from %s", origin)
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         log.info("UI connected (%d total)", jarvis.bus.subscriber_count + 1)
 
@@ -93,13 +139,23 @@ def create_app(jarvis: JarvisApp | None = None) -> FastAPI:
     # ------------------------------------------------------------------
     # REST
     # ------------------------------------------------------------------
+    @app.get("/api/session")
+    async def session() -> dict[str, Any]:
+        # Reaching this at all means the token was accepted (the middleware
+        # answers 401 otherwise): how the interface tells "JARVIS is down"
+        # from "this tab belongs to an earlier run".
+        return {"ok": True}
+
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
         return await jarvis.status()
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
-        return {"ok": True, "version": jarvis.config.model_dump().get("workspace")}
+        # Unauthenticated (a launcher polls it before it has the token), so
+        # it says only that this is JARVIS and which version — nothing about
+        # the user or the machine.
+        return {"ok": True, "app": "jarvis", "version": __version__}
 
     @app.get("/api/config")
     async def get_config() -> dict[str, Any]:

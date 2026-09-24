@@ -598,7 +598,7 @@ screen can open the right settings pane for you.
 ## Running it
 
 ```bash
-./scripts/start.sh                 # interface at http://127.0.0.1:8765
+./scripts/start.sh                 # opens the interface (the link it prints includes this run's token)
 ./scripts/start.sh --no-voice      # text only
 ./scripts/start.sh --dev           # with the developer panel on
 ```
@@ -821,6 +821,11 @@ anything.
   occasional, cooldown-limited vision-model calls — never literally
   continuous inference, and never shown in the interface unless you ask or
   turn on its own narration toggle.
+* **Only the JARVIS window can drive JARVIS.** Each run has its own session
+  token, carried by the link it opens; the API and the event stream refuse
+  anything without it, and the event stream refuses pages from other sites
+  outright — so a web page can't answer a confirmation for you. See
+  [`docs/security.md`](docs/security.md#who-can-talk-to-jarvis).
 * **Passwords and card details are yours.** Neither browser will type into a
   password or payment-card field, whatever the model asks for; sign-ins and
   CAPTCHAs are handed to you (see *Two browsers*).
@@ -1095,15 +1100,14 @@ detection/tuning question (`wake_sensitivity`, microphone gain, background noise
 rather than the crash V1.1 fixes — check `~/JARVIS/logs/jarvis.log` for
 `wake-word detection failed`, which would indicate a software fault instead.
 
-**V1.2 has not been run against a live local model.** The intelligence layer is
-verified with a scripted reasoning model — that is what makes the tests measure
-the architecture rather than the weather inside an 8B model — and with the whole
+**Real-model numbers come from your Mac.** The intelligence layer is verified
+here with scripted models and a deterministic "oracle" that measures the
+architecture rather than the weather inside an 8B model, and with the whole
 stack offline, where it degrades honestly ("the local AI service isn't
-available") instead of inventing an answer. What has *not* been measured here is
-how well `llama3.1:8b` actually plays the reasoning role: how often it picks the
-right tool, how often its JSON parses first time, and what a turn really costs
-in seconds on an M-series Mac. Expect to want a larger model in the `reasoning`
-slot; that is one line of configuration (see [Model roles](#model-roles)).
+available") instead of inventing an answer. How well the default `qwen3:8b`
+actually does — how often it picks the right tool, and what a turn really costs
+in seconds on an M-series Mac — is what `scripts/bench_all.sh` measures on your
+hardware (see [`evals/`](evals/README.md)); those runs are still to be done.
 
 **The UI interaction tools are unverified on hardware.** `click_element`,
 `type_text` and `press_key` use System Events and the Accessibility API. They
@@ -1115,19 +1119,20 @@ won't be reachable this way.
 
 **Other current limits**
 
-* No Spotify, HomeKit, Reminders, Messages or Contacts yet — the tool interface
-  is ready for them ([`docs/extending.md`](docs/extending.md)).
 * Web pages inside cross-origin frames (some payment and embedded widgets)
   are out of reach by design; controls in same-origin frames and open shadow
   roots are reachable.
-* The agent is bounded to six steps and two repairs per step by default. Work
-  that genuinely needs more will stop and say what it got to, rather than
-  looping.
+* A quick question gets up to six steps; a multi-step errand runs as a
+  background task with up to 15 steps per milestone and 60 in all
+  (`automation.max_steps_per_milestone` / `max_total_steps`). Work that needs
+  more stops and says what it got to, rather than looping.
 * Reference resolution reads the conversation, not a contacts database: "my
   brother" resolves to a person who has appeared in context, and otherwise
   becomes a question.
-* Email is Apple Mail only (the `MailBackend` interface is there for IMAP).
-* Research reads static HTML; it doesn't run JavaScript-heavy pages.
+* Email is Apple Mail by default, or any IMAP/SMTP account (`email.imap_host`).
+* Research reads pages as static HTML first; a page that comes back nearly
+  empty (usually one that needs JavaScript) is opened in a real browser tab
+  instead, at most twice per question (`research.js_fallback_enabled`).
 * Vision is single-screenshot on demand by default; an off-by-default
   background watcher (`capabilities.screen_awareness`) adds throttled,
   change-gated screen awareness — see the screen-capture note above.

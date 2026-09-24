@@ -126,3 +126,23 @@ What changed:
   submitting a checkout form from a postcode box still asks. A handoff is
   never pre-approved by any setting, and "done" / "I'm signed in" answers it.
 
+
+## Phase 4.5 — foundations
+
+No change to the suites' numbers (the oracle run is unchanged); this phase
+closed a hole and put the checks on rails.
+
+- **The control channel is authenticated.** Before this, any web page open on
+  the Mac — including one JARVIS itself was browsing — could open JARVIS's
+  WebSocket and answer a pending confirmation for you. Each run now has its own
+  session token, and the event stream also refuses other sites' pages even
+  with it. Proven by a test that stages exactly that attack against a pending
+  "send the email" confirmation, and live in Chromium against a real server.
+- **CI** runs the suite on Python 3.10 and 3.12, lint, and the interface build
+  on every push and pull request. Getting it green surfaced two tests that
+  silently depended on an optional package (`numpy`); they now skip cleanly
+  without it and run in CI with it.
+- The memory database uses write-ahead logging; a second `start.sh` says
+  "JARVIS is already running" instead of crashing; `start.sh` rebuilds the
+  interface when it's older than its source, so a pull can't leave an old
+  interface talking to a new server.

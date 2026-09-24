@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from jarvis.core.personality import Personality, sentences, speakable
 from jarvis.voice.manager import VoiceManager, VoiceState
 from jarvis.voice.stt import build_stt
@@ -172,6 +173,8 @@ async def test_kokoro_speak_calls_are_serialized(monkeypatch):
     import sys
     import time as time_module
     import types
+
+    pytest.importorskip("numpy")  # playback converts samples with it (voice extra)
 
     order: list[str] = []
 
@@ -496,7 +499,7 @@ def test_auto_engine_prefers_mlx_on_apple_silicon(config, monkeypatch):
 
 
 async def test_faster_whisper_is_given_the_vocabulary_as_its_initial_prompt(monkeypatch):
-    import numpy as np
+    np = pytest.importorskip("numpy")  # audio arrives as a numpy array (voice extra)
     from jarvis.voice.stt import FasterWhisperSTT
 
     seen: dict = {}

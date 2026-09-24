@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
 import threading
 import time
@@ -84,33 +85,72 @@ def _serve(args) -> int:
     host = args.host or config.server.host
     port = args.port or config.server.port
 
+    lock, other = _claim_single_instance(config.workspace_path)
+    if lock is None:
+        who = f" (process {other})" if other else ""
+        print(f"JARVIS is already running{who}. Use that one, or stop it before starting another.",
+              file=sys.stderr)
+        return 1
+
     setup_logging(config.log_level, config.logs_dir)
-    print(BANNER)
-    print(f"  Workspace : {config.workspace_path}")
-    print(f"  Interface : http://{host}:{port}")
-    print(f"  Models    : general={config.models.general.model}  "
-          f"fast={config.models.fast.model or '(general)'}  vision={config.models.vision.model}")
-    print(f"  Voice     : wake “{config.voice.wake_word}”, {config.voice.tts_engine} speech\n")
 
     from .server import FRONTEND_DIST, create_app
 
+    jarvis = JarvisApp(store, enable_voice=not args.no_voice)
+    app = create_app(jarvis, host=host, port=port)
+    # The interface's address carries this run's session token (core/auth.py):
+    # it's what lets the page — and only the page — talk to JARVIS.
+    url = f"http://{host}:{port}/?token={app.state.session_token}"
+
+    print(BANNER)
+    print(f"  Workspace : {config.workspace_path}")
+    print(f"  Interface : {url}")
+    print(f"  Models    : general={config.models.general.model}  "
+          f"fast={config.models.fast.model or '(general)'}  vision={config.models.vision.model}")
+    print(f"  Voice     : wake “{config.voice.wake_word}”, {config.voice.tts_engine} speech\n")
     if not FRONTEND_DIST.exists():
         print("  ⚠  The interface isn't built. Run: cd frontend && npm install && npm run build\n")
-
-    jarvis = JarvisApp(store, enable_voice=not args.no_voice)
-    app = create_app(jarvis)
 
     if config.server.open_browser and not args.no_browser:
         def _open() -> None:
             time.sleep(1.5)
             with contextlib.suppress(Exception):
-                webbrowser.open(f"http://{host}:{port}")
+                webbrowser.open(url)
 
         threading.Thread(target=_open, daemon=True).start()
 
-    uvicorn.run(app, host=host, port=port, log_level=config.log_level.lower(),
-                access_log=False)
+    try:
+        uvicorn.run(app, host=host, port=port, log_level=config.log_level.lower(),
+                    access_log=False)
+    finally:
+        lock.close()
     return 0
+
+
+def _claim_single_instance(workspace):
+    """Hold an exclusive lock on the workspace for this run.
+
+    Returns ``(handle, "")`` when this process now owns it, or
+    ``(None, pid_of_the_other)`` when another JARVIS already does. The OS
+    releases the lock when the process ends — however it ends — so a crash
+    never leaves a stale lock that blocks the next start.
+    """
+    import fcntl
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    handle = open(workspace / "jarvis.lock", "a+", encoding="utf-8")  # noqa: SIM115 — held for the run
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.seek(0)
+        other = handle.read().strip()
+        handle.close()
+        return None, other
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle, ""
 
 
 async def _ask(text: str, as_json: bool, config_path: str | None) -> int:

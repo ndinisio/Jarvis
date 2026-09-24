@@ -91,6 +91,12 @@ class MemoryStore:
         self._lock = asyncio.Lock()
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Write-ahead logging: readers never wait on a writer, and a one-shot
+        # `jarvis ask` can use the database while the assistant is running.
+        # NORMAL sync is the standard pairing — safe against a crash of
+        # JARVIS itself; only a power cut can lose the last few writes.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 

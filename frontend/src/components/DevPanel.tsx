@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../state/store'
+import { apiFetch } from '../lib/api'
 
 /**
  * Developer mode.
@@ -19,7 +20,7 @@ export function DevPanel() {
     let alive = true
     const load = async () => {
       try {
-        const response = await fetch('/api/telemetry')
+        const response = await apiFetch('/api/telemetry')
         const data = await response.json()
         if (alive) setSummary(data.summary ?? {})
       } catch {

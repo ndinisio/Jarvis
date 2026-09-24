@@ -1,0 +1,71 @@
+# The checks every change to JARVIS has to pass — the same ones run by hand
+# before each commit so far, now run on every push to main and every PR.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend · Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Python JARVIS supports, and the one setup.sh prefers.
+        python: ["3.10", "3.12"]
+    env:
+      # Where the browser tests look for Chromium (evals/browser.py).
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        # numpy (from the voice extra) lets the audio tests run; the rest of
+        # the voice stack needs a real microphone and speakers.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,browser,evals]" numpy
+
+      - name: Install Chromium for the browser tests
+        run: python -m playwright install --with-deps chromium
+
+      - name: Lint
+        run: ruff check backend tests evals scripts
+
+      - name: Test
+        run: pytest -q
+
+  interface:
+    name: Interface
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build

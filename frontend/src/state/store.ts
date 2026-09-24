@@ -29,6 +29,8 @@ interface Status {
 
 interface StoreState {
   connected: boolean
+  /** The server no longer accepts this tab's session token (see lib/api.ts). */
+  sessionExpired: boolean
   assistantState: AssistantState
   voiceState: VoiceState
   voiceLevel: number
@@ -51,6 +53,7 @@ interface StoreState {
   lastWake: number
 
   setConnected: (v: boolean) => void
+  setSessionExpired: (v: boolean) => void
   setDevMode: (v: boolean) => void
   setShowSettings: (v: boolean) => void
   setShowOnboarding: (v: boolean) => void
@@ -62,6 +65,7 @@ interface StoreState {
 
 export const useStore = create<StoreState>((set, get) => ({
   connected: false,
+  sessionExpired: false,
   assistantState: 'idle',
   voiceState: 'off',
   voiceLevel: 0,
@@ -84,6 +88,7 @@ export const useStore = create<StoreState>((set, get) => ({
   lastWake: 0,
 
   setConnected: (v) => set({ connected: v }),
+  setSessionExpired: (v) => set({ sessionExpired: v }),
   setDevMode: (v) => set({ devMode: v }),
   setShowSettings: (v) => set({ showSettings: v }),
   setShowOnboarding: (v) => set({ showOnboarding: v }),

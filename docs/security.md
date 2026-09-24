@@ -43,6 +43,27 @@ The model cannot resolve a confirmation, suppress one, or call a tool with a
 lower risk level than the tool declares. Saying "yes" resolves whatever dialog
 is open; it cannot conjure an action that wasn't already requested.
 
+## Who can talk to JARVIS
+
+The server listens on `127.0.0.1` only, and every run gets a fresh random
+**session token** (`backend/jarvis/core/auth.py`) — the same scheme Jupyter uses
+for its local server. The link JARVIS opens (and prints) carries it:
+`http://127.0.0.1:8765/?token=…`. The interface keeps it for that tab and removes
+it from the address bar.
+
+* Every `/api/*` call and the `/ws` event stream require the token; only
+  `/api/health` (which reveals nothing about you) and the interface's own files
+  don't.
+* The event stream also checks the browser's `Origin`: a page from any other
+  site — including one JARVIS itself is browsing — is refused even if it
+  somehow had the token. Without this, such a page could answer a pending
+  confirmation on your behalf.
+* A tab left open from an earlier run says so ("session ended") instead of
+  reconnecting forever. Open the link from the current run.
+* A launcher can supply the token in `JARVIS_SESSION_TOKEN` (at least 32
+  characters); `scripts/dev.sh` does, so a development server that reloads
+  keeps the same one.
+
 ## Filesystem boundary
 
 | Location | Read | Write | Delete |

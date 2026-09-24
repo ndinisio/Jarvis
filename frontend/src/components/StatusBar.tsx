@@ -4,6 +4,7 @@ import { VoiceChip } from './VoiceChip'
 /** Identity, connection, voice, model and the developer toggle. Quiet by design. */
 export function StatusBar({ send }: { send: (m: Record<string, unknown>) => boolean }) {
   const connected = useStore((s) => s.connected)
+  const sessionExpired = useStore((s) => s.sessionExpired)
   const status = useStore((s) => s.status)
   const devMode = useStore((s) => s.devMode)
   const setDevMode = useStore((s) => s.setDevMode)
@@ -19,7 +20,7 @@ export function StatusBar({ send }: { send: (m: Record<string, unknown>) => bool
       <div className="statusbar__identity">
         <span className="statusbar__mark" aria-hidden="true" />
         <span className="statusbar__name">JARVIS</span>
-        <span className="statusbar__version">v{status?.version ?? '1.2'}</span>
+        {status?.version && <span className="statusbar__version">v{status.version}</span>}
       </div>
 
       <div className="statusbar__meta">
@@ -30,7 +31,7 @@ export function StatusBar({ send }: { send: (m: Record<string, unknown>) => bool
           <span className="statusbar__pill is-warn">non-macOS host</span>
         )}
         <span className={`statusbar__pill${connected ? ' is-ok' : ' is-warn'}`}>
-          {connected ? 'connected' : 'reconnecting'}
+          {connected ? 'connected' : sessionExpired ? 'session ended' : 'reconnecting'}
         </span>
         <VoiceChip send={send} />
         <button

@@ -22,7 +22,8 @@ def _bundled_chromium() -> str | None:
     """The container ships Chromium outside Playwright's own version pin;
     use it directly when Playwright's matching build isn't installed."""
     root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers"))
-    candidates = [root / "chromium", *sorted(root.glob("chromium-*/chrome-linux/chrome"), reverse=True)]
+    # Playwright's own layout is chromium-<build>/chrome-linux[64]/chrome.
+    candidates = [root / "chromium", *sorted(root.glob("chromium-*/chrome-linux*/chrome"), reverse=True)]
     for path in candidates:
         if path.is_file() and os.access(path, os.X_OK):
             return str(path)
