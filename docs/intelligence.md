@@ -22,28 +22,27 @@ input
   ↓
 quick command engine ──────────────► a certainty: answer it, ~4 ms
   ↓ (declined, or the tool was the wrong one)
-intent triage: chat or action?  ──chat──► converse (no tools, no planner)
+intent triage: chat or action?  ──chat──► converse (no tools)
   ↓ action
 is triage's own objective already confident and complete?  ──yes──► use it directly
   ↓ no
 intent + entity understanding
   ↓
+multi-step errand?  ──yes──► a background Task running the same operator (below)
+  ↓ no
 is anything genuinely ambiguous?  ──yes──► ask
   ↓ no
-plan  (multi-step work only)
-  ↓
-┌─► decide next action
+operator (intelligence/operator/, v3.0):
+┌─► one model call: native tool calls (one or several)
 │      ↓
-│   execute (through the registry — permissions included)
+│   each call through the registry — validation, permissions, confirmations
 │      ↓
-│   observe: the result becomes context
+│   verify, and read the page again after a web action
 │      ↓
-│   verify: did that achieve what was asked?
+│   the full results go back into the conversation
 │      ↓
-│   ok? ──yes──► next step, or done
-│      ↓ no
-│   recover: retry / re-argue / re-route / ask / report
-└──────┘
+│   finish? ──proven──► done      ask_user ──► a question      give_up ──► an honest report
+└──────┘  (a finish without proof is refused, with the reason)
   ↓
 answer (streamed)
 ```
@@ -51,7 +50,7 @@ answer (streamed)
 ## Intent triage (V1.3)
 
 `triage.py` is the one semantic authority for chat vs. action — nothing below
-it (`ToolCatalog`, the planner, the execution loop) runs until triage has said
+it (`ToolCatalog`, the operator) runs until triage has said
 "action". It always uses the `reasoning` slot (defers to `general` —
 llama3.1:8b — never `fast`): `scripts/bench_triage.py` measured the 1B model
 classifying every explicit action request as chat, with schema-validation
@@ -96,10 +95,9 @@ a specific capability.
 | `understanding.py` | sentence → `Objective` |
 | `entities.py` | `ReferenceResolver` — "it", "him", "the second one" |
 | `catalog.py` | `ToolCard`, shortlisting, call validation |
-| `planner.py` | plans, for multi-step work only |
-| `agent.py` | `IntelligenceAgent` — the loop |
+| `agent.py` | `IntelligenceAgent` — one turn, end to end |
+| `operator/` | `Operator` — the loop every action runs on (v3.0) |
 | `verify.py` | `Verifier` — did it actually work? |
-| `recovery.py` | `RecoveryManager` — what to do when it didn't |
 | `schema.py` | validated structured decisions |
 | `observability.py` | `Trace` — the stage stream |
 
@@ -264,26 +262,42 @@ the common case costs nothing extra.
 
 ---
 
-## Recovery
+## The operator (v3.0)
 
-One decision per failure, within a budget (default 2 attempts per step):
+One loop for every action (`operator/loop.py`), foreground or background.
+V1.2–v2 had two — a short decide/verify/recover loop for turns and a
+milestone loop for errands — and both failed the same way: the model was
+shown a one-line summary of each result, never the element handles it needed,
+and "complete" was a claim nobody checked. The operator replaces both.
 
-| Strategy | When |
-| --- | --- |
-| `retry` | the failure looks transient **and** the tool is safe to repeat |
-| `modify_arguments` | the arguments were wrong or incomplete |
-| `alternative_tool` | a different tool would get there |
-| `ask_user` | only the user can resolve it |
-| `report` | nothing sensible remains |
+**What the model sees.** A fixed system prompt, a fixed brief (goal, the
+user's words, the checklist, the situation, what's known about the user),
+then the history of tool calls and their *full* results — a page listing with
+its handles, a file's contents — and a status note rebuilt each step. After a
+web action the page is read again automatically. Older results shrink to one
+line and the oldest turns are summarised (`context.py`), so the conversation
+fits the slot's `num_ctx` and its front stays byte-identical for the prompt
+cache.
 
-Some decisions need no model at all:
+**What "done" means.** `checklist.py`: an errand's checklist is the
+interpreter's `success_criteria`, or the goal itself. `mark_done` and
+`finish` must quote proof, and the quote must be found in something actually
+observed (`observation.py`: verbatim after normalising, a quoted fragment, or
+light rewording of one nearby stretch — words scattered across a page don't
+count). An unproven finish is refused with the reason; three in a row end the
+run as stalled rather than burning the budget.
 
-* a **declined confirmation** is an answer, not an obstacle — always `report`;
-* a **missing or invalid argument** is the model's to fix — `modify_arguments`;
-* a **macOS-only tool on another host** will never start working — `report`.
+**When it goes wrong.** A failed or unverified action says so in its result,
+and the rest of that reply doesn't run. `stuck.py` hints when the same action
+meets an unchanged page twice, and after three failures in a row the next
+decision is a re-plan with thinking on. Some outcomes need no model: a
+**declined confirmation** ends the run as an answer; a call with invalid
+arguments is refused with the reason, for the model to fix; an identical state
+change that already worked isn't repeated.
 
-`retry` on a state-changing tool is refused outright. Blind retry loops are
-worse than an honest failure.
+**Privacy.** `privacy.py`: a task that touches `models.cloud_exclusions` or
+reads mail, messages, contacts, files or the clipboard is local-only from
+then on, whatever the operator slot's provider chain says.
 
 ---
 
@@ -292,7 +306,8 @@ worse than an honest failure.
 ```
 fast        1B-class    routing, classification, greetings, short rewrites
 general     8B-class    conversation and synthesis
-reasoning   —           understanding, planning, decisions, verification, repair
+reasoning   —           understanding requests
+operator    —           operating the Mac: native tool calls, step by step (v3.0)
 vision      7B-class    screen understanding
 specialist  —           optional domain model: code, maths, a local fine-tune
 ```
@@ -303,27 +318,26 @@ specialist  —           optional domain model: code, maths, a local fine-tune
 requiring anyone to download five models, and makes upgrading one a single line
 of configuration rather than a refactor.
 
-Do not expect a bigger model to fix orchestration. The loop — verify, recover,
-ask — is what stops a wrong first move becoming a wrong answer, and it works
-independently of which model is in the slot.
+Do not expect a bigger model to fix orchestration. The loop — full results,
+verification, proof before "done", stuck detection, asking — is what stops a
+wrong first move becoming a wrong answer, and it works independently of which
+model is in the slot.
 
 ---
 
 ## Structured output
 
-Every judgement comes back as validated Pydantic, never regex-scraped prose:
+Actions are native tool calls (`models.chat(..., tools=…)`), and the
+operator's own decisions are four tools of its own — `finish(summary,
+evidence)`, `mark_done(item, evidence)`, `ask_user(question)`,
+`give_up(reason)`. A provider without native tool calling gets them emulated
+over text (`{"tool": …, "arguments": …}`, or several under `"calls"`), and
+every call is validated against the tool's schema before it runs.
 
-```jsonc
-{"action": "tool_call", "tool": "search_web", "arguments": {"query": "…"}, "reason": "…"}
-{"action": "clarify",  "question": "Which person do you mean?"}
-{"action": "respond",  "content": "…"}
-{"action": "complete", "reason": "…"}
-```
-
+Understanding is schema-constrained JSON where the provider supports it, and
 `schema.load()` parses, validates, and makes one repair pass (dropping unknown
-keys) before giving up — small local models miss by a little far more often than
-they miss by a lot. A decision that still doesn't validate returns `None`, and
-the caller falls back rather than a parser silently misreading an instruction.
+keys) before giving up — small local models miss by a little far more often
+than they miss by a lot.
 
 ---
 
@@ -345,9 +359,10 @@ decisions, arguments, outcomes, statuses — plus the one-line justification the
 model attaches to a decision. Sensitive argument values (bodies, tokens,
 passwords) are redacted before the event leaves the process.
 
-The frontend renders this twice: the **Working on it** panel as a live plan, and
-the developer panel as a stage stream. Both are projections of what actually
-happened — a step turns green only once verification said so.
+The frontend renders this twice: the **Activity** panel (with an errand's
+checklist on its task card) and the developer panel as a stage stream. Both
+are projections of what actually happened — a step turns green only once
+verification said so, and a checklist item is ticked only once it was proven.
 
 ---
 
@@ -364,7 +379,8 @@ Unchanged from V1.1, deliberately. The agent has no privileged path:
 
 Tested in `tests/test_intelligence.py`:
 `test_the_agent_cannot_bypass_the_high_risk_confirmation` and
-`test_a_declined_confirmation_is_reported_not_worked_around`.
+`test_a_declined_confirmation_is_reported_not_worked_around`, and for errands in
+`tests/test_operator.py` and `tests/test_automation.py`.
 
 ---
 
@@ -381,8 +397,10 @@ brain.decide(action="tool_call", tool="check_email", arguments={"limit": 8},
 await app.ask("check my emails")
 ```
 
-Any stage left unscripted gets a default that *ends* the turn, so an
-under-scripted test fails with a short answer rather than looping.
+`brain.decide(...)` is written as the decision it stands for (`tool_call`,
+`respond`, `complete`, `clarify`, `give_up`) and sent as the operator's
+tool call. Any stage left unscripted gets a default that *ends* the turn, so
+an under-scripted test fails with a short answer rather than looping.
 
 `brain.prompts("decide")` returns what the model was actually shown, which is
 how the follow-up tests assert that context reached it — the point is not that

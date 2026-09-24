@@ -1,15 +1,15 @@
-"""The execution loop.
+"""One user turn, understood and carried out.
 
-    triage → understand → decide → act → observe → verify → repair or continue → respond
+    understand → converse, or act → respond
 
-V1.3 adds one step in front: :class:`~.triage.IntentTriage` is the single
-semantic authority for chat vs. action, so a domain word mentioned in passing
-("I hate dealing with email") never reaches the tool machinery below it. Once
-triage says "action", each decision is made against what the last tool
-actually returned, which is what separates V1.2 from V1.1's "one sentence, one
-route, one action". The loop is bounded by a configurable step budget so it
-cannot run away, and it never reaches around the permission broker: every tool
-call goes through the same registry, with the same confirmations, as V1.1.
+The interpreter (:class:`~.triage.IntentTriage`) is the single semantic
+authority for chat vs. action, so a domain word mentioned in passing ("I hate
+dealing with email") never reaches the tool machinery below it. An action
+runs on the operator (:mod:`.operator`) — the same loop a background errand
+uses — with the tools shortlisted for this objective and a short budget; a
+genuine multi-step errand is handed to a background ``Task`` instead (see the
+handoff in :meth:`IntelligenceAgent.run`). Either way every tool call goes
+through the same registry, with the same confirmations, as everything else.
 """
 
 from __future__ import annotations
@@ -17,55 +17,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..core.errors import Cancelled
 from ..core.logging import get_logger
 from ..models.base import ChatMessage
-from ..tools.base import ToolResult
+from ..models.registry import Slot
 from .catalog import ToolCard, ToolCatalog
 from .entities import ReferenceResolver
 from .observability import Trace
-from .planner import Planner, fallback_plan
-from .recovery import RecoveryManager
-from .schema import (
-    AgentDecision,
-    Complexity,
-    Confidence,
-    Objective,
-    Plan,
-    load,
-)
+from .operator import Budget, Operator, OperatorResult, Status
+from .schema import Complexity, Confidence, Objective
 from .state import ConversationState, PendingClarification, Turn
 from .triage import IntentTriage, objective_sufficient
 from .understanding import Understanding
-from .verify import Verifier
 
 log = get_logger("jarvis.intelligence.agent")
-
-DECISION_PROMPT = """Decide the single next action towards the objective.
-
-Objective: {goal}
-Details: kind={kind}; targets={targets}; constraints={constraints}
-
-{context}
-{plan}
-What has happened so far this turn:
-{observations}
-{view}
-Tools you may use:
-{tools}
-
-Reply with JSON only, one of:
-{{"action": "tool_call", "tool": "<name>", "arguments": {{...}}, "reason": "<short>"}}
-{{"action": "clarify", "question": "<one short question>", "reason": "<short>"}}
-{{"action": "respond", "content": "<the answer for the user>", "reason": "<short>"}}
-{{"action": "complete", "reason": "<why nothing more is needed>"}}
-
-Rules:
-- Use a tool only if it moves the objective forward; the results above may already answer it.
-- Use information already gathered rather than fetching it again.
-- clarify only when you genuinely cannot proceed without the user.
-- respond when you can answer now. Answer from the results above, not from guesses.
-- To act on a web page, use the [handle] shown next to an element in the last result. Never make up a handle."""
 
 FINAL_PROMPT = """Give the user the answer, in one or two sentences unless detail was asked for.
 
@@ -73,8 +37,12 @@ What they wanted: {goal}
 
 What you found:
 {observations}
+{latest}{ending}
+Answer directly, from what was found — never from guesses. Say plainly if something wasn't done.
+Do not describe your process, mention tools, or use headings."""
 
-Answer directly. Do not describe your process, mention tools, or use headings."""
+#: How much of the last result an answer is composed from.
+_LATEST_CHARS = 1500
 
 
 @dataclass
@@ -84,11 +52,12 @@ class AgentOutcome:
     display: dict[str, Any] | None = None
     clarification: str | None = None
     objective: Objective | None = None
-    plan: Plan | None = None
+    #: What "done" meant, and which of it was proven (operator runs only).
+    checklist: list[dict[str, Any]] = field(default_factory=list)
     steps: int = 0
     tool_calls: int = 0
     model_calls: int = 0
-    recovered: int = 0
+    replans: int = 0
     error: str | None = None
     #: True when ``text`` was already delivered token by token.
     streamed: bool = False
@@ -106,11 +75,10 @@ class AgentOutcome:
 
 
 class IntelligenceAgent:
-    """Runs one user turn through the full loop."""
+    """Runs one user turn: understand it, then answer or act."""
 
     def __init__(self, deps, models, state: ConversationState, *, max_steps: int = 6,
-                 recovery_budget: int = 2, reasoning_slot: str = "reasoning",
-                 publish_trace: bool = True):
+                 reasoning_slot: str = "reasoning", publish_trace: bool = True):
         self.deps = deps
         self.models = models
         self.state = state
@@ -120,10 +88,6 @@ class IntelligenceAgent:
         self.resolver = ReferenceResolver()
         self.triage = IntentTriage(models, reasoning_slot)
         self.understanding = Understanding(models, self.resolver, reasoning_slot)
-        self.planner = Planner(models, reasoning_slot, max_steps=max_steps)
-        self.verifier = Verifier(deps)
-        self.recovery = RecoveryManager(models, self.catalog, reasoning_slot,
-                                        budget=recovery_budget)
         self._slot = reasoning_slot
         self._context = ""
 
@@ -157,8 +121,8 @@ class IntelligenceAgent:
 
             if triage.mode == "chat":
                 # The one semantic authority said chat: straight to
-                # conversation, never through ToolCatalog or the planner, and
-                # no separate Understanding call.
+                # conversation, never through the tool machinery, and no
+                # separate Understanding call.
                 objective = Objective(goal=text, kind="chat", needs_tools=False,
                                       complexity=Complexity.TRIVIAL,
                                       confidence=Confidence.CONFIDENT)
@@ -202,17 +166,17 @@ class IntelligenceAgent:
         if not objective.needs_tools:
             return await self._converse(text, objective, outcome, trace, stream)
 
-        # A genuinely multi-step app/web operation — search, compare, click
-        # through, fill in, download — needs a real Task (cancel_event,
-        # progress, a step budget this loop's max_steps was never sized
-        # for), not the short decide/verify loop below. Handing off here,
-        # before shortlist() runs, means no model spend is wasted on a turn
-        # that's about to be re-routed. See orchestrator.py's handling of
-        # AgentOutcome.handoff for what happens next.
+        # A multi-step errand — search, compare, click through, fill in,
+        # download, then report — runs as a real background Task: the user
+        # can keep talking, "stop" reaches it, and it gets an errand-sized
+        # budget. Handing off here, before anything else is spent on the
+        # turn, is what the orchestrator's AgentOutcome.handoff handling
+        # picks up (and capabilities/automation.py runs).
         if (self.deps.config.capabilities.automation
-                and _normalise_kind(objective.kind) == "automation"
                 and objective.complexity == Complexity.MULTI_STEP):
             outcome.handoff = "automation"
+            # This turn's part is done; the errand reports as its own task.
+            trace.complete(outcome)
             outcome.trace = trace.entries
             return outcome
 
@@ -225,184 +189,83 @@ class IntelligenceAgent:
         if question is not None:
             return self._ask(question, objective, outcome, trace)
 
-        plan = await self.planner.plan(objective, cards, state)
-        if plan is None and objective.needs_planning:
-            plan = fallback_plan(objective)
-        if plan is not None:
-            outcome.model_calls += 1
-            outcome.plan = plan
-            trace.plan(plan)
+        result = await self._operate(text, objective, cards, ctx, pending, emit, trace)
+        outcome.steps = result.steps
+        outcome.tool_calls = result.tool_calls
+        outcome.model_calls += result.model_calls
+        outcome.replans = result.replans
+        outcome.checklist = result.checklist
+        if result.display:
+            outcome.display = result.display
 
-        attempts: dict[str, int] = {}
-        # ``findings`` are things that actually happened and are worth telling
-        # the user about. ``notes`` are the loop talking to itself — a rejected
-        # call, a failure to parse — which belong in the next decision's prompt
-        # and nowhere near the answer.
-        findings: list[str] = []
-        notes: list[str] = []
-        stalled = False
-        #: The full model-facing view of the latest result (a page's elements,
-        #: a file's contents…) — findings are one line each; this is what the
-        #: next decision actually acts on.
-        view = ""
+        if result.status == Status.ASKED:
+            return self._ask(result.question, objective, outcome, trace)
+        if result.status == Status.DECLINED:
+            return await self._finish(outcome, trace,
+                                      result.reason or "Understood — I've left it alone.")
+        if result.status == Status.FINISHED and result.answer:
+            return await self._finish(outcome, trace, result.answer)
+        if result.status in (Status.UNAVAILABLE, Status.STALLED) and not result.findings:
+            # No action was ever decided on. That's usually a question the
+            # model would rather just answer — or a model that isn't there,
+            # which the conversation path reports truthfully.
+            return await self._converse(text, objective, outcome, trace, stream)
+        return await self._compose(text, objective, result, outcome, trace, stream)
 
-        for step in range(1, self.max_steps + 1):
-            if ctx is not None and ctx.cancelled():
-                raise Cancelled()
-            outcome.steps = step
+    # ------------------------------------------------------------------
+    async def _operate(self, text: str, objective: Objective, cards: list[ToolCard], ctx,
+                       pending: PendingClarification | None, emit, trace: Trace) -> OperatorResult:
+        """Carry out a short action or question on the operator, with the
+        tools shortlisted for it and a turn-sized budget."""
 
-            decision = await self._decide(objective, plan, cards, findings + notes, state, view)
-            outcome.model_calls += 1
-            if decision is None:
-                notes.append("no decision could be read from the model")
-                stalled = True
-                break
+        def before(tool: str, arguments: dict) -> None:
+            if emit:
+                emit(f"{_humanise(tool)}…")
 
-            if decision.action == "clarify":
-                return self._ask(decision.question or "Could you be more specific, sir?",
-                                 objective, outcome, trace)
-            if decision.action == "respond" and decision.content:
-                trace.decision(decision)
-                return await self._finish(outcome, trace, decision.content)
-            if decision.action == "complete":
-                trace.decision(decision)
-                break
-
-            tool = decision.tool or ""
-            ok, problem, arguments = self.catalog.validate_call(tool, decision.arguments)
-            if not ok:
-                trace.step(step, tool, decision.arguments, f"rejected: {problem}")
-                notes.append(f"{tool} could not be called: {problem}")
-                attempts[tool] = attempts.get(tool, 0) + 1
-                if attempts[tool] > self.recovery.budget:
-                    break
-                continue
-
+        def vet(tool: str, arguments: dict) -> str | None:
             # Last chance to ask, at the point where the consequence is. An
             # objective that looked like a read can still end up proposing a
             # send; the reference is no more resolved than it was.
             card = self.catalog.card(tool)
             if card is not None and (card.mutates or card.confirms):
-                question = self._ambiguity_question(objective, pending, consequential=True)
-                if question is not None:
-                    return self._ask(question, objective, outcome, trace)
-
-            trace.decision(decision)
-            # The result lands in ``state`` through the registry observer
-            # (intelligence.state.attach), so it is recorded exactly once no
-            # matter which path made the call.
-            result = await self._execute(tool, arguments, ctx, task, emit)
-            outcome.tool_calls += 1
-            finding_index = len(findings)
-            findings.append(f"{tool}({_short(arguments)}) → "
-                            f"{'ok' if result.ok else 'failed'}: {result.summary[:200]}")
-            if result.observation or result.ok:
-                view = result.for_model(4000)
-            trace.result(step, tool, result)
-            if result.display:
-                outcome.display = result.display
-
-            verification = await self.verifier.verify(tool, arguments, result, objective, state)
-            trace.verify(verification)
-            if verification.verified:
-                Planner.advance(plan, tool)
-                if plan is not None and not plan.pending:
-                    break
-                continue
-
-            # Something went wrong — decide once, within budget. The tool's
-            # own "ok" was optimistic; correct the finding in place so
-            # whatever composes the final answer never sees a success claim
-            # that verification has already disproved (a real gap this
-            # closes: "opened" is not "verified open", and JARVIS must not
-            # say the first when only the second was checked).
-            problem = verification.problem or result.summary
-            findings[finding_index] = (f"{tool}({_short(arguments)}) → "
-                                       f"not verified: {problem[:200]}")
-            attempts[tool] = attempts.get(tool, 0) + 1
-            recovery = await self.recovery.decide(objective, tool, arguments, result,
-                                                  verification, cards, attempts[tool])
-            outcome.model_calls += 1
-            outcome.recovered += 1
-            trace.recover(recovery)
-            notes.append(f"that didn't work: {problem}")
-
-            if recovery.strategy == "ask_user":
-                return self._ask(recovery.question or "How would you like me to proceed, sir?",
-                                 objective, outcome, trace)
-            if recovery.strategy == "report":
-                break
-            if recovery.strategy == "alternative_tool" and recovery.tool:
-                extra = self.catalog.card(recovery.tool)
-                if extra and extra not in cards:
-                    cards.insert(0, extra)
-            # retry / modify_arguments simply continue the loop, which will
-            # decide again with the failure now visible in the observations.
-
-        return await self._compose(text, objective, findings, outcome, trace, stream,
-                                   stalled=stalled)
-
-    # ------------------------------------------------------------------
-    async def _decide(self, objective: Objective, plan: Plan | None,
-                      cards: list[ToolCard], observations: list[str],
-                      state: ConversationState, view: str = "") -> AgentDecision | None:
-        prompt = DECISION_PROMPT.format(
-            goal=objective.goal,
-            kind=objective.kind,
-            targets=", ".join(objective.targets) or "none",
-            constraints=", ".join(objective.constraints) or "none",
-            context=state.describe_for_model(include_turns=2) or "(no prior context)",
-            plan=(f"\nPlan: {plan.summary()}\n" if plan else ""),
-            observations="\n".join(f"- {o}" for o in observations) or "- nothing yet",
-            view=f"\nWhat the last result showed:\n{view}\n" if view else "",
-            tools=self.catalog.render(cards),
-        )
-        try:
-            data = await self.models.complete_json(
-                self._slot,
-                [ChatMessage("system", "You choose the next action. JSON only."),
-                 ChatMessage("user", prompt)],
-                max_tokens=400,
-                timeout_s=40.0,
-            )
-        except Exception as exc:
-            log.debug("decision model unavailable: %s", exc)
+                return self._ambiguity_question(objective, pending, consequential=True)
             return None
-        decision = load(AgentDecision, data)
-        if decision is None:
-            return None
-        problem = decision.validate_shape()
-        if problem:
-            log.debug("malformed decision: %s", problem)
-            return None
-        return decision
 
-    async def _execute(self, tool: str, arguments: dict, ctx, task, emit) -> ToolResult:
-        """Run a tool through the normal registry — permissions included."""
-        if emit:
-            emit(f"{_humanise(tool)}…")
-        context = ctx if ctx is not None else self.deps.tool_context(task=task)
-        with self.deps.telemetry.span("intelligence.tool", tool=tool):
-            return await self.deps.registry.call(tool, arguments, context)
+        operator = Operator(self.deps, slot=Slot.OPERATOR, trace=trace)
+        context = ctx if ctx is not None else self.deps.tool_context()
+        budget = Budget(steps=self.max_steps, wall_s=max(60.0, 20.0 * self.max_steps),
+                        model_calls=self.max_steps + 4)
+        with self.deps.telemetry.span("intelligence.operate"):
+            return await operator.run(
+                objective.goal or text, context, tools=[card.name for card in cards],
+                objective=objective, budget=budget, background=False, said=text,
+                situation=self.state.describe_for_model(include_turns=2),
+                context=self._context, state=self.state, before=before, vet=vet)
 
     # -- endings -----------------------------------------------------------
-    async def _compose(self, text: str, objective: Objective, findings: list[str],
-                       outcome: AgentOutcome, trace: Trace, stream=None, *,
-                       stalled: bool = False) -> AgentOutcome:
-        """Say what happened — or fall back to simply answering.
+    async def _compose(self, text: str, objective: Objective, result: OperatorResult,
+                       outcome: AgentOutcome, trace: Trace, stream=None) -> AgentOutcome:
+        """Say what happened, from what actually happened.
 
-        The user never sees the loop's own bookkeeping. And a request the agent
-        couldn't turn into a decision is not a failure to report: it is usually
-        a question, so it goes to the conversation path rather than producing an
-        apology. Genuine unavailability is reported there, where it is true.
+        The user never sees the loop's own bookkeeping, and never a success
+        claim that verification disproved: findings record "not verified"
+        for those, and the prompt says to be plain about what wasn't done.
         """
-        if not findings and stalled:
-            return await self._converse(text, objective, outcome, trace, stream)
-        if not findings:
+        if not result.findings:
             return await self._finish(outcome, trace,
                                       "I wasn't able to make progress on that, sir.")
-        prompt = FINAL_PROMPT.format(goal=objective.goal,
-                                     observations="\n".join(f"- {o}" for o in findings))
+        ending = {
+            Status.GAVE_UP: f"It couldn't be done: {result.reason}",
+            Status.BUDGET: f"Work stopped before the end: {result.reason}",
+            Status.STALLED: "Work stopped before the end.",
+        }.get(result.status, "")
+        latest = result.latest[:_LATEST_CHARS]
+        prompt = FINAL_PROMPT.format(
+            goal=objective.goal,
+            observations="\n".join(f"- {o}" for o in result.findings[-12:]),
+            latest=f"\nThe last result in full:\n{latest}\n" if latest else "",
+            ending=f"\nHow it ended: {ending}\n" if ending else "",
+        )
         answer = await self._generate(
             [ChatMessage("system", self._persona()), ChatMessage("user", prompt)],
             outcome, stream, max_tokens=400, temperature=0.3)
@@ -410,7 +273,7 @@ class IntelligenceAgent:
             # No model to phrase it with. The tools already wrote summaries fit
             # to be spoken, so use the last one that worked.
             answer = next((f.split(": ", 1)[-1].strip()
-                           for f in reversed(findings) if "\u2192 ok:" in f), "")
+                           for f in reversed(result.findings) if "\u2192 ok:" in f), "")
         return await self._finish(outcome, trace,
                                   answer or "I wasn't able to make progress on that, sir.")
 
@@ -551,21 +414,9 @@ def _quick_route(triage, text: str):
     return decision
 
 
-def _normalise_kind(kind: str) -> str:
-    """``Objective.kind`` is free-form (no validator, unlike ``complexity``/
-    ``confidence`` — see its docstring), so the model returning
-    "Automation", trailing whitespace, or similar despite the prompt's
-    exact-string instruction must not silently defeat the handoff check."""
-    return (kind or "").strip().lower()
-
-
 def _changes_state(cards: list[ToolCard]) -> bool:
     """Would the best-matching tool for this objective change something?"""
     return bool(cards) and (cards[0].mutates or cards[0].confirms)
-
-
-def _short(arguments: dict) -> str:
-    return ", ".join(f"{k}={str(v)[:40]}" for k, v in list((arguments or {}).items())[:3])
 
 
 def _humanise(tool: str) -> str:

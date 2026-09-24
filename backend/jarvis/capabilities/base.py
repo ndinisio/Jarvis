@@ -58,6 +58,9 @@ class Response:
     remember: list[str] = field(default_factory=list)
     error: str | None = None
     data: Any = None
+    #: A question for the user that the work is waiting on. The next thing
+    #: they say is taken as the answer, and the work resumes with it.
+    clarification: str | None = None
 
     @property
     def speech(self) -> str:

@@ -119,8 +119,10 @@ function summariseStage(entry: Record<string, any>): string {
   switch (entry.stage) {
     case 'intent':
       return `${entry.kind}: ${entry.goal} [${entry.confidence}]`
-    case 'plan':
-      return entry.summary ?? ''
+    case 'checklist': {
+      const items = entry.items ?? []
+      return `${items.filter((i: { done: boolean }) => i.done).length}/${items.length} proven`
+    }
     case 'decision':
       return `${entry.action} ${entry.tool ?? ''}`.trim()
     case 'step':

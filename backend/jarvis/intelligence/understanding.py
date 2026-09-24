@@ -151,6 +151,11 @@ class Understanding:
         answer = text.strip()
         if answer and pending.slot:
             objective.targets = [answer] + [t for t in objective.targets if t != answer]
+        elif answer:
+            # A free-form question ("which size?") has no argument to fill:
+            # the answer travels with the objective as a constraint.
+            note = f"{pending.question.strip().rstrip('?')}? {answer}"
+            objective.constraints = [note] + [c for c in objective.constraints if c != note]
         objective.confidence = Confidence.CONFIDENT
         objective.missing = []
 

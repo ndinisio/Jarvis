@@ -1,47 +1,38 @@
-"""Multi-step app/web automation.
+"""Errands: multi-step work on apps and websites, as a background task.
 
-    confirm the plan → for each milestone: decide → act → verify → repeat or
-    move on → summarise
+    (confirm, if the user wants that) → operator loop → report
 
-Built for the same shape of problem :mod:`research` solves — a real,
-multi-step job that must run in the background with genuine progress and
-genuine cancellation — but for *operating* an app or a website rather than
-reading one. The generic per-turn agent loop (``intelligence/agent.py``) is
-deliberately not stretched to cover this: its ``max_steps`` default (six) is
-sized for a short info-gathering turn, its plan is a flat one-shot checklist
-with no repeat/until construct, and — the concrete reason this needs its own
-``Task`` — a turn routed through it never receives a ``cancel_event`` at all
-(see ``core/orchestrator.py: _handle_intelligently``'s ``task=None``). This
-capability is reached instead through the same backgrounding machinery a
-quick-matched capability gets (``core/orchestrator.py: _handoff_to_automation``
-→ ``_handle_capability`` → ``_run_in_background``), which is what gives it a
-real ``Task``: a ``cancel_event`` "stop" actually reaches, live progress, and
-a step trail the user can review.
+The work itself is the operator's (:mod:`jarvis.intelligence.operator`) —
+the same loop a short foreground action runs on. What this capability adds
+is everything that makes it an errand rather than a turn:
 
-Like :class:`~.research.ResearchCapability`, the model is never used as the
-hands: milestones and individual steps are decided by narrow, structured
-calls, but every tool call itself runs through the ordinary registry —
-``self.call_tool()`` — so permission gating, verification and state-recording
-are exactly what they are anywhere else in JARVIS. What *is* new here is a
-task-scoped permission grant (``security/permissions.py: grant_task``): once
-the user approves starting the task, routine steps proceed without a fresh
-prompt each time, but nothing the consequence classifier marks consequential
-— spending money, submitting a payment, deleting, sending, running an
-installer — is ever covered by that grant. See ``security/consequence.py``.
+* **A real ``Task``.** It is reached through the orchestrator's
+  backgrounding machinery (``_handoff_to_automation`` →
+  ``_handle_capability`` → ``_run_in_background``), so the user can keep
+  talking, "stop" reaches it through the task's ``cancel_event``, and every
+  action lands in the task's step trail with the checklist's live state.
+* **An errand-sized budget** (``automation.max_steps``/``max_wall_s``/
+  ``max_model_calls``) and **a checklist it must prove** before it may say
+  it is done — the interpreter's success criteria, or the goal itself.
+* **A task-scoped permission grant** (``security/permissions.py:
+  grant_task``): routine steps run without a prompt each, but nothing the
+  consequence classifier marks consequential — spending money, sending,
+  deleting, installing — is ever covered by it; each of those asks.
+* **Narration** of slow steps and proven items, when voice is on, and an
+  honest report at the end: what was done, and what wasn't.
 """
 
 from __future__ import annotations
 
-import time
-from collections import deque
-from typing import Any
+import re
 
 from ..core.errors import ConfirmationDeclined
 from ..core.logging import get_logger
 from ..core.narration import ActionNarrator
-from ..intelligence.schema import Objective
-from ..intelligence.state import ConversationState
-from ..intelligence.verify import Verifier
+from ..intelligence.catalog import ToolCatalog
+from ..intelligence.observability import Trace
+from ..intelligence.operator import Budget, Checklist, Operator, OperatorResult, Status, StepReport
+from ..intelligence.schema import Complexity, Objective
 from ..models.base import ChatMessage
 from ..models.registry import Slot
 from ..security.permissions import RiskLevel
@@ -49,68 +40,19 @@ from .base import Capability, Request, Response
 
 log = get_logger("jarvis.capabilities.automation")
 
-DECOMPOSE_PROMPT = """Break this into a short sequence of concrete milestones \
-— real, checkable stages towards the end result (e.g. "search for the \
-item", "compare the listings", "add the best one to the basket"). Two to \
-five milestones; each should be reachable with a handful of tool calls. A \
-simple request that's really only one stage still gets one milestone.
-
-Request: {goal}
-
-Reply with JSON only: {{"milestones": ["...", "..."]}}"""
-
-STEP_PROMPT = """Decide the single next action for one part of a larger task.
-
-Overall goal: {goal}
-Current milestone: {milestone}
-
-What has happened so far:
-{observations}
-
-What you can see now:
-{view}
-
-Tools you may use:
-{tools}
-
-Reply with JSON only, one of:
-{{"action": "tool_call", "tool": "<name>", "arguments": {{...}}, "reason": "<short>"}}
-{{"action": "complete", "reason": "<why this milestone is done>"}}
-{{"action": "give_up", "reason": "<why nothing more can be done here>"}}
-
-Rules:
-- On a web page, act on an element by the [handle] shown next to it under "What you can see now". Never make up a handle.
-- "What you can see now" is the page as it is after the last action; use it rather than reading the page again.
-- Use a tool only if it moves this milestone forward; the results above may already cover it.
-- "complete" once the milestone's own goal is actually satisfied, not merely attempted.
-- "give_up" rather than repeating a call that already failed the same way.
-- Not on screen yet? scroll_page to see more, or wait_for_page while something loads. A pop-up in the way: press_page_key escape or click its close button.
-- Never type a password or card details. A sign-in, CAPTCHA or two-factor check is the user's: ask_user_to_take_over."""
-
-SUMMARISE_PROMPT = """Tell the user what happened, in one or two sentences unless they asked \
-for detail. Be specific about what was actually done, and say plainly anything you couldn't \
-complete or stopped short of.
+REPORT_PROMPT = """Tell the user how the errand went, in one or two sentences unless they asked \
+for detail. Say what was actually done, and say plainly anything that wasn't.
 
 They asked: {goal}
-
-What happened:
-{observations}
-
+{checklist}
+What happened (most recent last):
+{findings}
+{ending}
 Answer directly. Do not describe your process or mention tool names."""
 
-#: Web actions after which the loop looks at the page again by itself, so the
-#: next decision sees the page as it now is (and its element handles) without
-#: spending a step asking for it.
-_OBSERVE_AFTER = {"browse_to", "open_url", "click_page_element", "fill_page_field", "submit_page_form",
-                  "press_page_key", "scroll_page", "page_go_back", "wait_for_page", "ask_user_to_take_over"}
-
-#: How much of the current view a step prompt carries.
-_VIEW_CHARS = 5000
-
-#: Curated per-capability tool set — deliberately not ToolCatalog.shortlist():
-#: that scoring runs once per turn and never re-scores as task state
-#: evolves, which is a real problem for the generic agent loop but doesn't
-#: apply here, since this list is fixed and re-offered at every single step.
+#: The errand toolkit, always offered: operating web pages and apps, reading
+#: the web and the screen, files. Anything else an errand needs (mail, notes,
+#: the calendar…) joins it from the same shortlist a foreground turn uses.
 WEB_TOOLS: tuple[str, ...] = (
     "browse_to", "get_current_page", "list_browser_tabs", "read_page_manifest",
     "click_page_element", "fill_page_field", "submit_page_form", "press_page_key",
@@ -131,195 +73,134 @@ ALL_AUTOMATION_TOOLS: tuple[str, ...] = (
     WEB_TOOLS + NATIVE_TOOLS + READ_TOOLS + SHELL_TOOLS + DOWNLOAD_TOOLS + INSTALL_TOOLS
 )
 
+#: What an errand says it involves → the tools that involves, beyond the
+#: toolkit. Word starts, so "remind" covers "reminder" and "remind me".
+_ERRAND_EXTRAS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("email", "e-mail", "mail", "inbox", "reply"),
+     ("search_email", "read_email", "draft_email", "send_email", "search_contacts")),
+    (("message", "text", "imessage", "sms"),
+     ("search_messages", "read_messages", "send_message", "search_contacts")),
+    (("calendar", "meeting", "event", "appointment", "diary"),
+     ("read_calendar", "search_calendar", "create_calendar_event")),
+    (("remind", "to-do", "todo"),
+     ("list_reminders", "search_reminders", "create_reminder", "complete_reminder")),
+    (("note",), ("create_note",)),
+    (("file", "folder", "document", "desktop", "spreadsheet", "pdf", "save"),
+     ("list_files", "search_files", "read_file", "write_file", "move_file")),
+    (("delete", "remove", "trash", "get rid of"), ("delete_file",)),
+    (("clipboard", "copy", "paste"), ("read_clipboard", "write_clipboard")),
+    (("contact", "phone number", "address"), ("search_contacts",)),
+    (("music", "song", "playlist", "album", "volume"), ("media_control", "set_volume")),
+    (("dark mode", "light mode", "appearance"), ("set_appearance",)),
+    (("notif",), ("send_notification",)),
+)
+#: Extra tools taken from the objective's shortlist, for anything else.
+_SHORTLIST_EXTRAS = 4
+
 
 class AutomationCapability(Capability):
     name = "automation"
-    description = "Operate an app or website through several real steps to reach an end result."
+    description = "Operate apps and websites through as many real steps as an errand takes."
     long_running = True
 
     def __init__(self, deps):
         super().__init__(deps)
         self._narrator = ActionNarrator(deps)
-        self._verifier = Verifier(deps)
 
     async def handle(self, request: Request) -> Response:
         conf = self.deps.config.automation
-        task = request.task
         objective = request.args.get("objective")
-        goal = ((objective.goal if isinstance(objective, Objective) else "") or request.text).strip()
+        if not isinstance(objective, Objective):
+            objective = Objective(goal=request.text, complexity=Complexity.MULTI_STEP)
+        goal = (objective.goal or request.text).strip()
 
         request.ctx.raise_if_cancelled()
-        milestones = await self._decompose(goal)
         if self.deps.config.security.autonomy == "confirm_start":
             try:
-                await self._confirm_start(goal, milestones)
+                await self._confirm_start(goal, objective)
             except ConfirmationDeclined as exc:
                 # Unlike a tool call's decline (converted to a ToolResult by
-                # registry.py before it ever reaches a capability), this
-                # permissions.require() is called directly, and handle() runs
-                # inside a background Task — an uncaught raise here would be
-                # swallowed by TaskManager._run as a bare failure, leaving the
-                # user with silence after the "I'm on it" acknowledgement.
+                # the registry), this require() is called directly, inside a
+                # background Task — an uncaught raise would be swallowed as a
+                # bare failure, leaving silence after "I'm on it".
                 return Response(text=exc.user_message, spoken=exc.user_message)
 
         task_id = request.ctx.task_id
         if task_id:
             self.deps.permissions.grant_task(task_id)
-
-        findings: deque[str] = deque(maxlen=conf.findings_window)
-        view = _View()
-        total_steps = 0
+        intelligence = self.deps.config.intelligence
+        trace = Trace(self.deps.bus if intelligence.trace else None, self.deps.telemetry,
+                      verbose=self.deps.config.ui.developer_mode, task_id=task_id)
+        progress = _Progress(self, request)
         try:
-            for milestone in milestones:
-                request.ctx.raise_if_cancelled()
-                self._announce_milestone(request, task, milestone)
-                for _ in range(conf.max_steps_per_milestone):
-                    total_steps += 1
-                    if total_steps > conf.max_total_steps:
-                        findings.append(
-                            f"stopped partway through — reached the overall step "
-                            f"limit ({conf.max_total_steps} steps)"
-                        )
-                        break
-                    request.ctx.raise_if_cancelled()
-                    finding, keep_going = await self._take_step(goal, milestone, findings, view,
-                                                                 request, task)
-                    if finding:
-                        findings.append(finding)
-                    if not keep_going:
-                        break
-                if total_steps > conf.max_total_steps:
-                    break
+            result = await Operator(self.deps, slot=Slot.OPERATOR, trace=trace).run(
+                goal, request.ctx, tools=self.tools_for(objective), objective=objective,
+                budget=Budget(steps=conf.max_steps, wall_s=conf.max_wall_s,
+                              model_calls=conf.max_model_calls),
+                background=True, said=request.text,
+                situation=str(request.args.get("situation") or ""), context=request.context,
+                after=progress.step,
+            )
         finally:
             if task_id:
                 self.deps.permissions.revoke_task(task_id)
                 if self.deps.browsers is not None:
                     self.deps.browsers.release(task_id)
 
-        report = await self._summarise(goal, list(findings))
-        return Response(
-            text=report,
-            display={"kind": "automation", "title": goal[:90], "findings": list(findings)},
-            data={"findings": list(findings)},
-        )
+        if result.status == Status.ASKED:
+            return Response(text=result.question, clarification=result.question,
+                            display=_display(goal, result), data=_data(goal, result))
+        report = await self._report(goal, result)
+        return Response(text=report, display=_display(goal, result), data=_data(goal, result))
 
-    # -- one step of one milestone -------------------------------------------
-    async def _take_step(self, goal: str, milestone: str, findings: deque, view: _View,
-                         request: Request, task) -> tuple[str | None, bool]:
-        """Returns ``(finding_to_record, keep_going)`` — ``keep_going`` is
-        true only after an ordinary tool call that didn't get declined,
-        which is what makes this a genuine repeat-until-done loop rather
-        than one decision per milestone."""
-        decision = await self._decide_step(goal, milestone, findings, view)
-        if decision is None:
-            return f"couldn't decide how to continue: {milestone}", False
+    def tools_for(self, objective: Objective) -> list[str]:
+        """The errand toolkit plus whatever this objective specifically needs.
 
-        action = decision.get("action")
-        if action == "complete":
-            return f"done: {milestone}", False
-        if action == "give_up":
-            reason = str(decision.get("reason") or "").strip()
-            return (f"couldn't complete: {milestone}" + (f" — {reason}" if reason else ""),
-                    False)
-        if action != "tool_call" or not decision.get("tool"):
-            return f"the decision for “{milestone}” didn't make sense — stopping there", False
-
-        tool = str(decision["tool"])
-        if tool not in ALL_AUTOMATION_TOOLS:
-            return f"suggested a tool that isn't available here ({tool}) — stopping there", False
-        arguments = decision.get("arguments")
-        if not isinstance(arguments, dict):
-            arguments = {}
-
-        registered = self.registry.get(tool)
-        expected_ms = registered.spec.expected_ms if registered else 0
-        started = time.monotonic()
-        result = await self.call_tool(tool, arguments, request.ctx)
-        elapsed_ms = (time.monotonic() - started) * 1000.0
-
-        message = (result.summary or ("done" if result.ok else "failed"))[:180]
-        self._announce_step(request, task, milestone, message, expected_ms, elapsed_ms)
-
-        if not result.ok and (result.error or "").startswith("confirmation_declined"):
-            # The same deterministic short-circuit intelligence/recovery.py
-            # uses: a decline is an answer, not a failure to route around —
-            # asking the model to try again would just repeat the prompt
-            # the user already said no to.
-            return f"you declined: {result.summary}", False
-
-        verification = await self._verifier.verify(
-            tool, arguments, result, Objective(goal=milestone, kind="automation"),
-            ConversationState(),
-        )
-        finding = (f"{tool}({_short(arguments)}) → "
-                  f"{'ok' if result.ok else 'failed'}: {message}")
-        if not verification.verified:
-            finding += f" (not verified: {verification.problem[:120]})"
-        await self._update_view(view, tool, result, request)
-        return finding, True
-
-    async def _update_view(self, view: _View, tool: str, result, request: Request) -> None:
-        """Keep "what you can see now" current.
-
-        After a web action the page is looked at again straight away, so the
-        next decision sees the page as it now is — with the handles it needs
-        to act on it. Anything else that returned something worth seeing
-        (a page listing, search results, a screen description) becomes the
-        view as it is.
+        Every tool offered is paid for in every request (its schema is part of
+        the prompt), so the rest of the registry isn't offered wholesale: an
+        errand that mentions email gets the mail tools, one that mentions a
+        reminder gets those, and the objective's own best matches join them.
         """
-        if tool in _OBSERVE_AFTER and result.ok and self.registry.get("read_page_manifest") is not None:
-            looked = await self.call_tool("read_page_manifest", {}, request.ctx)
-            if looked.ok and looked.observation:
-                view.text = looked.observation
-                return
-        if result.ok or not view.text:
-            view.text = result.for_model(_VIEW_CHARS)
+        wanted = list(ALL_AUTOMATION_TOOLS)
+        about = " ".join([objective.goal, objective.kind, objective.app, objective.site,
+                          *objective.targets, *objective.constraints]).lower()
+        for words, tools in _ERRAND_EXTRAS:
+            if any(re.search(rf"(?<![a-z]){re.escape(word)}", about) for word in words):
+                wanted.extend(tools)
+        wanted.extend(card.name for card in
+                      ToolCatalog(self.registry).shortlist(objective, None, limit=_SHORTLIST_EXTRAS))
+        return [name for name in dict.fromkeys(wanted) if self.registry.get(name) is not None]
 
-    # -- model calls ----------------------------------------------------------
-    async def _decompose(self, goal: str) -> list[str]:
-        try:
-            data = await self.models.complete_json(
-                Slot.REASONING,
-                [ChatMessage("system", "You break a task into milestones. JSON only."),
-                 ChatMessage("user", DECOMPOSE_PROMPT.format(goal=goal))],
-                max_tokens=200, timeout_s=25.0,
-            )
-        except Exception as exc:
-            log.debug("automation decomposition unavailable: %s", exc)
-            return [goal]
-        milestones = data.get("milestones") if isinstance(data, dict) else None
-        if isinstance(milestones, list):
-            cleaned = [str(m).strip() for m in milestones if str(m).strip()][:5]
-            if cleaned:
-                return cleaned
-        return [goal]
-
-    async def _decide_step(self, goal: str, milestone: str, findings: deque,
-                           view: _View) -> dict[str, Any] | None:
-        listing = self.registry.describe_for_model(ALL_AUTOMATION_TOOLS)
-        prompt = STEP_PROMPT.format(
-            goal=goal, milestone=milestone,
-            observations="\n".join(f"- {f}" for f in findings) or "- nothing yet",
-            view=view.text[:_VIEW_CHARS] or "nothing yet — open a page or look at the screen first",
-            tools=listing,
-        )
-        try:
-            data = await self.models.complete_json(
-                Slot.REASONING,
-                [ChatMessage("system", "You choose the next action for one part of a larger "
-                                      "task. JSON only."),
-                 ChatMessage("user", prompt)],
-                max_tokens=300, timeout_s=30.0,
-            )
-        except Exception as exc:
-            log.debug("automation step decision unavailable: %s", exc)
-            return None
-        return data if isinstance(data, dict) else None
-
-    async def _summarise(self, goal: str, findings: list[str]) -> str:
-        if not findings:
+    # -- the report -------------------------------------------------------------
+    async def _report(self, goal: str, result: OperatorResult) -> str:
+        """What happened, honestly: done, not done, and why it stopped."""
+        if result.status == Status.FINISHED and result.answer:
+            return result.answer
+        if result.status == Status.DECLINED:
+            before = f" Before that: {_join(result.done)}." if result.done else ""
+            return (result.reason or "Understood — I've left it alone.") + before
+        if not result.findings:
+            if result.status == Status.UNAVAILABLE:
+                return ("The local AI service isn't available, sir, so I couldn't start on that. "
+                        "Start Ollama and ask me again.")
+            if result.status == Status.GAVE_UP:
+                return f"I couldn't do that, sir — {result.reason.rstrip('.')}."
             return "I wasn't able to make progress on that, sir."
-        prompt = SUMMARISE_PROMPT.format(goal=goal, observations="\n".join(f"- {f}" for f in findings))
+        ending = {
+            Status.GAVE_UP: f"It couldn't be finished: {result.reason}",
+            Status.BUDGET: f"Work stopped before the end: {result.reason}",
+            Status.STALLED: "Work stopped before the end.",
+            Status.UNAVAILABLE: "The model stopped responding before the end.",
+        }.get(result.status, "")
+        checklist = ""
+        if result.checklist:
+            checklist = "\nChecklist:\n" + "\n".join(
+                f"- [{'done' if item['done'] else 'not done'}] {item['text']}"
+                for item in result.checklist) + "\n"
+        prompt = REPORT_PROMPT.format(
+            goal=goal, checklist=checklist,
+            findings="\n".join(f"- {f}" for f in result.findings[-12:]),
+            ending=f"\nHow it ended: {ending}\n" if ending else "")
         try:
             completion = await self.models.complete(
                 Slot.GENERAL,
@@ -330,48 +211,79 @@ class AutomationCapability(Capability):
             if completion.text.strip():
                 return completion.text.strip()
         except Exception as exc:
-            log.debug("automation summary unavailable: %s", exc)
-        return "; ".join(findings[-4:])
+            log.debug("automation report unavailable: %s", exc)
+        return _plain_report(result, ending)
 
-    # -- confirmation & narration ---------------------------------------------
-    async def _confirm_start(self, goal: str, milestones: list[str]) -> None:
-        plan = "; ".join(milestones)
+    # -- confirmation ------------------------------------------------------------
+    async def _confirm_start(self, goal: str, objective: Objective) -> None:
+        items = [item.text for item in Checklist.for_objective(objective, goal, background=True).items]
+        plan = "; ".join(items)
         summary = (
             f"I'll {goal.rstrip('.')}. "
-            + (f"That means: {plan}. " if plan and plan != goal else "")
+            + (f"Done means: {plan}. " if plan and plan != goal else "")
             + "I'll ask again before anything that spends money, deletes something, sends "
               "something, or runs an installer."
         )
         await self.deps.permissions.require(
             action="automation:start", risk=RiskLevel.MEDIUM, summary=summary,
-            details={"goal": goal, "milestones": milestones},
+            details={"goal": goal, "checklist": items},
         )
 
-    def _announce_milestone(self, request: Request, task, milestone: str) -> None:
-        message = f"{milestone}…"
+
+class _Progress:
+    """Each action into the task's step trail — and, when it's slow or it
+    proves a checklist item, into speech."""
+
+    def __init__(self, capability: AutomationCapability, request: Request):
+        self._deps = capability.deps
+        self._narrator = capability._narrator
+        self._request = request
+        self._proven: set[str] = set()
+
+    def step(self, report: StepReport) -> None:
+        task = self._request.task
         if task is not None:
-            self.deps.tasks.step(task, message, phase="milestone")
+            self._deps.tasks.step(task, report.message, tool=report.tool, ok=report.ok,
+                                  checklist=report.checklist)
         else:
-            request.ctx.report(message, phase="milestone")
-        self._narrator.phase(message)
-
-    def _announce_step(self, request: Request, task, milestone: str, message: str,
-                       expected_ms: int, elapsed_ms: float) -> None:
-        if task is not None:
-            self.deps.tasks.step(task, message, phase=milestone)
+            self._request.ctx.report(report.message, tool=report.tool)
+        newly = [item["text"] for item in report.checklist
+                 if item.get("done") and item["text"] not in self._proven]
+        self._proven.update(newly)
+        if newly:
+            self._narrator.phase(f"{newly[-1]} — done.")
         else:
-            request.ctx.report(message, phase=milestone)
-        self._narrator.maybe_narrate(message, expected_ms=expected_ms, elapsed_ms=elapsed_ms)
+            self._narrator.maybe_narrate(report.message, expected_ms=report.expected_ms,
+                                         elapsed_ms=report.elapsed_ms)
 
 
-class _View:
-    """The latest thing the loop has seen — one per task, never shared."""
-
-    __slots__ = ("text",)
-
-    def __init__(self) -> None:
-        self.text = ""
+def _display(goal: str, result: OperatorResult) -> dict:
+    return {"kind": "automation", "title": goal[:90], "status": result.status,
+            "checklist": result.checklist, "findings": result.findings[-16:]}
 
 
-def _short(arguments: dict) -> str:
-    return ", ".join(f"{k}={str(v)[:40]}" for k, v in list((arguments or {}).items())[:3])
+def _data(goal: str, result: OperatorResult) -> dict:
+    return {"goal": goal, "status": result.status, "checklist": result.checklist,
+            "findings": result.findings, "steps": result.steps,
+            "model_calls": result.model_calls}
+
+
+def _plain_report(result: OperatorResult, ending: str) -> str:
+    """The report without a model to phrase it."""
+    parts = []
+    if result.done:
+        parts.append(f"Done: {_join(result.done)}.")
+    if result.not_done:
+        parts.append(f"Not done: {_join(result.not_done)}.")
+    if not parts:
+        parts.append("; ".join(f.split(" → ", 1)[-1] for f in result.findings[-3:]) + ".")
+    if ending:
+        parts.append(ending.rstrip(".") + ".")
+    return " ".join(parts)
+
+
+def _join(items: list[str]) -> str:
+    items = [item.rstrip(".") for item in items]
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + f" and {items[-1]}"

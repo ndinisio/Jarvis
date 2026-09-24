@@ -198,7 +198,9 @@ export const useStore = create<StoreState>((set, get) => ({
       case EV.INTELLIGENCE_TRACE: {
         const { type, seq, ...entry } = event
         set((s) => ({
-          reasoning: reduceReasoning(s.reasoning, entry as TraceEntry),
+          // A background errand's trace belongs to its task card, not to the
+          // picture of the current turn.
+          reasoning: entry.task_id ? s.reasoning : reduceReasoning(s.reasoning, entry as TraceEntry),
           reasoningTrace: [...s.reasoningTrace, { id: nextId(), ...entry } as TraceEntry]
             .slice(-MAX_TRACE_ENTRIES),
         }))
@@ -313,20 +315,15 @@ function reduceReasoning(current: Reasoning | null, entry: TraceEntry): Reasonin
         context: entry.context ?? '',
         complexity: entry.complexity ?? '',
         steps: [],
+        checklist: [],
         question: null,
         done: false,
         toolCalls: 0,
         modelCalls: 0,
         elapsedMs: 0,
       }
-    case 'plan': {
-      if (!current) return current
-      const steps = (entry.steps ?? []).map((label: string) => ({
-        label, state: 'pending' as const,
-      }))
-      if (steps.length > 0) steps[0].state = 'active'
-      return { ...current, steps }
-    }
+    case 'checklist':
+      return current ? { ...current, checklist: entry.items ?? [] } : current
     case 'decision': {
       if (!current || entry.action !== 'tool_call') return current
       const label = humaniseTool(entry.tool, entry.arguments)

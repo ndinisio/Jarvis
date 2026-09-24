@@ -63,13 +63,28 @@ export interface Activity {
   taskId?: string | null
 }
 
+/** One item of what "done" means for an errand, and whether it's proven. */
+export interface ChecklistItem {
+  text: string
+  done: boolean
+  evidence?: string
+}
+
+export interface TaskStep {
+  message: string
+  ts: number
+  tool?: string
+  ok?: boolean
+  checklist?: ChecklistItem[]
+}
+
 export interface Task {
   id: string
   kind: string
   title: string
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   progress: number
-  steps: { message: string; ts: number }[]
+  steps: TaskStep[]
   started: number
   finished?: number | null
   elapsed_s: number
@@ -97,7 +112,7 @@ export interface Confirmation {
 /** One stage of the agent loop, as the backend publishes it. */
 export interface TraceEntry {
   id: string
-  stage: 'intent' | 'plan' | 'decision' | 'step' | 'result' | 'verify' | 'recover'
+  stage: 'triage' | 'intent' | 'checklist' | 'decision' | 'step' | 'result' | 'verify' | 'recover'
     | 'clarify' | 'complete'
   ts: number
   [key: string]: any
@@ -116,6 +131,7 @@ export interface Reasoning {
   context: string
   complexity: string
   steps: { label: string; state: 'pending' | 'active' | 'done' | 'failed' }[]
+  checklist: ChecklistItem[]
   question: string | null
   done: boolean
   toolCalls: number

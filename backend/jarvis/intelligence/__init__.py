@@ -1,13 +1,12 @@
-"""The V1.2 intelligence layer.
+"""The intelligence layer.
 
-V1.1 routed a sentence to a capability label and ran one tool. V1.2 puts a
-proper agent loop above that:
+    understand → resolve references → converse, or operate → respond
 
-    understand → resolve references → decide → act → observe → verify →
-    repair or continue → respond
-
-The deterministic quick path from V1.1 is untouched and still answers simple
-requests in milliseconds; this layer only runs when the quick path declines.
+The deterministic quick path still answers simple requests in milliseconds;
+this layer only runs when the quick path declines. Actions — a one-step
+question or a fifty-step errand — run on the operator (:mod:`.operator`):
+native tool calling, full observations, a checklist that must be proven
+before "done", and stuck detection.
 
 Submodules are imported lazily so that importing the package (for the state or
 schema types alone) doesn't pull in the whole agent.
@@ -18,20 +17,18 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    "AgentDecision",
     "AgentOutcome",
     "ConversationState",
     "IntelligenceAgent",
     "Objective",
-    "Plan",
+    "Operator",
     "ReferenceResolver",
     "attach",
 ]
 
 _EXPORTS = {
-    "AgentDecision": ".schema",
     "Objective": ".schema",
-    "Plan": ".schema",
+    "Operator": ".operator",
     "ConversationState": ".state",
     "attach": ".state",
     "ReferenceResolver": ".entities",

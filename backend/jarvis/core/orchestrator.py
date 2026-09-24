@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..capabilities.base import Capability, Request, Response
-from ..intelligence.state import ConversationState, attach
+from ..intelligence.state import ConversationState, PendingClarification, attach
 from ..router.router import Router
 from ..router.schema import RouteDecision, RouteKind, RoutePath
 from ..tasks.manager import Task
@@ -97,6 +97,9 @@ class Orchestrator:
         self._turn_lock = asyncio.Lock()
         self._agent = None
         self._agent_signature: tuple | None = None
+        #: Cancel tokens of foreground turns still running, so "stop"
+        #: reaches an action in progress, not only background tasks.
+        self._foreground: set[asyncio.Event] = set()
         self.rebind()
 
     def rebind(self) -> None:
@@ -273,10 +276,15 @@ class Orchestrator:
         if self.voice is not None:
             stopped_speech = await self.voice.stop_speaking()
         cancelled_task = self.deps.tasks.cancel_latest()
+        stopped_turns = 0
+        for token in list(self._foreground):
+            if not token.is_set():
+                token.set()
+                stopped_turns += 1
         self.deps.permissions.cancel_all("user cancelled")
         if cancelled_task is not None:
             message = f"Stopped — {cancelled_task.title.lower()}."
-        elif stopped_speech:
+        elif stopped_speech and not stopped_turns:
             message = ""  # Interrupting speech needs no commentary.
         else:
             message = self.personality.cancelled()
@@ -442,6 +450,7 @@ class Orchestrator:
         for fact in response.remember:
             await self.deps.memory.remember(fact, source=decision.name)
         self._note_capability_result(response, decision)
+        self._await_answer(response)
         self._capture_draft(response.display)
         spoken = response.spoken if response.spoken is not None else speakable(response.text)
         return await self._respond(
@@ -487,32 +496,42 @@ class Orchestrator:
         return await self._handle_capability(text, decision)
 
     async def _handoff_to_automation(self, text: str, decision: RouteDecision, outcome) -> TurnResult:
-        """A multi-step app/web objective needs a real Task — cancel_event,
-        progress, a step budget the short agent loop was never sized for —
-        so it goes through the exact backgrounding machinery a quick-matched
-        capability already gets (:meth:`_handle_capability` →
-        :meth:`_run_in_background`), rather than the loop that just produced
-        this outcome. See ``intelligence/agent.py``'s handoff branch and
-        ``capabilities/automation.py`` for what runs next.
+        """A multi-step errand needs a real Task — cancel_event, progress, an
+        errand-sized budget — so it goes through the exact backgrounding
+        machinery a quick-matched capability already gets
+        (:meth:`_handle_capability` → :meth:`_run_in_background`). It runs on
+        the same operator loop a foreground action does; see
+        ``capabilities/automation.py``.
         """
         automation_decision = RouteDecision(
             kind=RouteKind.CAPABILITY, name="automation",
-            args={"query": text, "objective": outcome.objective},
+            args={"query": text, "objective": outcome.objective,
+                  "situation": self.state.describe_for_model(include_turns=2)},
             confidence=decision.confidence, path=decision.path,
-            reason="multi-step automation objective", long_running=True,
+            reason="multi-step errand", long_running=True,
         )
         return await self._handle_capability(text, automation_decision)
 
     async def _run_agent(self, agent, text: str, task: Task | None, *, allow_quick: bool = True):
-        ctx = self._tool_context(task)
+        # A foreground turn gets its own cancel token, so "stop" reaches an
+        # action already under way (see _cancel_everything).
+        token = asyncio.Event() if task is None else None
+        ctx = (self._tool_context(task) if token is None
+               else self.deps.tool_context(cancel_event=token))
         stream, flush = self._stream_sink(task)
 
         def activity(message: str) -> None:
             self.deps.bus.publish(EventType.ACTIVITY, message=message,
                                   task_id=task.id if task else None)
 
-        outcome = await agent.run(text, ctx, task=task, emit=activity, stream=stream,
-                                  context=self.context.build(text), allow_quick=allow_quick)
+        if token is not None:
+            self._foreground.add(token)
+        try:
+            outcome = await agent.run(text, ctx, task=task, emit=activity, stream=stream,
+                                      context=self.context.build(text), allow_quick=allow_quick)
+        finally:
+            if token is not None:
+                self._foreground.discard(token)
         flush()
         return outcome
 
@@ -521,14 +540,14 @@ class Orchestrator:
         conf = self.deps.config.intelligence
         if not conf.enabled:
             return None
-        signature = (conf.max_steps, conf.recovery_budget, conf.reasoning_slot, conf.trace)
+        signature = (conf.max_steps, conf.reasoning_slot, conf.trace)
         if self._agent is None or self._agent_signature != signature:
             from ..intelligence.agent import IntelligenceAgent
 
             self._agent = IntelligenceAgent(
                 self.deps, self.deps.models, self.state,
-                max_steps=conf.max_steps, recovery_budget=conf.recovery_budget,
-                reasoning_slot=conf.reasoning_slot, publish_trace=conf.trace,
+                max_steps=conf.max_steps, reasoning_slot=conf.reasoning_slot,
+                publish_trace=conf.trace,
             )
             self._agent_signature = signature
         return self._agent
@@ -597,6 +616,7 @@ class Orchestrator:
 
         if isinstance(outcome, Response):
             self._note_capability_result(outcome, decision)
+            self._await_answer(outcome)
         self._capture_draft(display)
         await self._respond(text, decision, spoken=spoken, display=display, error=error,
                             task_id=task.id)
@@ -665,6 +685,17 @@ class Orchestrator:
         if not messages:
             return ""
         return "\n".join(f"{m['role']}: {m['text'][:160]}" for m in messages[-4:])
+
+    def _await_answer(self, response: Response) -> None:
+        """Work that stopped on a question for the user resumes when they
+        answer it: the next turn is read as the answer (see
+        ``Understanding._apply_clarification``)."""
+        if not response.clarification:
+            return
+        data = response.data if isinstance(response.data, dict) else {}
+        goal = str(data.get("goal") or "")
+        self.state.ask(PendingClarification(question=response.clarification,
+                                            objective_goal=goal, purpose=goal))
 
     def remember_draft(self, draft: dict[str, Any]) -> None:
         self._last_draft = draft

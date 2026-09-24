@@ -410,6 +410,7 @@ class ModelRouter:
             prompt.insert(0, ChatMessage("system", (
                 "You can use these tools:\n" + listing +
                 '\nTo use one, reply with JSON only: {"tool": "<name>", "arguments": {...}}. '
+                'Several in order: {"calls": [{"tool": ..., "arguments": ...}, ...]}. '
                 "Otherwise reply normally.")))
         elif schema is not None:
             prompt.insert(0, ChatMessage("system", "Reply with JSON only, matching this schema: "
@@ -426,13 +427,8 @@ class ModelRouter:
         text = "".join(parts).strip()
         calls: list[ToolCall] = []
         if tools:
-            data = extract_json(text)
-            names = {tool.name for tool in tools}
-            name = str((data or {}).get("tool") or (data or {}).get("name") or "")
-            if name in names:
-                arguments = (data or {}).get("arguments")
-                calls.append(ToolCall(name=name, arguments=arguments if isinstance(arguments, dict) else {},
-                                      id="call_0"))
+            calls = _emulated_calls(extract_json(text))
+            if calls:
                 text = ""
         return Completion(text=text, model=model, provider=provider.name,
                           latency_ms=(time.perf_counter() - started) * 1000.0, tool_calls=calls)
@@ -500,6 +496,27 @@ def _runtime(provider: ModelProvider, conf, think: bool | None = None) -> dict[s
     if not getattr(provider, "accepts_runtime_options", False):
         return {}
     return {"num_ctx": conf.num_ctx, "keep_alive": conf.keep_alive, "think": think}
+
+
+def _emulated_calls(data: dict | None) -> list[ToolCall]:
+    """Tool calls from an emulated reply: ``{"tool", "arguments"}``, or
+    several under ``calls``. Names are passed through as given — whoever
+    offered the tools checks them, exactly as with a native tool call, and
+    can tell the model what it got wrong."""
+    if not isinstance(data, dict):
+        return []
+    items = data.get("calls") if isinstance(data.get("calls"), list) else [data]
+    calls = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("tool") or item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        arguments = item.get("arguments")
+        calls.append(ToolCall(name=name.strip(), id=f"call_{index}",
+                              arguments=arguments if isinstance(arguments, dict) else {}))
+    return calls
 
 
 def _flatten(messages: list[ChatMessage]) -> list[ChatMessage]:

@@ -59,14 +59,16 @@ this: that failure is the honest answer.
 Everything the fast path declines. One turn is:
 
 ```
-understand (in context)  →  resolve references  →  [plan, if multi-step]
-  →  decide  →  act  →  observe  →  verify  →  repair / continue / ask
+understand (in context)  →  resolve references  →  operate:
+  tool calls  →  act  →  look again  →  verify  →  …  →  finish, proven
   →  answer
 ```
 
-Bounded by `intelligence.max_steps` (default 6) and `recovery_budget` (2). Every
-tool call goes through the same registry, with the same risk gate, as every
-other path. See [`intelligence.md`](intelligence.md).
+A turn is bounded by `intelligence.max_steps` (default 6 actions); a
+multi-step errand runs the same operator as a background task under
+`automation.max_steps` / `max_wall_s` / `max_model_calls`. Every tool call
+goes through the same registry, with the same risk gate, as every other path.
+See [`intelligence.md`](intelligence.md).
 
 Behind it, the V1.1 stages are still present and still used:
 

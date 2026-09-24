@@ -112,14 +112,17 @@ of what anyone actually says.
 - **Tool selection** (`catalog.py`) — the model sees a scored shortlist of
   around a dozen tools described in decision terms (what it needs, what comes
   back, whether it changes anything, whether it will ask first) instead of 51.
-- **Planning** (`planner.py`) — only for genuinely multi-step work, and the plan
-  is advisory: every actual decision is made against what the last tool returned.
+- **The operator** (`operator/`, v3.0) — one loop for every action, a
+  one-step question or a fifty-step errand: native tool calling, the full
+  result of every action in front of the model (a page's element handles, not
+  "60 elements found"), the page read again after every web action, and a
+  **checklist that must be proven** — "done" is accepted only with a quote
+  from something JARVIS actually saw. It notices going round in circles, fits
+  the model's context window, and keeps private work on local models.
 - **Verification** (`verify.py`) — "opened the BBC" is not "the BBC is open".
   Navigation checks the page, file operations check the filesystem, application
   launches check the process list, vision output is rejected when it hedges.
-- **Recovery** (`recovery.py`) — retry, different arguments, different tool, ask,
-  or report, with a budget. A declined confirmation is an answer, not an obstacle
-  to route around.
+  A failed check goes straight back to the operator as part of the result.
 - **Structured output** (`schema.py`) — every decision is validated Pydantic, with
   a repair pass for the near-misses small models make. Nothing is regex-scraped.
 - **Interaction tools** (`tools/interaction/`) — `click_element`, `type_text`,
@@ -276,8 +279,9 @@ that can competently answer it:
     └─ everything else ──── the intelligence agent
           │
           ├─ understand in context ....................... one reasoning call
-          ├─ plan (multi-step work only) ................. one more, or none
-          ├─ decide → act → verify → repair .............. per step
+          ├─ restated as a plain command? ................ back to the fast path
+          ├─ operate: tool calls → act → look → verify ... one call per step
+          │    (a multi-step errand does this as a background task)
           └─ answer ...................................... streamed as it arrives
 ```
 
@@ -286,8 +290,9 @@ Three consequences you can feel:
 * **Deterministic answers stay deterministic.** "How much storage do I have?"
   is `shutil.disk_usage()` plus a sentence template. The model is never asked.
 * **Thinking is proportional too.** A simple request costs one understanding
-  call and one decision; only genuinely multi-step work pays for a plan. The
-  answer streams, so it starts arriving in a few hundred milliseconds.
+  call and one decision per action; there's no separate planning or recovery
+  call — the operator decides each step with everything so far in front of it.
+  The answer streams, so it starts arriving in a few hundred milliseconds.
 * **Slow work never blocks you.** Anything long-running is acknowledged in under
   a second, becomes a background task with visible progress, and reports back
   when it's done — while you keep talking.
@@ -314,13 +319,65 @@ backend/jarvis/intelligence/
 ├── understanding.py    sentence → objective (goal, targets, references, confidence)
 ├── entities.py         "it", "him", "the second one", "the one from Ada"
 ├── catalog.py          tool cards and the shortlist the model actually sees
-├── planner.py          plans, for multi-step work only
-├── agent.py            the loop: decide → act → observe → verify → repair
+├── agent.py            one turn: understand → converse, or operate → respond
+├── operator/           the loop that does things (v3.0)
+│   ├── loop.py         tool calls → run → look again → … → finish, proven
+│   ├── checklist.py    what "done" means, and the proof each item needs
+│   ├── observation.py  what was seen — the only place proof may come from
+│   ├── context.py      fitting the conversation into the model's window
+│   ├── stuck.py        noticing repeats and runs of failures
+│   ├── privacy.py      what never leaves this Mac
+│   └── prompts.py      what the operator is told, and its own four tools
 ├── verify.py           did that actually achieve what was asked?
-├── recovery.py         retry / re-argue / re-route / ask / report
 ├── schema.py           validated structured decisions
 └── observability.py    the trace the UI and the log render
 ```
+
+### The operator
+
+Every action runs on one loop (`intelligence/operator/`). The interpreter's
+objective becomes a brief — the goal, the user's own words, what "done" means,
+the situation right now — and then, until the job is done or can't be:
+
+1. **One model call**, offered the tools for this job as native tool calls
+   (emulated over text for a model that can't). It may send several calls at
+   once — fill a field, then submit — and they run in order; if one fails, the
+   rest of that reply doesn't run.
+2. **Each call goes through the tool registry** — validation, the permission
+   gate, the consequence check on the real element, the confirmation. A
+   declined confirmation ends the task as an answer; the model is never asked
+   again. An identical state change that already worked isn't repeated.
+3. **The result goes back in full**, checked by the verifier, and after a web
+   action the page is read again automatically so the next call sees it as it
+   is now — with the element handles it needs. No step is spent looking.
+4. **Finishing is proven, not claimed.** An errand has a checklist (the
+   interpreter's success criteria, or the goal itself). The model marks an item
+   done with a quote *copied from something it was shown* — "Added to Basket",
+   "Message sent" — and `finish` is refused while any item lacks one, with the
+   reason, so the model goes and does the missing step. A summary written in
+   the same breath as the actions it describes is dropped and composed afresh
+   from what actually came back.
+
+Around the loop:
+
+* **Stuck detection.** The same action on an unchanged page twice earns a hint
+  (scroll, look elsewhere, go back, search). Three failures in a row bring a
+  re-plan with the model's thinking switched on.
+* **Context that fits.** The system prompt and brief never change within a run,
+  so a local model's prompt cache reuses them; the latest two results stay in
+  full, older ones shrink to a line, and the oldest are summarised — calls and
+  results together, so no result is left without its call.
+* **Budgets.** A foreground turn gets `intelligence.max_steps` actions (6); an
+  errand runs as a background task with `automation.max_steps` (50),
+  `max_wall_s` (10 minutes) and `max_model_calls` (80). When one runs out,
+  JARVIS stops and says which parts were done and which weren't.
+* **Privacy.** A task that touches anything in `models.cloud_exclusions`, or
+  reads your mail, messages, contacts, files or clipboard, runs on local
+  models only from that moment on — however the operator slot's provider chain
+  is set up.
+* **Questions and stops.** An errand that needs something only you know asks
+  once; your next words are the answer and it picks up from there. "Stop"
+  reaches a foreground action in progress as well as a background task.
 
 ### Context, and why follow-ups work
 
@@ -355,11 +412,12 @@ as intended. V1.2 checks, proportionally to cost:
 | Plain reads | whether data came back at all |
 | Anything else | marked *skipped* — never assumed good |
 
-When a check fails, recovery decides once, within a budget: retry (only if the
-tool is safe to repeat), modify the arguments, try a different tool, ask you, or
-report honestly. Some decisions need no model at all — a declined confirmation
-is an answer, a missing argument is the model's to fix, and a macOS-only tool on
-another host will never start working.
+When a check fails, the operator is told in the same result ("Checked
+afterwards: this did not work — the page was a not-found page") and decides
+what to do next with that in front of it: a different address, a search, or
+an honest report. Some outcomes need no model at all — a declined confirmation
+is an answer, and a call with a missing argument is refused with the reason,
+for the model to fix.
 
 ### Model roles
 
@@ -401,9 +459,11 @@ VERIFY    verified — result contained data
 COMPLETE  2 step(s), 1 tool call(s), 3 model call(s), 1840.2 ms
 ```
 
-The right-hand **Working on it** panel shows the same thing as a live plan.
-Both are projections of what actually happened: a step only turns green once
-verification said so, and no line is drawn for work that isn't running.
+The right-hand **Activity** panel shows the same thing live, and an errand's
+task card shows its checklist ticking off. Both are projections of what
+actually happened: a step only turns green once verification said so, an item
+is only ticked once it was proven, and no line is drawn for work that isn't
+running.
 
 **Chain-of-thought is never exposed.** The trace carries structured state —
 decisions, arguments, outcomes, statuses — and one-line justifications the model
@@ -531,8 +591,8 @@ feel slow:
 | --- | --- | --- |
 | **general** | `qwen3:8b` | conversation, understanding, synthesis — native tool calling |
 | **fast** | *(empty → general)* | V1.1-mode classification |
-| **reasoning** | *(empty → general)* | understanding, planning, tool choice, verification, repair |
-| **operator** | *(empty → reasoning)* | operating the Mac step by step (v3.0) |
+| **reasoning** | *(empty → general)* | understanding requests |
+| **operator** | *(empty → reasoning)* | operating the Mac step by step, native tool calls (v3.0) |
 | **vision** | `qwen2.5vl:7b` | screen understanding and visual grounding (loaded on demand) |
 | **specialist** | *(empty → reasoning)* | an optional domain model: code, maths, a local fine-tune |
 
@@ -713,10 +773,14 @@ file) override the file — see [`.env.example`](.env.example).
   },
   "intelligence": {
     "enabled": true,          // false restores V1.1: one route, one action
-    "max_steps": 6,           // ceiling on tool calls in a single turn
-    "recovery_budget": 2,     // repair attempts before reporting honestly
+    "max_steps": 6,           // actions in a single foreground turn
     "reasoning_slot": "reasoning",
     "trace": true             // publish the stage trace to the interface
+  },
+  "automation": {
+    "max_steps": 50,          // actions in one background errand
+    "max_wall_s": 600,        // …and minutes of wall clock, in seconds
+    "max_model_calls": 80
   },
   "voice": {
     "wake_word": "jarvis",
@@ -794,9 +858,9 @@ an order, checking out, sending, deleting, installing, or typing into a
 terminal or password manager. What counts as consequential is judged on the
 real element a click will hit — its own text, id, link and form action —
 never on how the model described it, so a "Buy Now" button called "Add to
-basket" still asks. `confirm_start` also confirms a multi-step plan once
-before it runs; `confirm_each_step` asks before every step that changes
-anything.
+basket" still asks. `confirm_start` also confirms an errand once before it
+runs (with what "done" will mean); `confirm_each_step` asks before every step
+that changes anything.
 
 * **Sending email always requires confirmation.** The model can only ever create
   a *draft*; sending is a separate HIGH-risk tool. Saying "send it" opens the
@@ -879,15 +943,15 @@ backend/jarvis/
 ├── router/
 │   ├── quick.py               deterministic command engine (the fast path)
 │   └── router.py              heuristics and fast-model classification
-├── intelligence/              the agent loop — understand, plan, act, verify, repair
+├── intelligence/              understand, then converse or operate
 │   ├── state.py               bounded conversational context
+│   ├── triage.py              the interpreter: chat or action, and what's wanted
 │   ├── understanding.py       sentence → objective
 │   ├── entities.py            reference resolution ("it", "him", "the second one")
 │   ├── catalog.py             tool cards and shortlisting
-│   ├── planner.py             plans, for multi-step work only
-│   ├── agent.py               the execution loop
+│   ├── agent.py               one turn, end to end
+│   ├── operator/              the loop that does things: act, look, prove, finish
 │   ├── verify.py              did it actually work?
-│   ├── recovery.py            what to do when it didn't
 │   ├── schema.py              validated structured decisions
 │   └── observability.py       the stage trace
 ├── models/                    ModelProvider → Ollama | OpenAI-compatible | Anthropic
@@ -962,9 +1026,11 @@ parsing, the voice layer, the HTTP and WebSocket API, and error handling.
 `tests/test_intelligence.py` (new in V1.2) is about *behaviour*, not coverage.
 It covers the twelve things worth measuring — intent understanding, entity
 resolution, follow-up understanding, tool selection, argument extraction,
-multi-step planning, result interpretation, verification, recovery, ambiguity
+multi-step work, result interpretation, verification, recovery, ambiguity
 handling, confirmation handling and context retention — including the six
-worked conversations:
+worked conversations. The operator's own guarantees (proof before "done",
+stuck detection, the context budget, privacy) are in `tests/test_operator.py`,
+and errands end to end in `tests/test_automation.py`:
 
 | | Conversation | What must hold |
 | --- | --- | --- |
@@ -1122,10 +1188,10 @@ won't be reachable this way.
 * Web pages inside cross-origin frames (some payment and embedded widgets)
   are out of reach by design; controls in same-origin frames and open shadow
   roots are reachable.
-* A quick question gets up to six steps; a multi-step errand runs as a
-  background task with up to 15 steps per milestone and 60 in all
-  (`automation.max_steps_per_milestone` / `max_total_steps`). Work that needs
-  more stops and says what it got to, rather than looping.
+* A quick question gets up to six actions; a multi-step errand runs as a
+  background task with up to 50 actions, 80 model calls and ten minutes
+  (`automation.max_steps` / `max_model_calls` / `max_wall_s`). Work that needs
+  more stops and says which parts were done, rather than looping.
 * Reference resolution reads the conversation, not a contacts database: "my
   brother" resolves to a person who has appeared in context, and otherwise
   becomes a question.

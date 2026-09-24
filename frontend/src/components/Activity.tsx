@@ -1,5 +1,5 @@
 import { useStore } from '../state/store'
-import type { Task } from '../lib/events'
+import type { ChecklistItem, Task } from '../lib/events'
 
 /**
  * One surface for "what is JARVIS doing right now" — replaces the previous
@@ -66,6 +66,7 @@ export function Activity({ send }: { send: (m: Record<string, unknown>) => boole
               ))}
             </ol>
           )}
+          {reasoning.checklist.length > 0 && <Checklist items={reasoning.checklist} />}
           {reasoning.question && <p className="reason__question">"{reasoning.question}"</p>}
         </div>
       )}
@@ -107,6 +108,9 @@ export function Activity({ send }: { send: (m: Record<string, unknown>) => boole
 
 function TaskCard({ task, send }: { task: Task; send: (m: Record<string, unknown>) => boolean }) {
   const step = task.steps?.[task.steps.length - 1]
+  // The latest checklist any step reported: what "done" means for this
+  // errand, ticked off only as each item is proven.
+  const checklist = [...(task.steps ?? [])].reverse().find((s) => s.checklist?.length)?.checklist
   return (
     <div className="task">
       <div className="task__head">
@@ -114,6 +118,7 @@ function TaskCard({ task, send }: { task: Task; send: (m: Record<string, unknown
         <span className="task__elapsed">{task.elapsed_s.toFixed(1)}s</span>
       </div>
       <p className="task__title">{task.title}</p>
+      {checklist && <Checklist items={checklist} />}
       {step && <p className="task__step">{step.message}</p>}
       <div className="task__bar">
         <span style={{ width: `${Math.max(4, task.progress * 100)}%` }} />
@@ -124,5 +129,21 @@ function TaskCard({ task, send }: { task: Task; send: (m: Record<string, unknown
         </button>
       )}
     </div>
+  )
+}
+
+
+function Checklist({ items }: { items: ChecklistItem[] }) {
+  return (
+    <ul className="checklist" aria-label="What done means">
+      {items.map((item, index) => (
+        <li key={`${index}-${item.text}`} data-done={item.done}
+            title={item.done && item.evidence ? `Shown by “${item.evidence}”` : undefined}>
+          <span className="checklist__mark" aria-hidden="true">{item.done ? '✓' : '○'}</span>
+          <span className="checklist__text">{item.text}</span>
+          <span className="visually-hidden">{item.done ? ' (done)' : ' (not yet)'}</span>
+        </li>
+      ))}
+    </ul>
   )
 }

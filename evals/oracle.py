@@ -28,13 +28,15 @@ ELEMENT_LINE = re.compile(r'\[(?P<handle>[A-Za-z]*\d+)\]\s+(?P<role>[\w-]+)\s+"(
 _MARKERS = (
     ("triage", "You decide what the user wants. Two modes only."),
     ("understand", "You work out what the user wants."),
-    ("decompose", "Break this into a short sequence of concrete milestones"),
-    ("step", "Decide the single next action for one part of a larger task."),
-    ("decision", "Decide the single next action towards the objective."),
-    ("plan", "Break the objective into the fewest steps"),
-    ("recovery", "An action did not achieve the objective."),
+    ("operate", "You operate this Mac for the user"),
     ("classify", "Classify the user's request into exactly one capability."),
 )
+
+#: The operator's own tools — their results prove nothing about the task.
+_CONTROL_TOOLS = {"finish", "mark_done", "ask_user", "give_up"}
+#: A tool result, as the router renders one for a model without native tool
+#: calling: ``Result of click_page_element:`` then the result's first line.
+_RESULT = re.compile(r"Result of (?P<tool>\w+):\n(?P<line>[^\n]+)")
 
 
 @dataclass
@@ -231,19 +233,8 @@ class OracleProvider(ModelProvider):
                 "needs_tools": True, "complexity": "multi_step", "confidence": "confident",
                 "refines_previous": False, "is_correction": False, "missing": [],
             })
-        if stage == "decompose":
-            goal = _between(prompt, "Request:", "\n") or "the task"
-            return stage, json.dumps({"milestones": [goal.strip()]})
-        if stage in {"step", "decision"}:
-            decision = self.brain.next_action(prompt)
-            if stage == "decision" and decision["action"] == "give_up":
-                decision = {"action": "respond", "content": f"I couldn't finish: {decision['reason']}."}
-            return stage, json.dumps(decision)
-        if stage == "plan":
-            return stage, json.dumps({"steps": [{"intent": "carry out the task", "tool_hint": None}],
-                                      "rationale": "oracle"})
-        if stage == "recovery":
-            return stage, json.dumps({"strategy": "retry", "reason": "try again with what I can see"})
+        if stage == "operate":
+            return stage, json.dumps(_as_tool_call(self.brain.next_action(prompt), prompt))
         if stage == "classify":
             return stage, json.dumps({"capability": "conversation", "confidence": 0.5})
         if json_mode:
@@ -253,15 +244,26 @@ class OracleProvider(ModelProvider):
         return stage, "Done."
 
 
+def _as_tool_call(decision: dict[str, Any], prompt: str) -> dict[str, Any]:
+    """A decision as the operator's (emulated) tool call. Finishing quotes
+    proof, like a competent model would: the latest action's result."""
+    action = decision.get("action")
+    if action == "tool_call":
+        return {"tool": decision["tool"], "arguments": decision.get("arguments") or {}}
+    if action == "complete":
+        proof = last_action_result(prompt)
+        return {"tool": "finish", "arguments": {
+            "summary": "Done — every step of that is complete.",
+            "evidence": [proof] if proof else []}}
+    return {"tool": "give_up", "arguments": {"reason": decision.get("reason") or "it can't be done"}}
+
+
+def last_action_result(prompt: str) -> str:
+    """The first line of the most recent result of a real action."""
+    lines = [m["line"].strip() for m in _RESULT.finditer(prompt) if m["tool"] not in _CONTROL_TOOLS]
+    return lines[-1][:160] if lines else ""
+
+
 def _user_text(prompt: str) -> str:
     match = re.search(r'User (?:said|just said): "(.*)"', prompt)
     return match.group(1).strip() if match else ""
-
-
-def _between(text: str, start: str, end: str) -> str:
-    index = text.find(start)
-    if index < 0:
-        return ""
-    rest = text[index + len(start):]
-    stop = rest.find(end, 1)
-    return rest[:stop] if stop >= 0 else rest

@@ -131,57 +131,6 @@ class Triage(BaseModel):
         return self
 
 
-class PlanStep(BaseModel):
-    intent: str
-    tool_hint: str | None = None
-    done: bool = False
-    note: str = ""
-
-
-class Plan(BaseModel):
-    steps: list[PlanStep] = Field(default_factory=list)
-    rationale: str = ""
-
-    @property
-    def pending(self) -> list[PlanStep]:
-        return [step for step in self.steps if not step.done]
-
-    def summary(self) -> str:
-        return " → ".join(step.intent for step in self.steps)
-
-
-class AgentDecision(BaseModel):
-    """One turn of the execution loop."""
-
-    action: Literal["tool_call", "clarify", "respond", "complete"]
-    tool: str | None = None
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    question: str | None = None
-    content: str | None = None
-    reason: str = ""
-
-    @field_validator("arguments", mode="before")
-    @classmethod
-    def _coerce_arguments(cls, value: Any) -> dict[str, Any]:
-        if isinstance(value, dict):
-            return value
-        if isinstance(value, str):
-            parsed = extract_json(value)
-            if parsed is not None:
-                return parsed
-        return {}
-
-    def validate_shape(self) -> str | None:
-        """Return a problem description when required fields are missing."""
-        if self.action == "tool_call" and not self.tool:
-            return "tool_call without a tool name"
-        if self.action == "clarify" and not (self.question or "").strip():
-            return "clarify without a question"
-        if self.action == "respond" and not (self.content or "").strip():
-            return "respond without content"
-        return None
-
-
 class Verification(BaseModel):
     """Did the action actually achieve what was intended?"""
 
@@ -191,14 +140,6 @@ class Verification(BaseModel):
     evidence: str = ""
     #: True when the check itself couldn't run (no cheap way to verify).
     skipped: bool = False
-
-
-class RecoveryPlan(BaseModel):
-    strategy: Literal["retry", "alternative_tool", "modify_arguments", "ask_user", "report"]
-    tool: str | None = None
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    question: str | None = None
-    reason: str = ""
 
 
 def load(model: type[BaseModel], data: Any) -> Any | None:

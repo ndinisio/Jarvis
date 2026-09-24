@@ -371,42 +371,36 @@ class IntelligenceConfig(BaseModel):
     """
 
     enabled: bool = True
-    #: Hard ceiling on tool calls in a single turn. Six covers every worked
-    #: example; the ceiling exists so a confused model cannot loop forever.
+    #: Hard ceiling on actions in a single foreground turn. A longer job is
+    #: an errand and runs in the background under ``automation``'s budget.
     max_steps: int = 6
-    #: How many times the loop may try to repair one failing step before it
-    #: reports the failure honestly instead of thrashing.
-    recovery_budget: int = 2
-    #: Slot used for understanding, planning, decisions, verification and
-    #: repair. Empty slots defer (reasoning → general), so this works untouched.
+    #: Slot used for understanding requests. Empty slots defer (reasoning →
+    #: general), so this works untouched. Actions use the ``operator`` slot.
     reasoning_slot: str = "reasoning"
     #: Publish the reasoning trace (decisions, not chain of thought) on the bus.
     trace: bool = True
 
 
 class AutomationConfig(BaseModel):
-    """Multi-step app/web operation (the automation capability).
+    """Errands: multi-step app/web work, run as a background task.
 
-    Separate from :class:`IntelligenceConfig` deliberately: the generic
-    agent loop's ``max_steps=6`` is tuned for short info-gathering turns and
-    would truncate a real multi-step errand silently. A dedicated,
-    much larger budget here is what lets "find the best value X and add it
-    to my basket" actually finish instead of being cut off mid-task.
+    Separate from :class:`IntelligenceConfig` deliberately: a foreground
+    turn's six actions would truncate a real errand silently. When any of
+    these runs out, JARVIS stops and reports exactly which parts of the job
+    were done and which weren't.
     """
 
-    #: Steps allowed within one milestone (e.g. one page of search results)
-    #: before giving up on it.
-    max_steps_per_milestone: int = 15
-    #: Hard ceiling across the whole task, however many milestones it takes.
-    max_total_steps: int = 60
-    #: Findings kept for the model's own prompt context; the full trail is
-    #: still preserved in the task's step log for the user regardless.
-    findings_window: int = 16
+    #: Actions one errand may take.
+    max_steps: int = 50
+    #: Wall-clock limit for one errand, in seconds.
+    max_wall_s: float = 600.0
+    #: Model calls one errand may make.
+    max_model_calls: int = 80
     #: Speak a step's narration only if it ran (or is expected to run)
     #: longer than this — fast, routine steps stay silent.
     narration_action_threshold_s: float = 5.0
     #: Minimum gap between two spoken narration lines, so a slow step right
-    #: after a milestone announcement doesn't talk over it.
+    #: after an announcement doesn't talk over it.
     narration_min_gap_s: float = 4.0
     #: Hard cap on a single download's size.
     max_download_mb: int = 2048

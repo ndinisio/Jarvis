@@ -11,6 +11,7 @@ from ..core.errors import Cancelled, ConfirmationDeclined, JarvisError, NetworkU
 from ..core.events import EventType
 from ..core.logging import get_logger
 from ..core.tracing import current_turn_id
+from ..models.base import ToolDef
 from ..security import consequence
 from .base import Tool, ToolContext, ToolResult
 
@@ -89,6 +90,27 @@ class ToolRegistry:
                 line += f" → {spec.returns}"
             lines.append(line)
         return "\n".join(lines)
+
+    def tool_defs(self, names: Iterable[str]) -> list[ToolDef]:
+        """Tools as offered to a model for native tool calling.
+
+        Compact on purpose: the schemas are part of every request, so every
+        character is paid for on every step. Argument descriptions stay —
+        they carry the "use the handle shown in the page listing" kind of
+        guidance — while defaults and examples go.
+        """
+        defs = []
+        for name in names:
+            tool = self._tools.get(name)
+            if tool is None:
+                continue
+            spec = tool.spec
+            description = spec.description.strip()
+            if spec.returns:
+                description = f"{description.rstrip('.')}. Returns {spec.returns}."
+            defs.append(ToolDef(name=spec.name, description=description,
+                                parameters=_compact_schema(spec.parameters)))
+        return defs
 
     # -- execution ---------------------------------------------------------
     async def call(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -191,6 +213,19 @@ class ToolRegistry:
             except Exception:  # pragma: no cover - an observer must never break a tool
                 log.exception("tool observer failed for %s", name)
         return result
+
+
+#: JSON-schema keys a model doesn't need to call a tool correctly.
+_SCHEMA_NOISE = {"default", "examples", "example", "title", "$schema"}
+
+
+def _compact_schema(schema: Any) -> Any:
+    if isinstance(schema, dict):
+        return {key: _compact_schema(value) for key, value in schema.items()
+                if key not in _SCHEMA_NOISE}
+    if isinstance(schema, list):
+        return [_compact_schema(value) for value in schema]
+    return schema
 
 
 _SENSITIVE_KEYS = {"password", "token", "api_key", "secret", "passphrase"}

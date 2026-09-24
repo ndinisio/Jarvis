@@ -235,9 +235,53 @@ function renderBody(panel: Panel) {
     case 'app':
       return <p className="result__app">{panel.name}</p>
 
+    case 'automation':
+      // An errand's honest account: what "done" meant and which of it was
+      // proven (with the words that proved it), then what was actually done.
+      return (
+        <div className="result__errand">
+          {panel.status && panel.status !== 'finished' && (
+            <p className="result__status">{ERRAND_ENDINGS[panel.status] ?? panel.status}</p>
+          )}
+          {(panel.checklist ?? []).length > 0 && (
+            <ul className="checklist">
+              {panel.checklist.map((item: any, index: number) => (
+                <li key={index} data-done={Boolean(item.done)}>
+                  <span className="checklist__mark" aria-hidden="true">{item.done ? '✓' : '○'}</span>
+                  <span className="checklist__text">
+                    {item.text}
+                    {item.done && item.evidence && (
+                      <span className="checklist__evidence"> — “{item.evidence}”</span>
+                    )}
+                  </span>
+                  <span className="visually-hidden">{item.done ? ' (done)' : ' (not done)'}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(panel.findings ?? []).length > 0 && (
+            <ol className="result__steps">
+              {panel.findings.map((finding: string, index: number) => (
+                <li key={index}>{finding}</li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )
+
     default:
       return <pre className="result__pre">{JSON.stringify(panel, null, 2).slice(0, 2000)}</pre>
   }
+}
+
+/** How an errand that didn't finish ended, in words. */
+const ERRAND_ENDINGS: Record<string, string> = {
+  gave_up: 'Stopped: it couldn\u2019t be done.',
+  budget: 'Stopped at its limit before the end.',
+  stalled: 'Stopped before the end.',
+  declined: 'Stopped: you declined a step.',
+  asked: 'Waiting for your answer.',
+  unavailable: 'The model wasn\u2019t available.',
 }
 
 function formatEventTime(event: any): string {

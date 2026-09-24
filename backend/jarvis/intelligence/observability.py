@@ -25,9 +25,13 @@ TRACE_EVENT = EventType.INTELLIGENCE_TRACE
 class Trace:
     """Collects one turn's decisions and publishes them as they happen."""
 
-    def __init__(self, bus: EventBus | None = None, telemetry=None, verbose: bool = False):
+    def __init__(self, bus: EventBus | None = None, telemetry=None, verbose: bool = False,
+                 task_id: str | None = None):
         self._bus = bus
         self._telemetry = telemetry
+        #: Set for a background task's trace, so a display of the current
+        #: turn's reasoning can tell the two apart.
+        self._task_id = task_id
         #: Developer mode logs each stage at INFO, in the aligned form the V1.2
         #: brief asks for, so a terminal shows the process without a log-level
         #: change. Otherwise it stays at DEBUG.
@@ -54,14 +58,15 @@ class Trace:
             "context": _context_line(state),
         })
 
-    def plan(self, plan) -> None:
-        self._add("plan", {"steps": [s.intent for s in plan.steps],
-                           "summary": plan.summary()})
+    def checklist(self, items: list[dict[str, Any]]) -> None:
+        """What "done" means for this task, and how much of it is proven."""
+        self._add("checklist", {"items": [{"text": item.get("text", "")[:160],
+                                           "done": bool(item.get("done"))} for item in items]})
 
-    def decision(self, decision) -> None:
-        self._add("decision", {"action": decision.action, "tool": decision.tool,
-                               "arguments": _redact(decision.arguments),
-                               "reason": decision.reason[:160]})
+    def decision(self, action: str, *, tool: str | None = None,
+                 arguments: dict[str, Any] | None = None, reason: str = "") -> None:
+        self._add("decision", {"action": action, "tool": tool,
+                               "arguments": _redact(arguments), "reason": reason[:160]})
 
     def step(self, index: int, tool: str, arguments: dict, note: str = "") -> None:
         self._add("step", {"index": index, "tool": tool,
@@ -79,9 +84,10 @@ class Trace:
                              "problem": verification.problem[:160],
                              "evidence": verification.evidence[:160]})
 
-    def recover(self, plan) -> None:
-        self._add("recover", {"strategy": plan.strategy, "tool": plan.tool,
-                              "reason": plan.reason[:160]})
+    def recover(self, strategy: str, reason: str, *, tool: str | None = None) -> None:
+        """A change of course: a re-plan, a hint about going in circles, or
+        stopping to report (a declined confirmation)."""
+        self._add("recover", {"strategy": strategy, "tool": tool, "reason": reason[:160]})
 
     def clarify(self, question: str) -> None:
         self._add("clarify", {"question": question})
@@ -91,7 +97,7 @@ class Trace:
             "steps": outcome.steps,
             "tool_calls": outcome.tool_calls,
             "model_calls": outcome.model_calls,
-            "recovered": outcome.recovered,
+            "replans": getattr(outcome, "replans", 0),
             "elapsed_ms": round((time.perf_counter() - self._started) * 1000, 1),
         })
         if self._telemetry is not None:
@@ -103,6 +109,8 @@ class Trace:
     # -- plumbing ----------------------------------------------------------
     def _add(self, stage: str, payload: dict[str, Any]) -> None:
         entry = {"stage": stage, "ts": time.time(), **payload}
+        if self._task_id:
+            entry["task_id"] = self._task_id
         self.entries.append(entry)
         log.log(self._level, "%-9s %s", stage.upper(), _log_line(stage, payload))
         if self._bus is not None:
@@ -134,8 +142,9 @@ def _log_line(stage: str, payload: dict[str, Any]) -> str:
         return f"{payload['mode']} (confidence {payload['confidence']}) — {payload['reason']}"
     if stage == "intent":
         return f"{payload['kind']}: {payload['goal']} [{payload['confidence']}]"
-    if stage == "plan":
-        return payload.get("summary", "")
+    if stage == "checklist":
+        items = payload.get("items") or []
+        return f"{sum(1 for i in items if i.get('done'))}/{len(items)} proven"
     if stage == "decision":
         return f"{payload['action']} {payload.get('tool') or ''}".strip()
     if stage == "result":

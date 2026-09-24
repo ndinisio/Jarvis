@@ -426,6 +426,26 @@ button { cursor: pointer; }
 .task__elapsed { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); }
 .task__title { margin: 0; font-size: 12.5px; }
 .task__step { margin: 4px 0 8px; font-size: 11px; color: var(--text-dim); }
+
+.checklist { list-style: none; margin: 6px 0 4px; padding: 0; }
+.checklist li {
+  display: flex; gap: 7px; align-items: baseline;
+  font-size: 11px; line-height: 1.45; color: var(--text-dim);
+}
+.checklist li[data-done="true"] { color: var(--text); }
+.checklist__mark { font-family: var(--mono); font-size: 10px; width: 10px; flex: none; }
+.checklist li[data-done="true"] .checklist__mark { color: var(--ok); }
+.checklist__evidence { color: var(--text-faint); }
+.result__status { margin: 0 0 6px; font-size: 11.5px; color: var(--warn); }
+.result__steps {
+  margin: 8px 0 0; padding-left: 18px; font-family: var(--mono); font-size: 10px;
+  line-height: 1.55; color: var(--text-dim);
+}
+.result__steps li { overflow-wrap: anywhere; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
 .task__bar { height: 2px; background: rgba(176, 140, 255, 0.16); border-radius: 2px; overflow: hidden; }
 .task__bar span {
   display: block; height: 100%; background: var(--violet);

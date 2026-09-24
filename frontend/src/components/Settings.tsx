@@ -164,13 +164,18 @@ export function Settings() {
           <Group title="Intelligence">
             <Toggle label="Agentic reasoning" value={draft.intelligence?.enabled ?? true}
                     onChange={(v) => set(['intelligence', 'enabled'], v)} />
-            <Field label="Maximum steps per request">
+            <Field label="Actions per request">
               <input type="number" min={1} max={12} value={draft.intelligence?.max_steps ?? 6}
                      onChange={(e) => set(['intelligence', 'max_steps'], Number(e.target.value))} />
             </Field>
-            <Field label="Repair attempts per step">
-              <input type="number" min={0} max={5} value={draft.intelligence?.recovery_budget ?? 2}
-                     onChange={(e) => set(['intelligence', 'recovery_budget'], Number(e.target.value))} />
+            <Field label="Actions per errand">
+              <input type="number" min={5} max={200} value={draft.automation?.max_steps ?? 50}
+                     onChange={(e) => set(['automation', 'max_steps'], Number(e.target.value))} />
+            </Field>
+            <Field label="Minutes per errand">
+              <input type="number" min={1} max={60}
+                     value={Math.round((draft.automation?.max_wall_s ?? 600) / 60)}
+                     onChange={(e) => set(['automation', 'max_wall_s'], Number(e.target.value) * 60)} />
             </Field>
             <Toggle label="Publish the reasoning trace" value={draft.intelligence?.trace ?? true}
                     onChange={(v) => set(['intelligence', 'trace'], v)} />

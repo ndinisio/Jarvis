@@ -146,3 +146,39 @@ closed a hole and put the checks on rails.
   "JARVIS is already running" instead of crashing; `start.sh` rebuilds the
   interface when it's older than its source, so a pull can't leave an old
   interface talking to a new server.
+
+
+## Phase 5 — the operator
+
+**Web tasks, oracle: 42 / 42 (100%); every phrasing: 72 / 72** — with 26%
+fewer model calls per task (5.5, from 7.4) at the same p50 wall time (5.4 s).
+The saving is the milestone decomposition and the separate summary call,
+both gone: a finish carries its own answer.
+
+What changed:
+
+- **One loop for everything** (`intelligence/operator/`). The per-turn
+  decide/plan/recover loop and the errand milestone loop are replaced by one
+  operator: native tool calling (emulated over text for models without it),
+  several calls per reply run in order, the full result of every call in the
+  conversation, and the page read again after every web action.
+- **"Done" must be proven.** An errand carries a checklist — the
+  interpreter's success criteria, or the goal. `finish` is refused while any
+  item lacks a quote copied from something JARVIS actually saw, and the model
+  is told which item and why. Scattered words from a results page don't count
+  as proof; a phrase from the page after the click does. The oracle now
+  finishes by quoting its last action's result, and every task still passes —
+  the gate costs a competent model nothing.
+- **Stuck detection** (a repeat on an unchanged page earns a hint; three
+  failures in a row, a re-plan with thinking on) and **a context budget**
+  (the latest two results in full, older ones a line each, the oldest
+  summarised; the prefix never changes, for the prompt cache).
+- **Private work stays local**: anything touching `models.cloud_exclusions`,
+  or reading mail, messages, contacts, files or the clipboard, runs on local
+  models from then on.
+- **Errands ask and resume.** A question from a background errand becomes the
+  turn's pending question; the answer resumes the errand. "Stop" now reaches
+  a foreground action in progress too.
+- Budgets: `automation.max_steps` 50, `max_wall_s` 600, `max_model_calls` 80
+  (replacing per-milestone steps).
+

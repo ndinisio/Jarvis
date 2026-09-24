@@ -10,12 +10,12 @@ rather than building a second pipeline. The background screen watcher
 see ``conf_attr`` below.
 
 Two triggers, both throttled by one shared minimum gap so a slow step right
-after a milestone announcement never talks over it:
+after an announcement never talks over it:
 
-* :meth:`phase` — a milestone boundary. Always spoken (subject only to the
-  throttle) — these are the landmark lines ("I'm opening Safari and
-  searching…", "I've added it to your basket.") a long task should always
-  surface.
+* :meth:`phase` — a moment worth announcing (an errand's checklist item
+  proven). Always spoken, subject only to the throttle — the landmark lines
+  ("A pack of AA batteries is in the basket — done.") a long task should
+  always surface.
 * :meth:`maybe_narrate` — one tool call. Spoken only when that call is, or
   was, actually slow — a fast, routine step (a manifest read, a sub-second
   click) stays silent, which is the deliberate anti-spam rule.
@@ -51,7 +51,7 @@ class ActionNarrator:
         return voice
 
     def phase(self, message: str) -> bool:
-        """A milestone boundary — always spoken, subject to the throttle."""
+        """A moment worth announcing — always spoken, subject to the throttle."""
         return self._speak(message)
 
     def maybe_narrate(self, message: str, *, expected_ms: int = 0, elapsed_ms: float = 0.0) -> bool:

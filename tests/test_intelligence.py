@@ -26,7 +26,7 @@ import json
 import pytest
 from jarvis.intelligence.catalog import ToolCatalog
 from jarvis.intelligence.entities import ReferenceResolver
-from jarvis.intelligence.schema import Complexity, Confidence, Objective, Verification
+from jarvis.intelligence.schema import Complexity, Confidence, Objective
 from jarvis.intelligence.state import ConversationState
 from jarvis.intelligence.verify import Verifier
 from jarvis.tools.base import ToolResult
@@ -46,9 +46,7 @@ _PURPOSES = (
     ("Classify the user's request into exactly one capability", "classify"),
     ("You decide what the user wants. Two modes only", "triage"),
     ("You work out what the user wants", "understand"),
-    ("Break the objective into the fewest steps", "plan"),
-    ("Decide the single next action", "decide"),
-    ("An action did not achieve the objective", "recover"),
+    ("You operate this Mac for the user", "decide"),
     ("Give the user the answer", "final"),
 )
 
@@ -94,10 +92,12 @@ class Brain:
         return self.script("triage", {**base, **fields})
 
     def decide(self, **fields) -> Brain:
-        return self.script("decide", fields)
-
-    def recover(self, **fields) -> Brain:
-        return self.script("recover", fields)
+        """One operator reply, written as the decision it stands for:
+        ``action="tool_call"`` (``tool``, ``arguments``), ``"respond"``
+        (``content``: finish with that answer), ``"complete"`` (finish and
+        let the answer be composed from what was found), ``"clarify"``
+        (``question``) or ``"give_up"`` (``reason``)."""
+        return self.script("decide", _operator_reply(fields))
 
     def prompts(self, purpose: str) -> list[str]:
         return [text for name, text in self.asked if name == purpose]
@@ -114,6 +114,23 @@ class Brain:
         return None if purpose in {"final", "chat", "classify"} else _DEFAULTS[purpose]
 
 
+def _operator_reply(fields: dict) -> dict:
+    """A decision as the operator's (emulated) tool call."""
+    action = fields.get("action")
+    if action == "tool_call":
+        return {"tool": fields.get("tool"), "arguments": fields.get("arguments") or {}}
+    if action == "respond":
+        return {"tool": "finish", "arguments": {"summary": fields.get("content") or "",
+                                                "evidence": list(fields.get("evidence") or [])}}
+    if action == "complete":
+        return {"tool": "finish", "arguments": {"summary": ""}}
+    if action == "clarify":
+        return {"tool": "ask_user", "arguments": {"question": fields.get("question") or ""}}
+    if action == "give_up":
+        return {"tool": "give_up", "arguments": {"reason": fields.get("reason") or ""}}
+    raise AssertionError(f"not a decision: {fields}")
+
+
 _DEFAULTS = {
     # Nothing scripted: escalate to Understanding (below), which itself
     # defaults to chat — so an unscripted turn can never wander off and touch
@@ -125,9 +142,8 @@ _DEFAULTS = {
     "understand": json.dumps({"goal": "unscripted", "needs_tools": False,
                               "complexity": Complexity.TRIVIAL,
                               "confidence": Confidence.CONFIDENT}),
-    "plan": json.dumps({"steps": [], "rationale": ""}),
-    "decide": json.dumps({"action": "complete", "reason": "nothing scripted"}),
-    "recover": json.dumps({"strategy": "report", "reason": "nothing scripted"}),
+    # Nothing scripted: finish, composing the answer from whatever was found.
+    "decide": json.dumps({"tool": "finish", "arguments": {"summary": ""}}),
 }
 
 
@@ -385,16 +401,16 @@ async def test_example_e_correction_recovers_rather_than_starting_over(app, brai
     brain.understand(goal="open the BBC", kind="navigate", targets=["BBC"])
     brain.decide(action="tool_call", tool="browse_to", arguments={"url": "bbc.example/missing"},
                  reason="navigate to the BBC")
-    brain.recover(strategy="alternative_tool", tool="search_web",
-                  reason="the direct address was wrong; search for it instead")
     await app.ask("open the BBC please")
     await settle(app)
 
-    # Verification, not the tool's own optimism, decides whether that worked.
+    # Verification, not the tool's own optimism, decides whether that worked —
+    # and the model deciding what to do next is told.
     verify = [e for e in app.bus.history
               if e.type == "intelligence.trace" and e.payload.get("stage") == "verify"]
     assert verify and verify[-1].payload["verified"] is False
     assert "not-found" in verify[-1].payload["problem"]
+    assert "this did not work" in brain.prompts("decide")[1]
 
     # The correction inherits the previous objective rather than becoming a new one.
     brain.understand(goal="open the BBC", kind="navigate", targets=["BBC"],
@@ -644,7 +660,6 @@ async def test_a_verification_failure_is_never_reported_as_success(app, brain, m
     brain.understand(goal="open the BBC", kind="navigate", targets=["BBC"])
     brain.decide(action="tool_call", tool="browse_to", arguments={"url": "bbc.example/missing"},
                  reason="navigate to the BBC")
-    brain.recover(strategy="report", reason="nothing else to try")
     await app.ask("open the BBC please")
     await settle(app)
 
@@ -1023,64 +1038,31 @@ async def test_verification_notices_an_application_that_did_not_launch(app, monk
     assert verdict.verified is False and "Xcode" in verdict.problem
 
 
-async def test_recovery_will_not_blindly_repeat_a_state_change(app):
-    from jarvis.intelligence.recovery import RecoveryManager
-
-    manager = RecoveryManager(app.deps.models, ToolCatalog(app.deps.registry), budget=3)
-    app.models._providers = {}   # force the model path to fail, exercising the guard
-    plan = await manager.decide(
-        Objective(goal="send the email"), "send_email", {"to": ["a@b.example"]},
-        ToolResult.failure("The mail server refused it."),
-        Verification(verified=False, problem="not sent"), [], attempts=1)
-    assert plan.strategy == "report"
-
-
-async def test_recovery_reports_a_decline_whether_timed_out_or_explicit(app):
-    """A declined confirmation is an answer, not a failure to route around —
-    for both flavours registry.py can produce. Previously this matched on
-    the human-facing wording, which only happens to contain "confirm"/
-    "declin" for the timeout case; an explicit "no" (default message
-    "Understood — I've left it alone.") fell through to a model call
-    instead of a guaranteed report. registry.py now stamps a single stable
-    machine-readable prefix on both, and this must short-circuit deterministically
-    with no model call at all — the test provider isn't even asked."""
-    from jarvis.intelligence.recovery import RecoveryManager
-
-    manager = RecoveryManager(app.deps.models, ToolCatalog(app.deps.registry), budget=3)
-    app.models._providers = {}  # a model call here would mean the shortcut didn't fire
-    for detail in ("timed out", "delete_file"):  # timeout flavour vs. explicit "no" flavour
-        plan = await manager.decide(
-            Objective(goal="delete the file"), "delete_file", {"path": "x.txt"},
-            ToolResult.failure("Understood — I've left it alone.",
-                              detail=f"confirmation_declined:{detail}"),
-            Verification(verified=False, problem="declined"), [], attempts=1)
-        assert plan.strategy == "report"
-        assert plan.reason == "the user declined the action"
-
-
-async def test_multi_step_work_is_planned_and_simple_work_is_not(app, brain, monkeypatch):
+async def test_multi_step_work_runs_as_an_errand_and_simple_work_does_not(app, brain, monkeypatch):
+    """A multi-step objective becomes a background task with an errand-sized
+    budget; a simple one is done in the turn, with no task at all."""
     _stub_tool(app, monkeypatch, "research_topic",
                ToolResult(data={"sources": [{"title": "T", "url": "https://x.example"}]},
-                          summary="Done."))
+                          summary="Compared both options across four sources."))
     brain.understand(goal="compare two things", kind="research",
                      complexity=Complexity.MULTI_STEP)
-    brain.script("plan", {"steps": [{"intent": "search", "tool_hint": "research_topic"},
-                                    {"intent": "compare", "tool_hint": None}],
-                          "rationale": "gather then compare"})
     brain.decide(action="tool_call", tool="research_topic", arguments={"query": "a vs b"},
                  reason="gather")
-    await app.ask("which of the two leading options would suit me better")
+    brain.decide(action="respond", content="The first suits you better, sir.",
+                 evidence=["Compared both options across four sources"])
+    result = await app.ask("which of the two leading options would suit me better")
+    assert result.task_id, "multi-step work should run as a background task"
     await settle(app)
-    assert brain.prompts("plan"), "multi-step work should be planned"
+    task = app.tasks.get(result.task_id)
+    assert task.kind == "automation" and task.status == "succeeded"
 
     brain.queues.clear()
     brain.asked.clear()
     brain.understand(goal="what time is it in Tokyo", kind="inspect system",
                      complexity=Complexity.SIMPLE)
     brain.decide(action="tool_call", tool="get_time", arguments={}, reason="read the clock")
-    await app.ask("and what would that be in Tokyo right now")
-    await settle(app)
-    assert not brain.prompts("plan"), "a simple request must not cost a planning call"
+    result = await app.ask("and what would that be in Tokyo right now")
+    assert result.task_id is None, "a simple request is answered in the turn"
 
 
 async def test_trivial_conversation_never_reaches_a_tool(app, brain):
@@ -1557,17 +1539,13 @@ async def test_a_single_step_click_does_not_hand_off(app, brain):
     assert outcome.handoff is None
 
 
-async def test_the_handoff_survives_case_and_whitespace_drift_in_kind(app, brain):
-    """Objective.kind has no validator (unlike complexity/confidence, each
-    of which falls back to a safe default) — an exact, case-sensitive
-    string comparison against a free-form LLM field would silently miss
-    "Automation" or trailing whitespace despite the prompt's exact-string
-    instruction, sending a real multi-step errand through the 6-step loop
-    instead of handing it off."""
+async def test_any_multi_step_objective_hands_off_whatever_its_kind(app, brain):
+    """Objective.kind is free-form; an errand is an errand whether the
+    interpreter called it "automation", "research" or "send email"."""
     from jarvis.intelligence.agent import IntelligenceAgent
 
     agent = IntelligenceAgent(app.deps, app.deps.models, app.orchestrator.state)
-    for kind in (" Automation ", "AUTOMATION", "automation"):
+    for kind in (" Automation ", "research", "send email"):
         brain.understand(goal="find the best value ESP-32 two-pack and add it to my basket",
                          kind=kind, complexity=Complexity.MULTI_STEP, needs_tools=True)
         ctx = app.deps.tool_context()
@@ -1619,6 +1597,60 @@ async def test_stop_cancels_a_handed_off_automation_task(app, brain, monkeypatch
     assert cancelled.is_set()
 
 
+async def test_stop_reaches_an_action_already_under_way_in_the_foreground(app, brain, monkeypatch):
+    """A foreground turn has no Task, but "stop" must still reach it: the
+    operator checks the turn's own cancel token between actions."""
+    started = asyncio.Event()
+    calls: list[int] = []
+
+    async def slow_clock(args, ctx):
+        calls.append(1)
+        started.set()
+        await asyncio.sleep(0.3)
+        return ToolResult(data={"time": "noon"}, summary="It is noon.")
+
+    tool = app.deps.registry.get("get_time")
+    monkeypatch.setattr(tool, "run", slow_clock)
+    brain.understand(goal="tell the time twice", kind="inspect system")
+    brain.decide(action="tool_call", tool="get_time", arguments={})
+    brain.decide(action="tool_call", tool="get_time", arguments={})
+
+    turn = asyncio.create_task(app.ask("what's the time, and then again"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    stop = await app.ask("stop")
+    result = await asyncio.wait_for(turn, timeout=5)
+
+    brain.queues.clear()
+    assert stop.text, "the stop is acknowledged"
+    assert calls == [1], "nothing more may run once the user has said stop"
+    from jarvis.core.personality import CANCELLED
+
+    assert result.text in CANCELLED
+
+
+async def test_an_errand_that_asks_a_question_resumes_with_the_answer(app, brain, monkeypatch):
+    """The background operator stops on a question; the user's next words
+    are its answer, and the errand picks up with it."""
+    brain.understand(goal="buy a memory card", kind="shopping",
+                     complexity=Complexity.MULTI_STEP, needs_tools=True)
+    brain.decide(action="clarify", question="Which size — 32 GB or 64 GB?")
+    first = await app.ask("buy me a memory card")
+    await settle(app)
+    delivered = [e.payload["text"] for e in app.bus.history
+                 if e.type == "assistant.message" and e.payload.get("task_id") == first.task_id]
+    assert delivered[-1] == "Which size — 32 GB or 64 GB?"
+    pending = app.orchestrator.state.pending_clarification
+    assert pending is not None and pending.objective_goal == "buy a memory card"
+
+    brain.understand(goal="64", kind="shopping", complexity=Complexity.MULTI_STEP, needs_tools=True)
+    brain.decide(action="give_up", reason="enough for the test")
+    await app.ask("the 64 one")
+    await settle(app)
+    resumed = brain.prompts("decide")[-1]
+    assert "Task: buy a memory card" in resumed
+    assert "Which size — 32 GB or 64 GB? the 64 one" in resumed
+
+
 async def test_no_utterance_is_spoken_twice_across_a_full_automation_turn(app, brain, fake_provider,
                                                                           monkeypatch):
     """End-to-end proof against the exact bug class fixed earlier this
@@ -1653,28 +1685,13 @@ async def test_no_utterance_is_spoken_twice_across_a_full_automation_turn(app, b
                              "automation": {"narration_min_gap_s": 0.0}})
 
     calls = _stub_tool(app, monkeypatch, "browse_to",
-                       ToolResult(data={"url": "https://x.example"}, summary="Opened it."))
-
-    decompose_q = [json.dumps({"milestones": ["open the site"]})]
-    step_q = [json.dumps({"action": "tool_call", "tool": "browse_to",
-                          "arguments": {"url": "https://x.example"}, "reason": "go there"}),
-             json.dumps({"action": "complete", "reason": "done"})]
-    summary_q = ["Opened the site for you."]
-    brain_reply = brain._reply  # the Brain's own router, for triage/understanding
-
-    def combined_router(messages, kwargs):
-        text = " ".join(m.content for m in messages)
-        if "break a task into milestones" in text:
-            return decompose_q.pop(0) if decompose_q else None
-        if "choose the next action for one part of a larger task" in text:
-            return step_q.pop(0) if step_q else json.dumps({"action": "give_up", "reason": "x"})
-        if "report back plainly" in text:
-            return summary_q.pop(0) if summary_q else None
-        return brain_reply(messages, kwargs)
-
-    fake_provider.router = combined_router
+                       ToolResult(data={"url": "https://x.example"},
+                                  summary="Opened x.example in the browser."))
     brain.understand(goal="open x.example", kind="automation", complexity=Complexity.MULTI_STEP,
                      needs_tools=True)
+    brain.decide(action="tool_call", tool="browse_to", arguments={"url": "https://x.example"})
+    brain.decide(action="respond", content="Opened the site for you.",
+                 evidence=["Opened x.example in the browser"])
 
     result = await app.ask("open x.example please, step by step")
     assert result.task_id
@@ -1744,17 +1761,6 @@ async def test_declining_the_automation_start_confirmation_still_gets_a_reply(
 
     calls = _stub_tool(app, monkeypatch, "browse_to",
                        ToolResult(data={"url": "https://x.example"}, summary="Opened it."))
-
-    decompose_q = [json.dumps({"milestones": ["open the site"]})]
-    brain_reply = brain._reply
-
-    def combined_router(messages, kwargs):
-        text = " ".join(m.content for m in messages)
-        if "break a task into milestones" in text:
-            return decompose_q.pop(0) if decompose_q else None
-        return brain_reply(messages, kwargs)
-
-    fake_provider.router = combined_router
     brain.understand(goal="open x.example", kind="automation", complexity=Complexity.MULTI_STEP,
                      needs_tools=True)
 
