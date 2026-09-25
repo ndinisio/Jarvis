@@ -78,15 +78,24 @@ machine or the GitHub UI.
   e.g. a bare README), then **v1.0**.
 - Every commit after that bumps the version from whatever the previous
   commit's title was:
-  - **Small** — a bug fix, a verification/hardening pass, a docs or tooling
-    addition, a compatibility patch — bumps the **minor** number
-    (v1.0 → v1.1 → v1.2 …).
-  - **Bigger** — a genuinely new capability, or a substantial rewrite of
-    existing architecture — bumps the **major** number and resets minor to
-    zero (v1.3 → v2.0; v9.0 → v10.0; there is no ceiling — "and so on").
-  - The call is made on scope, not diff size: a new capability that touches
-    few files is still major; a large mechanical refactor that changes
-    nothing about what the product does is still minor.
+  - **Almost always** — a bug fix, a verification/hardening pass, a docs or
+    tooling addition, a compatibility patch, a performance or safety pass,
+    UI work, a rewrite of existing architecture (however substantial), or a
+    new capability assembled from tools JARVIS already has — bumps the
+    **minor** number (v7.0 → v7.1 → v7.2 → … → v7.13 → …, no ceiling). This
+    is the default outcome for a code change; reach for major only when the
+    case below is clearly met.
+  - **Rarely** — bringing in genuinely new *software*: a new third-party
+    integration or engine JARVIS didn't talk to before (HomeKit, the Kokoro
+    TTS engine), or a new artifact the product ships as (the native Mac app
+    shell) — bumps the **major** number and resets minor to zero
+    (v6.5 → v7.0; no ceiling — "and so on"). A smarter automation loop, a
+    new internally-built watcher or capability, deeper native-app control —
+    all built from what JARVIS already has — stay minor; only a genuinely
+    new outside system or a new distribution form earns major.
+  - Because major is now reserved for that narrow case, expect the major
+    number to stay small for a long time — around v7–v10 for a good
+    while — not climb with every release the way minor does.
 - This numbering is the **commit-history ledger**, kept deliberately
   separate from the package's own `__version__` / `pyproject.toml` version
   (currently tracking toward a real `3.0.0` release) and from any git tags.
