@@ -226,8 +226,13 @@ async def navigate(deps, ctx: ToolContext | None, target: str, browser: str = ""
     from .observe import acted
 
     label = label or _domain(target)
-    acted()                                   # whichever page this lands in
     driver = await hub_of(deps).for_action(ctx, navigating=True, url=target, browser=browser)
+    # getattr, not a required method: only PlaywrightDriver can check this
+    # cheaply, and existing driver doubles predate the method.
+    at = getattr(driver, "at", None) if driver is not None and driver.owned else None
+    already_there = bool(at is not None and at(target))
+    if not already_there:
+        acted()                               # whichever page this lands in
     if driver is not None and driver.owned:
         # JARVIS Chrome: the call returns once the page has loaded.
         if not await driver.open(target):

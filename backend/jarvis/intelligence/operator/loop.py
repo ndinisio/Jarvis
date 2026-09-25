@@ -465,6 +465,9 @@ class _Run:
         if self.before is not None:
             self.before(name, cleaned)
         screen = self.screen if name in OBSERVE_AFTER or name in OBSERVERS else ""
+        hint = self.stuck.already_seen(screen, name, cleaned)
+        if hint:
+            return self._refuse(name, cleaned, hint)
         started = time.monotonic()
         view_before = self.screen
         result = await self.registry.call(name, cleaned, self.ctx)

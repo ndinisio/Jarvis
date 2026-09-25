@@ -93,6 +93,20 @@ async def test_status_reports_readiness(app, fake_provider):
     assert "reason" in status["slots"]["fast"]
 
 
+async def test_status_reports_the_operator_slot_on_its_own(app, fake_provider):
+    """A live mismatch this was blind to: operator (unconfigured) deferring
+    to general, whose model wasn't installed, substituted silently — status()
+    only ever reported fast/general/vision, never operator's own resolution."""
+    fake_provider._models = ["llama3.1:8b"]
+    app.models._catalog.clear()
+    app.models._resolved.clear()
+    app.config.models.operator.model = "qwen3:8b"
+    status = await app.models.status()
+    assert status["slots"]["operator"]["configured"] == "qwen3:8b"
+    assert status["slots"]["operator"]["substituted"] is True
+    assert status["slots"]["operator"]["resolved"] == "llama3.1:8b"
+
+
 async def test_router_reconfiguration_rebuilds_providers(app):
     app.models.reconfigure(app.config)
     assert "ollama" in app.models.providers

@@ -292,8 +292,8 @@ async def test_a_decline_ends_the_run_without_asking_the_model_again(app, fake_p
 
 async def test_a_repeated_action_on_an_unchanged_page_gets_a_hint(app, fake_provider, approve_routine,
                                                                   monkeypatch):
-    _stub(app, monkeypatch, "click_page_element",
-          ToolResult(data={"clicked": True}, summary="Clicked “More”."))
+    clicks = _stub(app, monkeypatch, "click_page_element",
+                   ToolResult(data={"clicked": True}, summary="Clicked “More”."))
     _stub(app, monkeypatch, "read_page_manifest", ToolResult(
         data={"url": "https://x.example"}, summary="3 elements found on X.",
         observation='Page: X — https://x.example\n[jv1] button "More"'))
@@ -305,6 +305,29 @@ async def test_a_repeated_action_on_an_unchanged_page_gets_a_hint(app, fake_prov
     await _operate(app, tools=["click_page_element", "read_page_manifest"])
     assert "changed nothing" not in script.prompts[2]
     assert "changed nothing" in script.prompts[3]
+    assert len(clicks) == 1, "the repeat must be refused outright, not run and only complained about after"
+
+
+async def test_repeated_navigation_to_the_same_page_is_refused_not_reloaded(app, fake_provider,
+                                                                            approve_routine, monkeypatch):
+    """The AirPods bug: browsing to a URL that changed nothing must not be
+    something the model can just do again — and again. (browse_to is a
+    LOW-risk, "browser"-category tool, so it was exempt from the *other*
+    duplicate-action guard — this is the one that must still catch it.)"""
+    url = "https://amazon.example/s?k=airpods"
+    opens = _stub(app, monkeypatch, "browse_to",
+                  ToolResult(data={"url": url}, summary="Opened Amazon.",
+                            observation=f"Opened Amazon — {url}"))
+    _stub(app, monkeypatch, "read_page_manifest", ToolResult(
+        data={"url": url}, summary="40 elements found.",
+        observation=f'Page: Amazon — {url}\n[jv1] link "AirPods Pro"'))
+    Script(fake_provider,
+          call("read_page_manifest"),
+          call("browse_to", url=url),
+          call("browse_to", url=url),
+          call("give_up", reason="stuck"))
+    await _operate(app, tools=["browse_to", "read_page_manifest"])
+    assert len(opens) == 1, "the second identical browse_to must be refused, not re-run"
 
 
 async def test_three_failures_in_a_row_bring_a_replan_with_thinking_on(app, fake_provider,

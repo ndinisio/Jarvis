@@ -34,6 +34,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ...core import latency
 from ...core.logging import get_logger
@@ -51,6 +52,21 @@ _HANDLE = re.compile(r"^jv\d+$")
 
 #: Requests that never "finish" in a way that matters for settling.
 _LONG_LIVED = ("websocket", "eventsource")
+
+
+def _norm_path(path: str) -> str:
+    return path.rstrip("/") or "/"
+
+
+def _same_url(a: str, b: str) -> bool:
+    """Same destination, for deciding whether a navigation is a no-op —
+    not a strict string match: a trailing slash is nothing, but the query
+    and fragment are part of the destination (a fragment can be its own
+    same-document navigation, so it's never ignored)."""
+    x, y = urlsplit(a), urlsplit(b)
+    return (x.scheme.lower() == y.scheme.lower() and x.netloc.lower() == y.netloc.lower()
+            and _norm_path(x.path) == _norm_path(y.path)
+            and x.query == y.query and x.fragment == y.fragment)
 
 
 class PlaywrightBrowser:
@@ -230,7 +246,15 @@ class PlaywrightDriver(BrowserDriver):
             return value if isinstance(value, str) else json.dumps(value)
         return ""
 
+    def at(self, url: str) -> bool:
+        """Already showing *url* — no navigation needed. Cheap: reads the
+        page's current URL, no round trip."""
+        page = self.browser.page
+        return page is not None and _same_url(page.url, url)
+
     async def open(self, url: str) -> bool:
+        if self.at(url):
+            return True
         for attempt in range(2):
             page = await self.browser.ensure_page()
             try:

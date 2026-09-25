@@ -27,11 +27,31 @@ def _digest(text: str) -> str:
     return hashlib.sha1((text or "").encode("utf-8", "ignore")).hexdigest()[:16]
 
 
+def _hint(tool: str) -> str:
+    return (f"You've already done exactly this ({tool}) with the screen looking exactly "
+            "the same, and it changed nothing. Do something different: scroll_page to see "
+            "more, look for another way on the page, page_go_back, or search instead of "
+            "browsing.")
+
+
 class StuckDetector:
     def __init__(self) -> None:
         self._seen: Counter[tuple[str, str]] = Counter()
         self._failures_in_row = 0
         self.replans = 0
+
+    @staticmethod
+    def _key(screen: str, tool: str, arguments: dict) -> tuple[str, str]:
+        return (_digest(screen), f"{tool}:{json.dumps(arguments, sort_keys=True, default=str)}")
+
+    def already_seen(self, screen: str, tool: str, arguments: dict) -> str | None:
+        """Read-only: would this exact action, on this exact screen, be a
+        repeat? Checked *before* running the action, so a repeat can be
+        refused outright instead of run again and merely complained about
+        afterwards — see :meth:`record`, which is what actually counts it."""
+        if not screen:
+            return None
+        return _hint(tool) if self._seen[self._key(screen, tool, arguments)] >= 1 else None
 
     def record(self, screen: str, tool: str, arguments: dict, ok: bool) -> str | None:
         """Note one action taken while *screen* was showing. Returns a hint
@@ -43,14 +63,9 @@ class StuckDetector:
         self._failures_in_row = 0 if ok else self._failures_in_row + 1
         if not screen:
             return None
-        key = (_digest(screen), f"{tool}:{json.dumps(arguments, sort_keys=True, default=str)}")
+        key = self._key(screen, tool, arguments)
         self._seen[key] += 1
-        if self._seen[key] >= 2:
-            return (f"You've already done exactly this ({tool}) with the screen looking exactly "
-                    "the same, and it changed nothing. Do something different: scroll_page to see "
-                    "more, look for another way on the page, page_go_back, or search instead of "
-                    "browsing.")
-        return None
+        return _hint(tool) if self._seen[key] >= 2 else None
 
     @property
     def needs_replan(self) -> bool:

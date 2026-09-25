@@ -35,6 +35,9 @@ class _Driver:
         self.opened.append(url)
         return True
 
+    def at(self, url):
+        return bool(self.opened) and self.opened[-1] == url
+
     async def current_page(self):
         return {"url": self.opened[-1] if self.opened else "https://x.example/", "title": "X"}
 
@@ -452,6 +455,32 @@ async def test_live_the_look_after_a_click_waits_for_the_request_it_started(lab)
     # look settles first) waits for it and for the page to update.
     await settle(lab)
     assert await lab.has_text("saved")
+
+
+def test_same_url_ignores_a_trailing_slash_but_not_query_or_fragment():
+    from jarvis.surfaces.web.cdp import _same_url
+
+    assert _same_url("https://x.example/s?k=a", "https://x.example/s?k=a")
+    assert _same_url("https://x.example", "https://x.example/"), "a bare domain is its root"
+    assert _same_url("https://x.example/s/", "https://x.example/s"), "a trailing slash is nothing"
+    assert _same_url("https://X.Example/s", "https://x.example/s"), "host is case-insensitive"
+    assert not _same_url("https://x.example/s?k=a", "https://x.example/s?k=b"), "the query is the destination"
+    assert not _same_url("https://x.example/s#a", "https://x.example/s#b"), "so is the fragment"
+    assert not _same_url("https://x.example/s", "https://x.example/t")
+
+
+@live
+async def test_live_a_second_open_to_the_same_url_is_a_no_op(lab):
+    """The AirPods bug's other half: repeating browse_to must not cost a
+    real reload when nothing about the destination changed."""
+    requests: list[str] = []
+    lab.browser.context.on("request", lambda req: requests.append(req.url))
+    assert await lab.open("https://lab.example/")
+    assert not any("lab.example" in url for url in requests), \
+        "already at that URL: open() must return without navigating"
+    assert await lab.open("https://lab.example/two")
+    assert any("lab.example/two" in url for url in requests), \
+        "a genuinely different URL must still navigate"
 
 
 @live

@@ -448,7 +448,8 @@ class ModelRouter:
                 "base_url": getattr(provider, "base_url", ""),
             }
         slots: dict[str, dict] = {}
-        for slot in (Slot.FAST, Slot.GENERAL, Slot.VISION):
+        for slot in (Slot.FAST, Slot.GENERAL, Slot.VISION, Slot.REASONING, Slot.OPERATOR,
+                    Slot.SPECIALIST, Slot.SCREEN_WATCH):
             conf = self.slot_config(slot)
             entry: dict = {"configured": conf.model, "provider": conf.provider}
             provider_up = providers.get(conf.provider, {}).get("available", False)
