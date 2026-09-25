@@ -252,3 +252,21 @@ def test_settings_and_keys_are_read_from_a_dotenv_file(tmp_path, monkeypatch):
     assert config.models.providers["groq"].enabled and config.models.providers["groq"].api_key == "gsk_test"
     monkeypatch.setenv("JARVIS_GENERAL_MODEL", "from-shell")
     assert config_module.load_config(tmp_path / "missing.json").models.general.model == "from-shell"
+
+
+def test_dotenv_is_found_in_the_workspace_even_when_cwd_differs(tmp_path, monkeypatch):
+    """The case a bare cwd check misses: a packaged app (or anything else
+    launched from outside the workspace) still finds the workspace's own
+    .env, because JARVIS_WORKSPACE is checked, not just the process cwd."""
+    from jarvis.core import config as config_module
+
+    monkeypatch.undo()
+    workspace, elsewhere = tmp_path / "workspace", tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("JARVIS_WORKSPACE", str(workspace))
+    monkeypatch.delenv("JARVIS_GENERAL_MODEL", raising=False)
+    (workspace / ".env").write_text("JARVIS_GENERAL_MODEL=from-workspace-dotenv\n", encoding="utf-8")
+    config = config_module.load_config(tmp_path / "missing.json")
+    assert config.models.general.model == "from-workspace-dotenv"

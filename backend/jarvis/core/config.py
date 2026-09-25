@@ -705,14 +705,16 @@ def _coerce(raw: str) -> Any:
 
 
 def _dotenv() -> dict[str, str]:
-    """``JARVIS_*`` settings from a ``.env`` file — the working directory's,
-    else the checkout's — for keys that shouldn't live in a shell profile
-    (and an app opened from Finder never sees one)."""
+    """``JARVIS_*`` settings from a ``.env`` file — the workspace's, the
+    working directory's, or the checkout's — for keys that shouldn't live in
+    a shell profile (and an app opened from Finder inherits neither: it
+    starts in neither the workspace nor the checkout)."""
     try:
         from dotenv import dotenv_values
     except ImportError:  # pragma: no cover - a declared dependency
         return {}
-    for folder in (Path.cwd(), Path(__file__).resolve().parents[3]):
+    workspace = _expand(os.environ.get(_ENV_PREFIX + "WORKSPACE", "~/JARVIS"))
+    for folder in (workspace, Path.cwd(), Path(__file__).resolve().parents[3]):
         path = folder / ".env"
         if path.is_file():
             return {key: value for key, value in dotenv_values(path).items()
