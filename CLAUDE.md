@@ -51,10 +51,13 @@ machine or the GitHub UI.
   `main` is a step the user physically has to run themselves, every time.
 - When the user says to push, don't just describe the command — give the
   exact one to run (`git push origin claude/main-work:main`, from their own
-  machine or the GitHub UI). Once they confirm it's landed, `claude/main-work`
-  and `main` are the same commit, i.e. `claude/main-work` has *nothing* on it
-  beyond `main` again — that's the natural reset, not a separate cleanup
-  step, since the next commit just starts from there.
+  machine or the GitHub UI), **and in the same message give the exact
+  command to delete `claude/main-work`** (`git push origin --delete
+  claude/main-work`) — this environment can do neither, so both are always
+  theirs to run, and handing over only the first one leaves the branch
+  lingering until asked twice. Once both are run, the working branch is
+  gone outright, not just reset to zero — the next unit of work recreates
+  it fresh from `main`'s new tip.
 - Routine engineering hygiene still applies on `claude/main-work` even
   though it's the working branch: tests pass, linters are clean.
 - The working branch is `claude/main-work`, not a bare `claude-working-branch`
