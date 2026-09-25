@@ -83,6 +83,21 @@ def test_config_defaults_are_local_first():
     assert config.security.always_confirm == ["high"]
 
 
+def test_every_free_provider_switches_on_with_its_own_key(monkeypatch, tmp_path):
+    """The free-tier providers (Groq, OpenRouter, Cerebras, Gemini, NVIDIA)
+    all follow the same rule: off by default, on the moment their own key
+    is set — none of them needs the others."""
+    from jarvis.core import config as config_module
+
+    for name, suffix in (("groq", "GROQ"), ("openrouter", "OPENROUTER"), ("cerebras", "CEREBRAS"),
+                         ("gemini", "GEMINI"), ("nvidia", "NVIDIA")):
+        monkeypatch.setenv(f"JARVIS_{suffix}_API_KEY", f"key-{name}")
+    config = config_module.load_config(tmp_path / "missing.json")
+    for name in ("groq", "openrouter", "cerebras", "gemini", "nvidia"):
+        assert config.models.providers[name].enabled, name
+        assert config.models.providers[name].api_key == f"key-{name}", name
+
+
 def test_config_env_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_WORKSPACE", str(tmp_path / "ws"))
     monkeypatch.setenv("JARVIS_FAST_MODEL", "tiny-model:1b")

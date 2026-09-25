@@ -96,6 +96,8 @@ class ModelsConfig(BaseModel):
             "gemini": ProviderConfig(
                 kind="openai", base_url="https://generativelanguage.googleapis.com/v1beta/openai",
                 enabled=False),
+            "nvidia": ProviderConfig(kind="openai", base_url="https://integrate.api.nvidia.com/v1",
+                                     enabled=False),
         }
     )
     #: Apps and sites whose content never leaves this Mac, whatever a slot's
@@ -649,6 +651,7 @@ _ENV_MAP: dict[str, tuple[str, ...]] = {
     "OPENROUTER_API_KEY": ("models", "providers", "openrouter", "api_key"),
     "CEREBRAS_API_KEY": ("models", "providers", "cerebras", "api_key"),
     "GEMINI_API_KEY": ("models", "providers", "gemini", "api_key"),
+    "NVIDIA_API_KEY": ("models", "providers", "nvidia", "api_key"),
     "REASONING_MODEL": ("models", "reasoning", "model"),
     "OPERATOR_MODEL": ("models", "operator", "model"),
     "WAKE_WORD": ("voice", "wake_word"),
@@ -742,7 +745,7 @@ def _env_overlay() -> dict:
         _set_path(overlay, ("models", "providers", "openai", "enabled"), True)
     if environ.get(_ENV_PREFIX + "ANTHROPIC_API_KEY"):
         _set_path(overlay, ("models", "providers", "anthropic", "enabled"), True)
-    for free in ("GROQ", "OPENROUTER", "CEREBRAS", "GEMINI"):
+    for free in ("GROQ", "OPENROUTER", "CEREBRAS", "GEMINI", "NVIDIA"):
         if environ.get(_ENV_PREFIX + free + "_API_KEY"):
             _set_path(overlay, ("models", "providers", free.lower(), "enabled"), True)
     if environ.get(_ENV_PREFIX + "BRAVE_API_KEY"):

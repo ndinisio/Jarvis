@@ -752,9 +752,10 @@ side (see [`evals/README.md`](evals/README.md)).
 
 **Free cloud accelerators (optional).** Any slot can list a `chain` of other
 providers tried first — the free tiers of Groq, OpenRouter (`:free` models),
-Cerebras or Google's Gemini API, all built in and off until you set their key
-(`JARVIS_GROQ_API_KEY`, `JARVIS_OPENROUTER_API_KEY`, `JARVIS_CEREBRAS_API_KEY`,
-`JARVIS_GEMINI_API_KEY`):
+Cerebras, Google's Gemini API or NVIDIA's API catalog (build.nvidia.com),
+all built in and off until you set their key (`JARVIS_GROQ_API_KEY`,
+`JARVIS_OPENROUTER_API_KEY`, `JARVIS_CEREBRAS_API_KEY`, `JARVIS_GEMINI_API_KEY`,
+`JARVIS_NVIDIA_API_KEY`):
 
 ```jsonc
 "operator": { "chain": [ { "provider": "groq", "model": "<a tool-calling model they list>" } ] }
