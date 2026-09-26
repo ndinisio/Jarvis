@@ -381,6 +381,34 @@ async def test_a_recycled_row_refuses_to_be_pressed_as_if_unchanged(notes):
         await surface.press(handle)
 
 
+def test_poll_returns_as_soon_as_the_condition_is_true():
+    """The fixed-sleep replacement: activation and menu-populate waits now
+    poll instead of guessing one flat delay — this proves the poll itself
+    returns the moment it's ready rather than always waiting the ceiling,
+    which is what makes the common (fast) case no slower than before."""
+    from jarvis.surfaces.native.surface import NativeSurface
+
+    slept: list[float] = []
+    surface = NativeSurface(sleep=slept.append)
+    countdown = [2]  # not ready for the first two checks, ready on the third
+
+    def ready() -> bool:
+        if countdown[0] > 0:
+            countdown[0] -= 1
+            return False
+        return True
+
+    assert surface._poll(ready, timeout_s=5.0, interval_s=0.01) is True
+    assert slept == [0.01, 0.01], "one sleep per failed check, no more"
+
+
+def test_poll_gives_up_once_the_timeout_elapses():
+    from jarvis.surfaces.native.surface import NativeSurface
+
+    surface = NativeSurface(sleep=lambda _s: None)
+    assert surface._poll(lambda: False, timeout_s=0.05, interval_s=0.01) is False
+
+
 async def test_typing_focuses_the_field_selects_it_and_types(notes):
     surface, backend, recorder, parts = notes
     handle = next(c.handle for c in (await surface.read())[0].controls if c.role == "search field")

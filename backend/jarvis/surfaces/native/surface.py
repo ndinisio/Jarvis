@@ -282,7 +282,7 @@ class NativeSurface:
         if not items:
             backend.perform(element, "AXPress")
             opened = True
-            self._sleep(0.3)
+            self._poll(lambda: bool(self._menu_items(element)), timeout_s=1.5)
             items = self._menu_items(element)
         chosen = _match(items, option, backend)
         if chosen is None:
@@ -318,7 +318,7 @@ class NativeSurface:
             if chosen is None and opened_root is None:
                 backend.perform(current, "AXPress")        # some menus fill in when opened
                 opened_root = current
-                self._sleep(0.3)
+                self._poll(lambda: bool(self._menu_items(current)), timeout_s=1.5)
                 items = self._menu_items(current)
                 chosen = _match(items, step, backend)
             if chosen is None:
@@ -426,7 +426,23 @@ class NativeSurface:
         front = self.backend.frontmost()
         if front is None or front[0] != pid:
             self.backend.activate(pid)
-            self._sleep(0.25)
+            self._poll(lambda: (self.backend.frontmost() or (None,))[0] == pid, timeout_s=1.5)
+
+    def _poll(self, ready: Callable[[], bool], *, timeout_s: float, interval_s: float = 0.05) -> bool:
+        """Check *ready* repeatedly rather than a flat sleep — a slow app
+        activation or menu populate under load (more likely exactly when a
+        long background errand is sharing the machine with other work) gets
+        however long it actually needs, up to *timeout_s*, instead of a
+        fixed guess that's indistinguishable from "it will never be ready".
+        Mirrors the web surface's own poll-until-settled pattern
+        (tools/browser/observe.py)."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if ready():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            self._sleep(interval_s)
 
     def _app_name(self, pid: int) -> str:
         snap = self._last.get(pid)
