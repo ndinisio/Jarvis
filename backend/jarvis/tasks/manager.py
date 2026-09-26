@@ -111,6 +111,16 @@ class TaskManager:
                 return
             task.status = TaskStatus.RUNNING
             self._publish_update(task)
+            if self._memory is not None:
+                # Written now, not just at the end: this is the row a crash,
+                # kill or power loss leaves behind at "running" — the record
+                # that lets the next startup notice a task that never got
+                # the chance to log its own finish (see
+                # MemoryStore.orphaned_tasks).
+                asyncio.create_task(
+                    self._memory.log_task(task.id, task.kind, task.title, TaskStatus.RUNNING,
+                                          task.started, None, "")
+                )
             try:
                 task.result = await coro_factory(task)
                 status = TaskStatus.CANCELLED if task.cancel_event.is_set() else TaskStatus.SUCCEEDED

@@ -134,7 +134,34 @@ class JarvisApp:
         # until something actually needs it — an idle Mac shouldn't be
         # carrying a resident 7-8B model on JARVIS's account alone.
         asyncio.create_task(self._check_model_availability())
+        asyncio.create_task(self._report_orphaned_tasks())
         self.bus.add_hook(self._preload_when_spoken_to)
+
+    async def _report_orphaned_tasks(self) -> None:
+        """A long errand a previous run never finished logging — the record
+        a crash, kill or power loss leaves behind, since a clean shutdown or
+        a normal completion always updates it to a real terminal status
+        (see tasks/manager.py, MemoryStore.orphaned_tasks). There is no safe
+        way to resume mid-task (the conversation, browser and app state that
+        run was using are all gone with the old process), so this only
+        surfaces it rather than losing it silently, and closes the record
+        out so it doesn't nag again next time."""
+        try:
+            orphaned = self.memory.orphaned_tasks()
+            if not orphaned:
+                return
+            titles = ", ".join(f"“{row['title']}”" for row in orphaned[:3])
+            more = len(orphaned) - 3
+            self.bus.publish(
+                EventType.NOTICE,
+                level="warning",
+                message=f"{titles}{f' (+{more} more)' if more > 0 else ''} "
+                        f"{'was' if len(orphaned) == 1 else 'were'} still running when JARVIS last "
+                        "stopped and never finished — it may be worth trying again.",
+            )
+            await self.memory.mark_interrupted([row["id"] for row in orphaned])
+        except Exception as exc:
+            log.debug("orphaned-task check skipped: %s", exc)
 
     def _preload_when_spoken_to(self, event) -> None:
         """The wake word (or the microphone opening) means a request is

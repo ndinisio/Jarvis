@@ -263,6 +263,32 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def orphaned_tasks(self) -> list[dict[str, Any]]:
+        """Tasks logged as started but never logged as finished — the
+        record left behind by a crash, kill or power loss between
+        log_task's "running" write and its "finished" one (a clean
+        shutdown or a normal completion always reaches the second write;
+        see tasks/manager.py's TaskManager._run/_finish). Checked once, at
+        startup, before this session has created any tasks of its own, so
+        every row found here is genuinely from a previous run."""
+        rows = self._conn.execute(
+            "SELECT * FROM task_log WHERE status='running' ORDER BY started"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def mark_interrupted(self, task_ids: list[str]) -> None:
+        """Close out orphaned_tasks()'s rows once they've been reported, so
+        the same stale entry doesn't get surfaced again on every future
+        startup."""
+        if not task_ids:
+            return
+        placeholders = ",".join("?" * len(task_ids))
+        await self._run(
+            self._execute,
+            f"UPDATE task_log SET status='interrupted' WHERE id IN ({placeholders})",
+            tuple(task_ids),
+        )
+
     # -- introspection -----------------------------------------------------
     def snapshot(self) -> dict[str, Any]:
         return {

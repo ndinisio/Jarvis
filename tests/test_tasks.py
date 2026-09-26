@@ -129,3 +129,52 @@ def test_prune_keeps_recent(app):
         task.finished = index
     manager.prune(keep=10)
     assert len(manager.all(limit=200)) <= 11
+
+
+async def test_a_task_is_recorded_as_orphaned_while_it_is_genuinely_still_running(app):
+    """A crash, kill or power loss mid-task leaves memory's task_log stuck
+    at "running" — the record the next startup uses to notice a task that
+    never got the chance to log its own finish. This proves the "running"
+    row lands as soon as the task starts, not only once it completes."""
+    manager = app.tasks
+    started = asyncio.Event()
+    finish_now = asyncio.Event()
+
+    async def work(task):
+        started.set()
+        await finish_now.wait()
+        return "done"
+
+    task = manager.spawn("test", "Long reorganisation", work)
+    await started.wait()
+    await asyncio.sleep(0.05)  # let the background "running" write land
+    assert any(row["id"] == task.id for row in app.memory.orphaned_tasks())
+
+    finish_now.set()
+    await asyncio.sleep(0.05)
+    assert not any(row["id"] == task.id for row in app.memory.orphaned_tasks()), \
+        "a normal finish must close out the row, not leave it looking crashed"
+
+
+async def test_startup_reports_and_clears_a_task_orphaned_by_a_previous_crash(app):
+    """The other half, from the next process's point of view: a "running"
+    row nobody is running any more (this is a fresh app, nothing has
+    spawned a task yet) must be surfaced once at startup, then not nag
+    again — there's no safe way to resume it (the conversation, browser
+    and app state that run depended on are gone with the old process), so
+    reporting it once and closing the record is the honest outcome."""
+    import time
+
+    from jarvis.core.events import EventType
+
+    await app.memory.log_task("crashed-1", "research", "Investigate warranty options",
+                              "running", time.time(), None, "")
+    assert app.memory.orphaned_tasks()
+
+    await app.startup()
+    await asyncio.sleep(0.1)
+
+    notices = [e for e in app.bus.history if e.type == EventType.NOTICE]
+    assert any("Investigate warranty options" in e.payload.get("message", "") for e in notices)
+    assert not app.memory.orphaned_tasks()
+    await app.shutdown()
