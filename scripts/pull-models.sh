@@ -20,7 +20,7 @@ VISION=""
 
 for arg in "$@"; do
   case "$arg" in
-    --vision) VISION="qwen2.5vl:7b" ;;
+    --vision) VISION="qwen3-vl:8b" ;;
     --small) GENERAL="qwen3:4b" ;;
   esac
 done

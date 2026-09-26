@@ -547,7 +547,7 @@ for the model to fix.
   "general":    { "model": "qwen3:8b" },      // conversation, understanding, synthesis
   "reasoning":  { "model": "" },              // ← empty: uses the general model
   "operator":   { "model": "" },              // ← empty: uses reasoning — operates the Mac
-  "vision":     { "model": "qwen2.5vl:7b" },  // screen understanding
+  "vision":     { "model": "qwen3-vl:8b" },   // screen understanding
   "specialist": { "model": "" }               // ← empty: uses the reasoning model
 }
 ```
@@ -715,7 +715,7 @@ brew install ollama          # or download from ollama.com
 ollama serve                 # leave running (the app installs a service too)
 
 ./scripts/pull-models.sh             # qwen3:8b                  (~5 GB)
-./scripts/pull-models.sh --vision    # adds qwen2.5vl:7b         (~6 GB)
+./scripts/pull-models.sh --vision    # adds qwen3-vl:8b          (~6 GB)
 ./scripts/pull-models.sh --small     # qwen3:4b, for 8–16 GB Macs that want headroom
 ```
 
@@ -730,7 +730,7 @@ feel slow:
 | **fast** | *(empty → general)* | V1.1-mode classification |
 | **reasoning** | *(empty → general)* | understanding requests |
 | **operator** | *(empty → reasoning)* | operating the Mac step by step, native tool calls (v3.0) |
-| **vision** | `qwen2.5vl:7b` | screen understanding and visual grounding (loaded on demand) |
+| **vision** | `qwen3-vl:8b` | screen understanding and visual grounding (loaded on demand) |
 | **specialist** | *(empty → reasoning)* | an optional domain model: code, maths, a local fine-tune |
 
 Thinking is switched off by default (`"think": false`) — a Qwen3-class model
@@ -934,7 +934,7 @@ file) override the file — see [`.env.example`](.env.example).
     "general":    { "provider": "ollama", "model": "qwen3:8b", "num_ctx": 12288, "think": false },
     "reasoning":  { "provider": "ollama", "model": "" },           // empty → uses general
     "operator":   { "provider": "ollama", "model": "", "chain": [] },  // empty → uses reasoning
-    "vision":     { "provider": "ollama", "model": "qwen2.5vl:7b" },
+    "vision":     { "provider": "ollama", "model": "qwen3-vl:8b" },
     "specialist": { "provider": "ollama", "model": "" }            // empty → uses reasoning
   },
   "intelligence": {

@@ -111,7 +111,7 @@ if command -v ollama >/dev/null; then
     ollama list | sed 's/^/    /'
     printf "\n"
     say "Recommended for JARVIS:  ./scripts/pull-models.sh --vision"
-    say "                         (qwen3:8b for everything, qwen2.5vl:7b to see the screen)"
+    say "                         (qwen3:8b for everything, qwen3-vl:8b to see the screen)"
   else
     warn "Ollama is installed but not running. Start it with: ollama serve"
   fi

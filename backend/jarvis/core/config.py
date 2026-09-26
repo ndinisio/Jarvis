@@ -118,8 +118,11 @@ class ModelsConfig(BaseModel):
     #: measures the alternatives on your own Mac.
     general: ModelSlotConfig = ModelSlotConfig(model="qwen3:8b", max_tokens=900, timeout_s=120.0,
                                                num_ctx=12288, think=False)
-    #: Vision model: screen understanding and visual grounding.
-    vision: ModelSlotConfig = ModelSlotConfig(model="qwen2.5vl:7b", max_tokens=600, timeout_s=180.0,
+    #: Vision model: screen understanding and visual grounding. Qwen3-VL
+    #: supersedes Qwen2.5-VL at the same size — better grounding accuracy and
+    #: faster inference, no extra RAM cost; the older generation stays as a
+    #: fallback for whoever already has it pulled.
+    vision: ModelSlotConfig = ModelSlotConfig(model="qwen3-vl:8b", max_tokens=600, timeout_s=180.0,
                                               num_ctx=8192)
     #: Cheap, frequent captures for the background screen watcher (see
     #: ScreenAwarenessConfig). Left empty it defers to ``vision``, so nothing
@@ -160,7 +163,7 @@ class ModelsConfig(BaseModel):
                 "llama3.2:3b",
                 "qwen2.5:3b",
             ],
-            "vision": ["qwen2.5vl:7b", "qwen3-vl:8b", "qwen3-vl:4b", "gemma3:4b", "llava:7b",
+            "vision": ["qwen3-vl:8b", "qwen3-vl:4b", "qwen2.5vl:7b", "gemma3:4b", "llava:7b",
                        "llama3.2-vision:11b", "minicpm-v", "moondream"],
             # Only consulted once reasoning/specialist have a model of their
             # own; an empty slot defers to another slot instead.
@@ -566,7 +569,7 @@ class EmailConfig(BaseModel):
 
 #: The shape and defaults of the settings file. A file written by an older
 #: JARVIS is upgraded once when it is loaded (see :func:`_upgrade`).
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 
 class Config(BaseModel):
@@ -836,6 +839,14 @@ _OLD_DEFAULTS: dict[int, dict[tuple[str, ...], list[Any]]] = {
     4: {
         ("models", "general", "num_ctx"): [8192],
         ("models", "reasoning", "num_ctx"): [8192],
+    },
+    # v8.10: Qwen3-VL supersedes Qwen2.5-VL at the same size — better
+    # grounding, faster inference, no extra RAM cost.
+    5: {
+        ("models", "vision", "model"): ["qwen2.5vl:7b"],
+        ("models", "fallbacks", "vision"): [
+            ["qwen2.5vl:7b", "qwen3-vl:8b", "qwen3-vl:4b", "gemma3:4b", "llava:7b",
+             "llama3.2-vision:11b", "minicpm-v", "moondream"]],
     },
 }
 
