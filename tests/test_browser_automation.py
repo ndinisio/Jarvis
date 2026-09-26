@@ -237,6 +237,60 @@ async def test_read_page_manifest_returns_the_elements_it_found(app, ctx, monkey
     assert outcome.data["elements"][0]["handle"] == "jv1"
 
 
+async def test_a_repeated_read_page_manifest_reuses_the_cached_scan(app, ctx, monkeypatch):
+    """The operator already looks again automatically after browse_to
+    (observation.py's OBSERVE_AFTER) — if the model then reads the page
+    itself right after, with nothing having acted on it in between, the DOM
+    re-scan (page_manifest itself, not just settle()'s own already-fast-
+    pathed wait) must not repeat for no new information."""
+    calls = {"n": 0}
+
+    class CountingDriver(_FakeDriver):
+        async def page_manifest(self, *, limit=60, roles=None, offset=0):
+            calls["n"] += 1
+            return await super().page_manifest(limit=limit, roles=roles, offset=offset)
+
+    driver = CountingDriver(manifest={
+        "elements": [{"handle": "jv1", "role": "button", "text": "Add to Basket"}],
+        "url": "https://x.example", "title": "X",
+    })
+    _install_fake_driver(monkeypatch, app.deps, driver)
+    tool = ReadPageManifestTool(app.deps)
+
+    first = await tool.run({"browser": "", "limit": 60, "roles": []}, ctx)
+    second = await tool.run({"browser": "", "limit": 60, "roles": []}, ctx)
+
+    assert first.ok and second.ok
+    assert calls["n"] == 1, "the second read must reuse the cached scan, not repeat it"
+    assert second.data["elements"] == first.data["elements"]
+
+
+async def test_a_read_page_manifest_after_acting_does_not_reuse_the_cache(app, ctx, monkeypatch):
+    """The other half: once something has acted on the page, the cached
+    scan must not be handed back as if it were still current."""
+    from jarvis.tools.browser.observe import acted
+
+    calls = {"n": 0}
+
+    class CountingDriver(_FakeDriver):
+        async def page_manifest(self, *, limit=60, roles=None, offset=0):
+            calls["n"] += 1
+            return await super().page_manifest(limit=limit, roles=roles, offset=offset)
+
+    driver = CountingDriver(manifest={
+        "elements": [{"handle": "jv1", "role": "button", "text": "Add to Basket"}],
+        "url": "https://x.example", "title": "X",
+    })
+    _install_fake_driver(monkeypatch, app.deps, driver)
+    tool = ReadPageManifestTool(app.deps)
+
+    await tool.run({"browser": "", "limit": 60, "roles": []}, ctx)
+    acted(driver)
+    await tool.run({"browser": "", "limit": 60, "roles": []}, ctx)
+
+    assert calls["n"] == 2, "a repeat after acting must scan again, not reuse the stale cache"
+
+
 def test_click_page_element_is_medium_risk_and_the_prompt_shows_the_label_not_a_bare_handle(app):
     """The tool is MEDIUM risk (so it *will* be gated), and its
     ``confirmation_template`` renders the human-readable label the user

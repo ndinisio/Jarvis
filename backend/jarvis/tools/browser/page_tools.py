@@ -34,7 +34,7 @@ from ...security import denylist
 from ...security.permissions import RiskLevel
 from ...surfaces.web.hub import hub_of
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
-from .observe import PageMemory, acted, render_manifest, settle
+from .observe import PageMemory, acted, cached_manifest, remember_manifest, render_manifest, settle
 from .tools import PAGE_KEYS, normalise_key
 
 _JS_PERMISSION_HINT = (
@@ -94,9 +94,18 @@ class ReadPageManifestTool(Tool):
         if not await driver.can_execute_js():
             return ToolResult.failure(f"{driver.app_name}{_JS_PERMISSION_HINT}")
         await settle(driver)
-        manifest = await driver.page_manifest(limit=int(args.get("limit") or 50),
-                                              roles=args.get("roles") or None,
-                                              offset=int(args.get("offset") or 0))
+        limit, roles, offset = (int(args.get("limit") or 50), args.get("roles") or None,
+                                int(args.get("offset") or 0))
+        # settle() just re-verified the page's own mutation signature; a
+        # manifest read under that identical signature and query is still
+        # exactly right, so the DOM re-scan itself — the actual cost here,
+        # not the settle wait — is skipped on the common repeat: the
+        # automatic look after browse_to immediately followed by the model
+        # reading the page again on its own.
+        manifest = cached_manifest(driver, limit=limit, offset=offset, roles=roles)
+        if manifest is None:
+            manifest = await driver.page_manifest(limit=limit, roles=roles, offset=offset)
+            remember_manifest(driver, limit=limit, offset=offset, roles=roles, manifest=manifest)
         # Banking, payments, password vaults: not read, whatever's asked.
         denylist.refuse_site(ctx.config, str(manifest.get("url") or ""))
         elements = manifest.get("elements")

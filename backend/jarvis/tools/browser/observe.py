@@ -237,15 +237,56 @@ async def _quiet(driver, *, quiet_s: float, timeout_s: float, network_idle=None)
     return ""
 
 
+#: The manifest last read for a driver, alongside the settle signature it
+#: was read at and the exact query it answered — reused when the very same
+#: read_page_manifest call repeats before anything acts on the page (most
+#: often the automatic look-again after browse_to, immediately followed by
+#: the model reading the page again itself): settle()'s own signature check
+#: already re-verifies nothing changed, so the DOM re-scan a second read
+#: would otherwise still pay for is skipped too. Cleared everywhere
+#: _settled is, so the two can never drift apart.
+_manifest_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _manifest_key(limit: int, offset: int, roles) -> tuple:
+    return (limit, offset, tuple(sorted(roles)) if roles else ())
+
+
+def cached_manifest(driver, *, limit: int, offset: int, roles) -> dict[str, Any] | None:
+    """The manifest last read for *driver* with this exact query, if
+    settle() just confirmed the page hasn't changed since."""
+    try:
+        record = _settled.get(driver)
+        cached = _manifest_cache.get(driver)
+    except TypeError:
+        return None
+    if record is None or cached is None:
+        return None
+    signature, key, manifest = cached
+    if signature != record[1] or key != _manifest_key(limit, offset, roles):
+        return None
+    return manifest
+
+
+def remember_manifest(driver, *, limit: int, offset: int, roles, manifest: dict[str, Any]) -> None:
+    record = _settled.get(driver)
+    if record is None:
+        return  # nothing to key the cache to — a fresh read next time is safe, just not free
+    with contextlib.suppress(TypeError):
+        _manifest_cache[driver] = (record[1], _manifest_key(limit, offset, roles), manifest)
+
+
 def acted(driver=None) -> None:
     """Something was done to the page (or, with no driver, possibly to any
     page — a key pressed at the system level, a link opened): the next
     settle waits in full."""
     if driver is None:
         _settled.clear()
+        _manifest_cache.clear()
         return
     with contextlib.suppress(TypeError):
         _settled.pop(driver, None)
+        _manifest_cache.pop(driver, None)
 
 
 async def _still_settled(driver) -> bool:

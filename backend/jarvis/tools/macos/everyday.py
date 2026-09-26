@@ -40,6 +40,23 @@ def _browser_name(raw: str) -> str:
     return ""
 
 
+def _osa_failure(fallback: str, result) -> ToolResult:
+    """*fallback* is what to say when the failure is a genuine timeout or a
+    busy app; a detected Automation/Accessibility permission denial is
+    reported for what it actually is instead. "Safari didn't respond"
+    reads as a hung app when the real problem is a permission JARVIS was
+    never granted — no amount of retrying fixes that, and the fix is a
+    System Settings toggle the generic message never points at.
+    """
+    lowered = (result.output or "").lower()
+    if "not allowed" in lowered or "not authorized" in lowered:
+        return ToolResult.failure(
+            "That needs Automation permission JARVIS doesn't have yet. Allow it in System "
+            "Settings → Privacy & Security → Automation, for whatever launched JARVIS "
+            "(Terminal, or the JARVIS app).", detail=result.output)
+    return ToolResult.failure(fallback, detail=result.output)
+
+
 class BrowserTabTool(Tool):
     spec = ToolSpec(
         name="browser_tab",
@@ -76,7 +93,7 @@ class BrowserTabTool(Tool):
             f'tell application "System Events" to keystroke "{key}" using {modifiers}'
         )
         if not result.ok:
-            return ToolResult.failure(f"{browser} didn't respond.", detail=result.output)
+            return _osa_failure(f"{browser} didn't respond.", result)
         return ToolResult(data={"browser": browser, "action": action},
                           summary=f"{_TAB_WORDS[action]} in {browser}.")
 
@@ -116,7 +133,7 @@ class MediaControlTool(Tool):
         action = args["action"]
         result = await self._deps.controller.osascript(f'tell application "{app}" to {self._VERBS[action]}')
         if not result.ok:
-            return ToolResult.failure(f"{app} didn't respond.", detail=result.output)
+            return _osa_failure(f"{app} didn't respond.", result)
         return ToolResult(data={"app": app, "action": action}, summary=f"{self._WORDS[action]} in {app}.")
 
 
@@ -147,7 +164,7 @@ class AppearanceTool(Tool):
             f"set dark mode to {value}"
         )
         if not result.ok:
-            return ToolResult.failure("macOS didn't change its appearance.", detail=result.output)
+            return _osa_failure("macOS didn't change its appearance.", result)
         word = {"dark": "Dark mode is on", "light": "Light mode is on", "toggle": "Switched appearance"}[mode]
         return ToolResult(data={"mode": mode}, summary=f"{word}.")
 
@@ -172,7 +189,7 @@ class LockScreenTool(Tool):
             'tell application "System Events" to keystroke "q" using {control down, command down}'
         )
         if not result.ok:
-            return ToolResult.failure("The screen didn't lock.", detail=result.output)
+            return _osa_failure("The screen didn't lock.", result)
         return ToolResult(data={"locked": True}, summary="Locked.")
 
 

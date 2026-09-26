@@ -209,3 +209,52 @@ async def test_media_control_prefers_spotify_when_it_is_running(app, monkeypatch
     result = await MediaControlTool(app.deps).run({"action": "next", "app": ""}, app.deps.tool_context())
     assert result.ok
     assert scripts == ['tell application "Spotify" to next track']
+
+
+async def test_an_automation_permission_denial_is_named_not_called_unresponsive(app, monkeypatch):
+    """The real live bug: a denied Automation/Accessibility permission came
+    back to the user as "Safari is currently unresponsive" — a message
+    that reads as a hung app and sends the user looking in the wrong
+    place, when the actual, fixable problem is one System Settings toggle.
+    Every everyday.py tool built on AppleScript/System Events shares this
+    fix, so one representative case (browser_tab) stands for all four."""
+    from jarvis.tools.macos.controller import ShellResult
+    from jarvis.tools.macos.everyday import BrowserTabTool
+
+    async def denied(script, *args, **kwargs):
+        return ShellResult(1, "", "System Events got an error: Not authorized to send Apple "
+                                  "events to System Events. (-1743)")
+
+    async def frontmost():
+        return "Safari"
+
+    monkeypatch.setattr(app.controller, "osascript", denied)
+    monkeypatch.setattr(app.controller, "frontmost_app", frontmost)
+    result = await BrowserTabTool(app.deps).run({"action": "new", "browser": ""},
+                                                app.deps.tool_context())
+    assert result.ok is False
+    assert "unresponsive" not in result.summary.lower()
+    assert "didn't respond" not in result.summary.lower()
+    assert "automation" in result.summary.lower() and "permission" in result.summary.lower()
+
+
+async def test_a_genuine_timeout_still_gets_the_ordinary_message(app, monkeypatch):
+    """The other half: a real timeout or busy app must not be misreported
+    as a permission problem it isn't — only a detected denial gets the
+    different wording."""
+    from jarvis.tools.macos.controller import ShellResult
+    from jarvis.tools.macos.everyday import BrowserTabTool
+
+    async def timed_out(script, *args, **kwargs):
+        return ShellResult(-1, "", "timed out after 25.0s", timed_out=True)
+
+    async def frontmost():
+        return "Safari"
+
+    monkeypatch.setattr(app.controller, "osascript", timed_out)
+    monkeypatch.setattr(app.controller, "frontmost_app", frontmost)
+    result = await BrowserTabTool(app.deps).run({"action": "new", "browser": ""},
+                                                app.deps.tool_context())
+    assert result.ok is False
+    assert "didn't respond" in result.summary.lower()
+    assert "automation" not in result.summary.lower()
