@@ -169,6 +169,26 @@ function jarvisFind(handle) {
 }
 """
 
+#: A virtualised list (a live results grid, an infinite-scroll feed, most
+#: React/Vue table components) can reuse the very same DOM node — and so the
+#: same data-jarvis-id — for different content as it scrolls or refreshes.
+#: The manifest stamps each element with the text it read at the time
+#: (data-jarvis-text, alongside data-jarvis-id); this compares that against
+#: what the element reads *now*, so acting on a recycled node is caught the
+#: same way a genuinely removed one already is, instead of silently landing
+#: on whatever the node currently shows.
+_FRESHNESS = """
+function jarvisContentChanged(el, freshText) {
+  var was = el.getAttribute('data-jarvis-text');
+  if (!was) return '';
+  var norm = function(s) { return String(s || '').trim().toLowerCase().replace(/\\s+/g, ' '); };
+  var a = norm(freshText), b = norm(was);
+  if (!a || !b) return '';
+  var n = Math.min(a.length, b.length, 60);
+  return a.slice(0, n) === b.slice(0, n) ? '' : was;
+}
+"""
+
 _MANIFEST_TEMPLATE = """(function(){
 %(classify)s
 %(visible)s
@@ -249,6 +269,7 @@ for (var j = offset; j < found.length && out.length < limit; j++) {
     rect: {x: Math.round(item.rect.left), y: Math.round(item.rect.top),
            w: Math.round(item.rect.width), h: Math.round(item.rect.height)}
   };
+  el.setAttribute('data-jarvis-text', entry.text);
   if (item.role === 'checkbox' || item.role === 'radio' || item.role === 'switch') {
     entry.checked = !!(el.checked || el.getAttribute('aria-checked') === 'true');
   }
@@ -275,14 +296,17 @@ _INSPECT_TEMPLATE = """(function(){
 %(locate)s
 %(classify)s
 %(name)s
+%(freshness)s
 var el = jarvisFind(%(handle)s);
 if (!el) return JSON.stringify({found: false});
 var tag = el.tagName.toLowerCase();
 var role = jarvisRole(el);
 var form = el.form || el.closest('form');
+var text = jarvisText(el, role).slice(0, 160);
 return JSON.stringify({
   found: true, tag: tag, role: role,
-  text: jarvisText(el, role).slice(0, 160),
+  text: text,
+  stale_content: jarvisContentChanged(el, text),
   label: jarvisLabel(el).slice(0, 160),
   value: (tag === 'input' ? String(el.value || '') : '').slice(0, 120),
   id: el.id || '', name: el.getAttribute('name') || '', title: el.getAttribute('title') || '',
@@ -586,7 +610,7 @@ def build_manifest_script(*, limit: int = 60, roles: list[str] | None = None, of
 def build_inspect_script(handle: str) -> str:
     """Describe the element behind *handle* — used by the permission gate."""
     return _INSPECT_TEMPLATE % {"locate": _LOCATE, "classify": _CLASSIFY_ROLE, "name": _NAME,
-                                "handle": json.dumps(str(handle))}
+                                "freshness": _FRESHNESS, "handle": json.dumps(str(handle))}
 
 
 def build_click_script(handle: str) -> str:

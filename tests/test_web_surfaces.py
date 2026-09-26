@@ -484,6 +484,25 @@ async def test_live_a_second_open_to_the_same_url_is_a_no_op(lab):
 
 
 @live
+async def test_live_inspecting_a_recycled_node_flags_the_content_change(lab):
+    """The web-side counterpart to the AirPods bug's handle-drift risk: a
+    virtualised list can reuse the very same DOM node — and so the same
+    data-jarvis-id — for different content as it scrolls or refreshes.
+    manifest_js stamps each element with the text it read (data-jarvis-text)
+    so a later inspect_handle() can catch this the same way a genuinely
+    removed node already is, rather than silently describing whatever the
+    node shows now as if it were still what the model chose."""
+    handle, _ = await _handle(lab, "Save")
+    changed = await lab.run_js(
+        "(function(){var el=document.getElementById('slow');"
+        "el.textContent='Delete';return el.textContent;})()")
+    assert changed == "Delete"
+    info = await lab.inspect_handle(handle)
+    assert info["text"] == "Delete"
+    assert info["stale_content"] == "Save"
+
+
+@live
 async def test_live_scroll_keys_and_back(lab):
     result = await lab.scroll("bottom")
     assert result["ok"] and result["y"] > 0

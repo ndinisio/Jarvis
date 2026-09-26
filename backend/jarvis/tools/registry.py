@@ -180,22 +180,38 @@ class ToolRegistry:
                     target = await tool.inspect(cleaned, ctx)
                 except Exception:  # pragma: no cover - inspection is best effort
                     log.debug("inspect failed for %s", name, exc_info=True)
-            consequential = consequence.classify(name, cleaned, spec, target)
-            # A low-risk tool can still be pointed at something consequential
-            # (opening a checkout URL directly); that call is gated like any
-            # other consequential one.
-            if spec.risk != "low" or consequential:
-                await ctx.permissions.require(
-                    action=name,
-                    risk=spec.risk if spec.risk != "low" else "medium",
-                    summary=_confirmation_text(spec, cleaned, target),
-                    details={"tool": name, "args": _redact(cleaned), "category": spec.category,
-                             **({"target": target} if target else {})},
-                    consequential=consequential,
-                    task_id=ctx.task_id,
-                    record=allowed,
-                )
-            result = await tool.run(cleaned, ctx)
+            stale = (target or {}).get("stale_content")
+            if stale:
+                # Not the model's label being wrong (that's fine — the gate
+                # above already judges the real element, whatever it was
+                # called) but the element *itself* now showing something
+                # different from what it showed the moment its handle was
+                # read: a virtualised list reusing the same node for
+                # different content (a live results grid, an infinite-scroll
+                # feed) as it scrolled or refreshed in between. Acting on it
+                # would silently land on today's content, not the row the
+                # model actually chose.
+                result = ToolResult.failure(
+                    f"This now reads “{target.get('text')}”, not “{stale}” as it was last read — "
+                    "its content has changed since then. Look again before acting on it.",
+                    detail="stale_content")
+            else:
+                consequential = consequence.classify(name, cleaned, spec, target)
+                # A low-risk tool can still be pointed at something consequential
+                # (opening a checkout URL directly); that call is gated like any
+                # other consequential one.
+                if spec.risk != "low" or consequential:
+                    await ctx.permissions.require(
+                        action=name,
+                        risk=spec.risk if spec.risk != "low" else "medium",
+                        summary=_confirmation_text(spec, cleaned, target),
+                        details={"tool": name, "args": _redact(cleaned), "category": spec.category,
+                                 **({"target": target} if target else {})},
+                        consequential=consequential,
+                        task_id=ctx.task_id,
+                        record=allowed,
+                    )
+                result = await tool.run(cleaned, ctx)
         except Cancelled:
             result = ToolResult.failure("Stopped.", detail="cancelled")
         except ConfirmationDeclined as exc:

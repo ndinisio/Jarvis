@@ -185,10 +185,11 @@ def _async_return(value):
 class _FakeDriver:
     app_name = "Safari"
 
-    def __init__(self, *, js_ok=True, manifest=None, action_result=None):
+    def __init__(self, *, js_ok=True, manifest=None, action_result=None, inspect_result=None):
         self._js_ok = js_ok
         self._manifest = manifest or {"elements": [], "url": "", "title": ""}
         self._action_result = action_result if action_result is not None else {"ok": True}
+        self._inspect_result = inspect_result
 
     async def can_execute_js(self):
         return self._js_ok
@@ -203,7 +204,7 @@ class _FakeDriver:
         return self._manifest
 
     async def inspect_handle(self, handle):
-        return {"found": False}
+        return self._inspect_result if self._inspect_result is not None else {"found": False}
 
     async def click_handle(self, handle):
         return self._action_result
@@ -258,6 +259,29 @@ async def test_click_page_element_reports_a_stale_handle_clearly(app, ctx, monke
     outcome = await tool.run({"handle": "jv9", "label": "Add to Basket", "browser": ""}, ctx)
     assert outcome.ok is False
     assert "stale handle" in (outcome.error or "")
+
+
+async def test_click_page_element_refuses_a_recycled_element_via_the_registry(app, ctx, monkeypatch):
+    """The registry's own generic check (registry.py, built on the same
+    ``inspect()`` call the permission gate already makes for every
+    medium-risk tool): a handle that still resolves but whose element now
+    reads differently from when it was listed — a virtualised results grid
+    or infinite-scroll feed reusing the same node for different content,
+    most often — is refused before the click ever runs. Unlike a mismatch
+    against the model's own (unreliable, sometimes a deliberate paraphrase —
+    see the label-spoof safety test) label, this compares the element
+    against *itself* across time, so it can't be satisfied by trusting
+    either label; it must go through the registry's ``call()``, not the
+    tool's own ``run()``, since that's where the check lives."""
+    driver = _FakeDriver(inspect_result={"found": True, "text": "Recipes",
+                                         "stale_content": "Holiday ideas"})
+    _install_fake_driver(monkeypatch, app.deps, driver)
+    app.config_store.update({"security": {"auto_approve": ["low", "medium"]}})
+    result = await app.deps.registry.call(
+        "click_page_element", {"handle": "jv9", "label": "Holiday ideas"}, ctx)
+    assert result.ok is False
+    assert result.error == "stale_content"
+    assert "Recipes" in result.summary and "Holiday ideas" in result.summary
 
 
 async def test_fill_page_field_reports_whether_it_also_submitted(app, ctx, monkeypatch):
