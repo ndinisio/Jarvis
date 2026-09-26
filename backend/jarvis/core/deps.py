@@ -8,11 +8,12 @@ are trivial to construct in tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .config import Config, ConfigStore
 from .events import EventBus
+from .power import PowerState
 from .telemetry import Telemetry
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -53,6 +54,9 @@ class Deps:
     audit: Any = None
     #: ``async () -> bytes | None``: the page JARVIS just acted on, for the audit.
     audit_picture: Any = None
+    #: Thermal/Low Power Mode signal, reported by the macOS app shell (see
+    #: core/power.py) — the screen watcher throttles on it. Never persisted.
+    power: PowerState = field(default_factory=PowerState)
 
     @property
     def config(self) -> Config:

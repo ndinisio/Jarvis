@@ -7,6 +7,9 @@ changes does the watcher spend a real vision-model call (via
 ``tools/screen/tools.py: WatchScreenTool``, throttled again on its own,
 independent cooldown). See ``core/config.py: ScreenAwarenessConfig``.
 
+That cooldown is itself backed off, or the vision call skipped outright,
+under thermal pressure or Low Power Mode — see ``core/power.py``.
+
 Modelled directly on ``voice/manager.py: VoiceManager`` — the established
 pattern in this codebase for a self-managed background loop with its own
 start()/stop()/reconfigure() lifecycle, guarded against a duplicate loop the
@@ -170,10 +173,13 @@ class ScreenWatcher:
         if not app or signal == self._last_signal:
             return
         self._last_signal = signal
+        if self._deps.power.paused():
+            return
 
         now = time.monotonic()
-        if (self._last_vision_call is not None
-                and now - self._last_vision_call < self._deps.config.screen_awareness.min_vision_interval_s):
+        min_interval = (self._deps.config.screen_awareness.min_vision_interval_s
+                        * self._deps.power.vision_interval_multiplier())
+        if self._last_vision_call is not None and now - self._last_vision_call < min_interval:
             return
         self._last_vision_call = now
         await self._capture()

@@ -75,6 +75,7 @@ so. Quit that one first.
 | `HotKey.swift` | the ⌥Space shortcut (Carbon hot keys — no Accessibility permission needed) |
 | `Notifier.swift` | notifications, only while the JARVIS window isn't the one you're using |
 | `SetupWindow.swift` | first-run `scripts/setup.sh`, with its output |
+| `PowerObserver.swift` | watches thermal state and Low Power Mode, reports changes to the backend (`POST /api/system/power-state`) so the screen watcher can back off or pause under real pressure — see `backend/jarvis/core/power.py` |
 
 The page's side is `frontend/src/lib/native.ts`: it passes on confirmation
 requests and finished tasks, and exposes push-to-talk to the shortcut. In a

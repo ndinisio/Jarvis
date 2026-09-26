@@ -1061,7 +1061,11 @@ that changes anything.
   constant poll of which app/window is frontmost that only ever gates
   occasional, cooldown-limited vision-model calls — never literally
   continuous inference, and never shown in the interface unless you ask or
-  turn on its own narration toggle.
+  turn on its own narration toggle. Running as the Mac app, that cooldown is
+  itself backed off under thermal pressure, and the vision call paused
+  outright under Low Power Mode or real overheating — the app shell reports
+  `ProcessInfo`'s thermal state for exactly this (`core/power.py`); nothing
+  to configure, and nothing persisted.
 * **Only the JARVIS window can drive JARVIS.** Each run has its own session
   token, carried by the link it opens; the API and the event stream refuse
   anything without it, and the event stream refuses pages from other sites

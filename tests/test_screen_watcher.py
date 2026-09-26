@@ -119,6 +119,48 @@ async def test_poll_survives_a_controller_error(app, monkeypatch):
     assert calls == []
 
 
+async def test_low_power_mode_pauses_the_vision_call_but_not_the_poll(app, monkeypatch):
+    """Low Power Mode is the user's own explicit request to cut power draw —
+    the vision call must be skipped outright, not just slowed down."""
+    signal = _signal(app, monkeypatch)
+    calls = _enable_and_stub_watch_screen(app, monkeypatch)
+    app.deps.power.update(low_power_mode=True)
+    watcher = ScreenWatcher(app.deps)
+
+    signal.app, signal.window = "Safari", "1"
+    await watcher._poll_once()
+    assert calls == []
+    assert watcher._last_signal == ("Safari", "1"), "the cheap poll itself still runs"
+
+
+async def test_critical_thermal_state_pauses_the_vision_call(app, monkeypatch):
+    signal = _signal(app, monkeypatch)
+    calls = _enable_and_stub_watch_screen(app, monkeypatch)
+    app.deps.power.update(thermal_state="critical")
+    watcher = ScreenWatcher(app.deps)
+
+    signal.app, signal.window = "Safari", "1"
+    await watcher._poll_once()
+    assert calls == []
+
+
+async def test_serious_thermal_state_backs_off_the_cooldown_instead_of_pausing(app, monkeypatch):
+    """A "serious" thermal state must not block the first capture — only
+    stretch the cooldown before the next one is allowed."""
+    signal = _signal(app, monkeypatch)
+    calls = _enable_and_stub_watch_screen(app, monkeypatch, min_vision_interval_s=1.0)
+    app.deps.power.update(thermal_state="serious")
+    watcher = ScreenWatcher(app.deps)
+
+    signal.app, signal.window = "Safari", "1"
+    await watcher._poll_once()
+    assert len(calls) == 1, "the backoff throttles the *next* call, not the current one"
+
+    signal.app, signal.window = "Mail", "2"  # inside the un-throttled 1.0s cooldown
+    await watcher._poll_once()
+    assert len(calls) == 1, "the serious-state multiplier must stretch this cooldown far past 1.0s"
+
+
 async def test_vision_call_is_cooled_down_independent_of_the_poll(app, monkeypatch):
     """Two rapid signal changes within one cooldown window must only spend
     one real vision-model call."""

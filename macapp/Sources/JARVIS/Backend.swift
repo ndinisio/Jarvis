@@ -172,6 +172,24 @@ final class Backend {
         }
     }
 
+    /// Tell the backend about a thermal/Low Power Mode change (see
+    /// core/power.py) — best-effort, fire-and-forget: if this request is
+    /// lost, the next change (or the one PowerObserver sends right after
+    /// startup) reports the current state anyway, so nothing needs a retry.
+    func reportPowerState(thermalState: String, lowPowerMode: Bool) {
+        guard state == .running,
+              let body = try? JSONSerialization.data(withJSONObject: [
+                  "thermal_state": thermalState, "low_power_mode": lowPowerMode,
+              ])
+        else { return }
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/system/power-state")!)
+        request.httpMethod = "POST"
+        request.setValue(token, forHTTPHeaderField: "x-jarvis-token")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
     // MARK: - Details
 
     private func exited(_ finished: Process) {

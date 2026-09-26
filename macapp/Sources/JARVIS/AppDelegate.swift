@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusMenuActions {
     private var hotKey: HotKey?
     private let notifier = Notifier()
     private var setup: SetupWindowController?
+    private let powerObserver = PowerObserver()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
@@ -19,6 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusMenuActions {
         notifier.onOpen = { [weak self] in self?.showJarvis() }
         hotKey = HotKey { [weak self] in self?.pushToTalk() }
         window.onPageMessage = { [weak self] message in self?.pageSaid(message) }
+        powerObserver.onChange = { [weak self] thermalState, lowPowerMode in
+            self?.backend?.reportPowerState(thermalState: thermalState, lowPowerMode: lowPowerMode)
+        }
+        powerObserver.start()
         window.showStarting()
         window.bringForward()
         boot()
@@ -114,6 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusMenuActions {
         guard let backend else { return }
         if ok {
             window.load(backend.interfaceURL)
+            // A notification only fires on the next change; the Mac can
+            // already be under thermal pressure or in Low Power Mode before
+            // JARVIS ever starts, so report where things stand right now.
+            powerObserver.report()
             return
         }
         var detail = "The log (menu bar item → Show Log) has the details."

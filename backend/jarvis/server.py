@@ -255,6 +255,20 @@ def create_app(jarvis: JarvisApp | None = None, *, host: str | None = None,
     async def models() -> dict[str, Any]:
         return await jarvis.models.status()
 
+    @app.post("/api/system/power-state")
+    async def power_state(request: Request) -> dict[str, Any]:
+        """The macOS app shell's own report of ProcessInfo.thermalState and
+        Low Power Mode — its only channel into the backend process it
+        spawned. Never persisted; see core/power.py."""
+        body = await request.json()
+        try:
+            jarvis.deps.power.update(
+                thermal_state=body.get("thermal_state"), low_power_mode=body.get("low_power_mode"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return {"ok": True}
+
     @app.post("/api/ask")
     async def ask(request: Request) -> dict[str, Any]:
         body = await request.json()

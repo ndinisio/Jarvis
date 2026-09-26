@@ -78,6 +78,23 @@ def test_tasks_and_telemetry_endpoints(client):
     assert "turn.total" in telemetry["summary"]
 
 
+def test_power_state_endpoint_updates_the_shared_state(client, app):
+    """The macOS app shell's only channel for reporting ProcessInfo's
+    thermal state / Low Power Mode (see core/power.py) — never persisted to
+    config, so a plain 200 with the in-memory state changed is the contract."""
+    response = client.post("/api/system/power-state",
+                           json={"thermal_state": "serious", "low_power_mode": True})
+    assert response.json() == {"ok": True}
+    assert app.deps.power.thermal_state == "serious"
+    assert app.deps.power.low_power_mode is True
+
+
+def test_power_state_endpoint_rejects_an_unknown_thermal_state(client, app):
+    response = client.post("/api/system/power-state", json={"thermal_state": "melting"})
+    assert response.status_code == 400
+    assert app.deps.power.thermal_state == "nominal", "a rejected update must not partially apply"
+
+
 def test_websocket_handshake_comes_first(client):
     with client.websocket_connect(_ws(client)) as socket:
         hello = socket.receive_json()
@@ -147,6 +164,7 @@ def test_unbuilt_interface_explains_itself(app, monkeypatch):
     ("post", "/api/ask"),
     ("patch", "/api/config"),
     ("delete", "/api/memory/conversation"),
+    ("post", "/api/system/power-state"),
 ])
 def test_the_api_refuses_callers_without_the_session_token(app, method, path):
     with TestClient(create_app(app)) as anonymous:
