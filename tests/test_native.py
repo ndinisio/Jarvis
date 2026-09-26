@@ -363,6 +363,24 @@ async def test_a_stale_handle_says_to_look_again(notes):
         await surface.press("ax999")
 
 
+async def test_a_recycled_row_refuses_to_be_pressed_as_if_unchanged(notes):
+    """The handle-drift finding: a virtualised list (Notes' own note list
+    here, but the same shape as Mail, Messages, Finder list view, or almost
+    any Electron app) can reuse the very same AX element for different
+    content as the list scrolls or refreshes. ``alive`` (the test above)
+    covers the element vanishing outright; this covers the element
+    surviving but silently showing something else — the handle still
+    resolves, so only comparing what it shows now against what the model
+    read catches it."""
+    surface, _, _, parts = notes
+    handle = await _handle(surface, "Holiday ideas · Lisbon")
+    cell = parts["rows"][1].children[0]
+    cell.children[0].attrs["AXValue"] = "Recipes"
+    cell.children[1].attrs["AXValue"] = "risotto"
+    with pytest.raises(NativeError, match="now shows"):
+        await surface.press(handle)
+
+
 async def test_typing_focuses_the_field_selects_it_and_types(notes):
     surface, backend, recorder, parts = notes
     handle = next(c.handle for c in (await surface.read())[0].controls if c.role == "search field")

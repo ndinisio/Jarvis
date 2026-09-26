@@ -57,6 +57,12 @@ class NativeSurface:
         self._handles: dict[str, Any] = {}
         self._by_key: dict[int, list[tuple[Any, str]]] = {}
         self._handle_app: dict[str, int] = {}
+        #: The label last read for each handle — how a stale AX node reused
+        #: for different content (a virtualised table row, common in Mail,
+        #: Messages and Finder list view) gets caught: the handle itself
+        #: stays valid, since it's the same element, but what it now shows
+        #: has silently changed since the model read it. See _resolve().
+        self._fingerprints: dict[str, str] = {}
         self._counter = 0
         self._last: dict[int, WindowSnapshot] = {}
         self._marks: list[Mark] = []
@@ -135,7 +141,7 @@ class NativeSurface:
                            max_listed=max_listed, blockers=dialogs)
         snap.menus = self._menu_titles(application)
         for control in snap.controls:
-            control.handle = self._handle_for(control.ref, pid)
+            control.handle = self._handle_for(control.ref, pid, control.label)
         self.last_app = name
         return snap
 
@@ -453,22 +459,25 @@ class NativeSurface:
                 return
         self.input.press(resolve_key("escape"))
 
-    def _handle_for(self, element: Any, pid: int) -> str:
+    def _handle_for(self, element: Any, pid: int, label: str = "") -> str:
         backend = self.backend
         key = backend.key(element)
         for known, handle in self._by_key.get(key, []):
             if backend.same(known, element):
+                self._fingerprints[handle] = label
                 return handle
         if self._counter >= MAX_HANDLES:
             self._handles.clear()
             self._by_key.clear()
             self._handle_app.clear()
+            self._fingerprints.clear()
             self._counter = 0
         self._counter += 1
         handle = f"ax{self._counter}"
         self._handles[handle] = element
         self._by_key.setdefault(key, []).append((element, handle))
         self._handle_app[handle] = pid
+        self._fingerprints[handle] = label
         return handle
 
     def _resolve(self, handle: str) -> tuple[Any, int]:
@@ -477,9 +486,22 @@ class NativeSurface:
         element = self._handles.get(cleaned)
         if element is None:
             raise NativeError(f"There's no control [{cleaned}] — read_window to see the current ones.")
-        attrs = self.backend.attributes(element, ("AXRole",))
-        if not attrs.get("AXRole"):
+        attrs = self.backend.attributes(element, ax.ATTRIBUTES)
+        role = str(attrs.get("AXRole") or "")
+        if not role:
             raise NativeError(f"[{cleaned}] isn't on screen any more — read_window again.")
+        expected = self._fingerprints.get(cleaned, "")
+        if expected:
+            current = ax.control_label(self.backend, element, role, attrs)
+            if current and current != expected:
+                # Same AX element, different content: a recycled row/cell in
+                # a virtualised list (Mail, Messages, Finder list view, most
+                # Electron apps), not a genuinely stale handle — but acting
+                # on it now would hit whatever it shows today, not what the
+                # model actually chose.
+                raise NativeError(
+                    f"[{cleaned}] now shows “{current}”, not “{expected}” as last read — its content "
+                    "has changed since then. read_window again before acting on it.")
         pid = self._handle_app.get(cleaned, 0)
         window = self.backend.attribute(element, "AXWindow")
         self._guard(self._app_name(pid), _title(self.backend, window) if window is not None else "")

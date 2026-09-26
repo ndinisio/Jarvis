@@ -211,6 +211,24 @@ def label_for(attrs: dict[str, Any], texts_inside: list[str] | None = None,
     return _text(attrs.get("AXHelp")) or _text(attrs.get("AXPlaceholderValue"))
 
 
+def control_label(backend: AXBackend, element: Any, role: str, attrs: dict[str, Any]) -> str:
+    """The label :func:`snapshot` would give *element* right now.
+
+    Factored out so a later freshness check (:class:`~..surface.NativeSurface`,
+    which keeps a handle stable across re-reads of the *same* element) can
+    recompute a control's current label the identical way it was first
+    computed, rather than a simplified approximation that would flag a
+    perfectly unchanged row or field as "different" merely because it takes
+    the short way to a label a plain :func:`label_for` call can't reach (a
+    row's name lives in its nested text, not on the row itself).
+    """
+    inside = _texts_inside(backend, element) if role in {"AXRow", "AXCell"} else None
+    title_text = ""
+    if role in EDITABLE and not _text(attrs.get("AXTitle")) and not _text(attrs.get("AXDescription")):
+        title_text = _title_element_text(backend, element)
+    return label_for(attrs, inside, title_text)
+
+
 def snapshot(backend: AXBackend, window: Any, *, app: str = "", pid: int = 0,
              max_listed: int = MAX_LISTED, offset: int = 0, deadline_s: float = DEADLINE_S,
              blockers: list[Any] | None = None) -> WindowSnapshot:
@@ -262,15 +280,10 @@ def snapshot(backend: AXBackend, window: Any, *, app: str = "", pid: int = 0,
                 if text and not in_row and len(texts) < MAX_TEXTS and visible:
                     texts.append(text[:100])
             elif _interesting(role, attrs, backend, element):
-                inside = _texts_inside(backend, element) if role in {"AXRow", "AXCell"} else None
-                title_text = ""
-                if role in EDITABLE and not _text(attrs.get("AXTitle")) \
-                        and not _text(attrs.get("AXDescription")):
-                    title_text = _title_element_text(backend, element)
                 control = Control(
                     ref=element, ax_role=role, subrole=subrole,
                     role=SUBROLE_NAMES.get(subrole) or ROLE_NAMES.get(role, role.removeprefix("AX").lower()),
-                    label=label_for(attrs, inside, title_text),
+                    label=control_label(backend, element, role, attrs),
                     value=_value_text(role, attrs),
                     placeholder=_text(attrs.get("AXPlaceholderValue")),
                     enabled=attrs.get("AXEnabled") is not False,
