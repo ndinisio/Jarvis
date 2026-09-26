@@ -136,6 +136,27 @@ def test_three_failures_in_a_row_call_for_a_replan():
     assert not stuck.needs_replan and stuck.replans == 1
 
 
+def test_repeated_replanning_stops_suggesting_more_attempts():
+    """A task genuinely stuck on something no strategy will fix (a permanent
+    CAPTCHA, a control that structurally never appears) must not just cycle
+    failure-then-replan until the budget runs out — after enough replans
+    the instruction points at ask_user/give_up instead of yet another
+    variation."""
+    from jarvis.intelligence.operator.stuck import ESCALATE_AFTER_REPLANS
+
+    stuck = StuckDetector()
+    for _ in range(ESCALATE_AFTER_REPLANS):
+        for _ in range(REPLAN_AFTER):
+            stuck.record("", "click_element", {"label": "x"}, False)
+        assert "different approach" in stuck.replanned()
+
+    for _ in range(REPLAN_AFTER):
+        stuck.record("", "click_element", {"label": "x"}, False)
+    escalated = stuck.replanned()
+    assert "ask_user" in escalated and "give_up" in escalated
+    assert stuck.replans == ESCALATE_AFTER_REPLANS + 1
+
+
 # ---------------------------------------------------------------------------
 # the context window
 # ---------------------------------------------------------------------------

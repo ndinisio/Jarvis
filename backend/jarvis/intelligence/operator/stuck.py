@@ -21,6 +21,13 @@ from collections import Counter
 
 #: Consecutive failed actions that call for a re-plan.
 REPLAN_AFTER = 3
+#: Replans on one run before the instruction stops suggesting yet another
+#: approach and starts pointing at the tools built for exactly this
+#: situation — ask_user or give_up — rather than let a genuinely stuck task
+#: burn its whole budget cycling failure-then-replan against something no
+#: strategy will fix (a permanent CAPTCHA, a control that structurally never
+#: appears).
+ESCALATE_AFTER_REPLANS = 2
 
 
 def _digest(text: str) -> str:
@@ -75,6 +82,11 @@ class StuckDetector:
         """Called when a re-plan is issued; returns the instruction for it."""
         self._failures_in_row = 0
         self.replans += 1
+        if self.replans > ESCALATE_AFTER_REPLANS:
+            return ("This still isn't working after several genuinely different approaches. Don't "
+                    "try yet another variation: call ask_user if a question would unblock it, or "
+                    "give_up with what's actually stopping it — that's a more useful outcome than "
+                    "spending the rest of this task's budget on further attempts.")
         return ("The last few attempts have all failed. Stop and think: what else could get this "
                 "done? Choose a genuinely different approach rather than another variation of the "
                 "same one.")
