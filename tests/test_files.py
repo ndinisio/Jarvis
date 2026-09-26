@@ -76,6 +76,54 @@ async def test_delete_moves_to_workspace_trash(app, ctx):
     assert (app.sandbox.root / ".trash" / "scratch.txt").exists()
 
 
+async def test_move_onto_an_existing_file_is_refused_not_overwritten(app, ctx):
+    """Two source files sharing a name landing in the same folder during a
+    reorganisation must not quietly destroy one of them — the collision
+    delete() already avoids for the trash, move() must not create for a
+    destination the user actually chose."""
+    app.config_store.update({"security": {"auto_approve": ["low", "medium", "high"]}})
+    registry = app.deps.registry
+    await registry.call("write_file", {"path": "old/report.md", "content": "the real one"}, ctx)
+    await registry.call("write_file", {"path": "new/report.md", "content": "already there"}, ctx)
+
+    result = await registry.call(
+        "move_file", {"source": "old/report.md", "destination": "new/report.md"}, ctx)
+
+    assert not result.ok
+    assert (app.sandbox.root / "old" / "report.md").exists(), "the source must be untouched"
+    assert (app.sandbox.root / "new" / "report.md").read_text() == "already there"
+
+
+async def test_move_onto_an_existing_file_with_overwrite_replaces_it(app, ctx):
+    app.config_store.update({"security": {"auto_approve": ["low", "medium", "high"]}})
+    registry = app.deps.registry
+    await registry.call("write_file", {"path": "old/report.md", "content": "the real one"}, ctx)
+    await registry.call("write_file", {"path": "new/report.md", "content": "already there"}, ctx)
+
+    result = await registry.call(
+        "move_file", {"source": "old/report.md", "destination": "new/report.md",
+                     "overwrite": True}, ctx)
+
+    assert result.ok
+    assert not (app.sandbox.root / "old" / "report.md").exists()
+    assert (app.sandbox.root / "new" / "report.md").read_text() == "the real one"
+
+
+async def test_move_into_a_folder_with_no_same_named_file_is_not_a_collision(app, ctx):
+    """Moving *into* an existing folder is the ordinary case, not a
+    collision — only a same-named file already inside it is."""
+    app.config_store.update({"security": {"auto_approve": ["low", "medium", "high"]}})
+    registry = app.deps.registry
+    await registry.call("write_file", {"path": "old/report.md", "content": "hi"}, ctx)
+    await registry.call("write_file", {"path": "archive/other.md", "content": "unrelated"}, ctx)
+
+    result = await registry.call(
+        "move_file", {"source": "old/report.md", "destination": "archive"}, ctx)
+
+    assert result.ok
+    assert (app.sandbox.root / "archive" / "report.md").exists()
+
+
 async def test_create_note_is_dated(app, ctx):
     result = await app.deps.registry.call(
         "create_note", {"content": "The deploy is on Friday."}, ctx

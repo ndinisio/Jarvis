@@ -223,8 +223,21 @@ class FileSandbox:
                         return hits
         return hits
 
-    def move(self, source: Path, destination: Path) -> Path:
+    def move(self, source: Path, destination: Path, *, overwrite: bool = False) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # A file already at the real target — the destination itself, or (if
+        # destination is a folder) same-named inside it, exactly where
+        # shutil.move would actually put it — is refused rather than
+        # silently replaced: two source files sharing a name landing in the
+        # same folder during a reorganisation must not quietly destroy one
+        # of them. delete() avoids this by finding a free name in the trash;
+        # a move's destination is chosen on purpose, so asking rather than
+        # renaming around the collision is the honest default.
+        target = destination / source.name if destination.is_dir() else destination
+        if target.exists() and not overwrite:
+            raise SandboxViolation(
+                f"“{target.name}” already exists there — say overwrite if that's what you want, "
+                "or choose a different destination.", detail=str(target))
         return Path(shutil.move(str(source), str(destination)))
 
     def delete(self, path: Path) -> bool:

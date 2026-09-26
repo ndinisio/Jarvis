@@ -202,7 +202,11 @@ class MoveFileTool(_SandboxTool):
         description="Move or rename a file inside the permitted areas",
         parameters={
             "type": "object",
-            "properties": {"source": {"type": "string"}, "destination": {"type": "string"}},
+            "properties": {
+                "source": {"type": "string"}, "destination": {"type": "string"},
+                "overwrite": {"type": "boolean", "default": False,
+                              "description": "replace a file already at the destination"},
+            },
             "required": ["source", "destination"],
         },
         risk=RiskLevel.MEDIUM,
@@ -217,7 +221,7 @@ class MoveFileTool(_SandboxTool):
         )
         if not source.exists():
             raise SandboxViolation("I couldn't find that file.", detail=str(source))
-        final = self.sandbox.move(source, destination)
+        final = self.sandbox.move(source, destination, overwrite=bool(args.get("overwrite")))
         return ToolResult(data={"path": str(final)}, summary=f"Moved to {final.name}.")
 
 
