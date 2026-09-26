@@ -3,9 +3,12 @@
 Local Whisper, three ways. On Apple Silicon the best is MLX Whisper — the
 large-v3-turbo model on the GPU, accurate on casual speech and faster than
 real time. faster-whisper (CTranslate2, CPU) is the portable default, and
-whisper.cpp (Metal) is supported for users who already have it. Everything
-is optional: with no STT installed, JARVIS still works by text and can fall
-back to the browser's own recogniser.
+whisper.cpp is supported for users who already have it — on Metal by
+default, or on the Neural Engine if a Core ML encoder sits next to the
+model (whisper.cpp's own convention; JARVIS only detects and reports it,
+see WhisperCppSTT.coreml_active). Everything is optional: with no STT
+installed, JARVIS still works by text and can fall back to the browser's
+own recogniser.
 
 Every engine can be given a *vocabulary* — installed app names, command
 words, the user's own additions — passed to Whisper as its initial prompt,
@@ -122,6 +125,19 @@ class FasterWhisperSTT(STTEngine):
         return await asyncio.to_thread(run)
 
 
+def _coreml_encoder_path(model_path: str) -> Path | None:
+    """Where whisper.cpp looks for a Core ML encoder next to a ggml model —
+    its own naming convention (a compiled ``.mlmodelc`` bundle, sibling to
+    the ``.bin``), not anything JARVIS invents. ``whisper-cli`` auto-detects
+    and uses it with no flag needed; this exists purely so JARVIS can tell
+    the user whether theirs actually will (see README for how to build one:
+    it needs whisper.cpp's own ``generate-coreml-model.sh``)."""
+    path = Path(model_path)
+    if not path.name.endswith(".bin"):
+        return None
+    return path.with_name(f"{path.name[:-len('.bin')]}-encoder.mlmodelc")
+
+
 class WhisperCppSTT(STTEngine):
     name = "whispercpp"
 
@@ -130,6 +146,14 @@ class WhisperCppSTT(STTEngine):
         self.model_path = model_path
         self.language = language
 
+    @property
+    def coreml_active(self) -> bool:
+        """Whether transcription will run on the Neural Engine rather than
+        Metal — real, not assumed: it's true only when a Core ML encoder
+        actually sits next to the configured model."""
+        encoder = _coreml_encoder_path(self.model_path)
+        return encoder is not None and encoder.exists()
+
     async def available(self) -> tuple[bool, str]:
         import shutil
 
@@ -137,7 +161,9 @@ class WhisperCppSTT(STTEngine):
             return False, f"{self.binary} isn't on PATH"
         if not self.model_path or not Path(self.model_path).exists():
             return False, "whispercpp_model_path isn't set to a GGML model"
-        return True, "ok"
+        if self.coreml_active:
+            return True, "ok, using the Core ML encoder (Neural Engine)"
+        return True, "ok, Metal only — no Core ML encoder found next to the model (see README)"
 
     async def transcribe(self, audio: Any, sample_rate: int = SAMPLE_RATE) -> str:
         samples = _as_float32(audio)

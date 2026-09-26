@@ -697,6 +697,7 @@ yourself is kept.
 | `sounddevice`, `numpy` | microphone capture | voice only |
 | `faster-whisper` | local speech recognition (CPU) | voice only |
 | `mlx-whisper` | local speech recognition on the Apple Silicon GPU (large-v3-turbo) | optional, recommended |
+| [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | local speech recognition, optionally on the Neural Engine (Core ML) | optional, BYO build |
 | `openwakeword` | offline wake-word detection | voice only |
 | `pillow` | screenshot downscaling (faster vision) | optional |
 | `playwright` | JARVIS Chrome — its own browser for web errands (uses your installed Chrome) | optional, recommended |
@@ -885,6 +886,24 @@ mishears too much everyday phrasing). JARVIS teaches the recogniser this
 Mac's app names and its own command words at start-up, as Whisper's initial
 prompt, so "open Spotify" isn't heard as "open spot if I"; add your own words
 (names, products) in `voice.stt_vocabulary`. Models download on first use.
+
+**whisper.cpp (optional, Neural Engine).** Set `voice.stt_engine` to
+`"whispercpp"` to use [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+instead — not part of `auto`, since it needs a manual build, unlike MLX/
+faster-whisper's plain `pip install`. Point `whispercpp_binary` at the
+`whisper-cli` executable and `whispercpp_model_path` at a ggml `.bin`
+model. Built with its own Core ML support (whisper.cpp's
+`models/generate-coreml-model.sh`, which needs `coremltools`) and given
+that model's compiled encoder — `whisper-cli` expects it as a sibling
+`ggml-<model>-encoder.mlmodelc` directory next to the `.bin` file, its own
+naming convention, nothing JARVIS invents — transcription runs on the
+**Neural Engine** instead of Metal: far more power-efficient per
+transcription, and it doesn't compete with an LLM for GPU/unified-memory
+bandwidth the way MLX Whisper does. JARVIS only detects whether that
+sibling file is actually there and reports which backend is really
+running; it doesn't build or fetch it for you. Check which one you're
+getting from the voice status (`stt.note`): "ok, using the Core ML encoder
+(Neural Engine)" or "ok, Metal only — no Core ML encoder found".
 
 **Speech output.** macOS `say`, with the British voice *Daniel* by default. Any
 installed system voice works — Settings lists them. Off macOS, replies are
