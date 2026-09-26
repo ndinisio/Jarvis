@@ -4,9 +4,11 @@ Two offline strategies, chosen by configuration:
 
 ``openwakeword``  a small neural detector with a pretrained "hey jarvis" model.
                   Continuous, low CPU, ~200 ms latency.
-``whisper``       energy-gated chunks transcribed by the local Whisper model and
-                  matched against the wake word. No extra dependency, slightly
-                  slower, and useful when a custom wake word is wanted.
+``whisper``       Silero-VAD-gated chunks transcribed by the local Whisper model and
+                  matched against the wake word. No extra dependency (the VAD is
+                  bundled with openwakeword, already required either way), slightly
+                  slower than openwakeword, and useful when a custom wake word is
+                  wanted.
 
 Both run entirely on the machine — audio never leaves the Mac to decide whether
 the user said "Jarvis".
@@ -156,19 +158,31 @@ class OpenWakeWordDetector(WakeWordDetector):
 
 
 class WhisperWakeDetector(WakeWordDetector):
-    """Energy-gated keyword spotting using the local STT model.
+    """Keyword spotting using the local STT model, gated by Silero VAD.
 
-    Accumulates ~1.5 s of speech-level audio, transcribes it and looks for the
-    wake word. Costs more CPU than openWakeWord but needs no extra dependency
-    and supports any wake phrase.
+    Accumulates ~1.5 s of speech, transcribes it and looks for the wake
+    word. Costs more CPU than openWakeWord but supports any wake phrase.
+
+    The gate deciding when a phrase has started/ended prefers Silero VAD —
+    a real speech/non-speech classifier, via openwakeword's own bundled
+    model (no extra dependency: openwakeword is already required for every
+    voice feature) — over a fixed volume threshold, which is fragile: a
+    quiet room and a noisy one need different levels, and a loud non-speech
+    sound (a door, a fan) trips it just as readily as a voice. Falls back
+    to the volume threshold, once, if the VAD can't be loaded, rather than
+    going silent — and doesn't retry it every frame after that.
     """
 
     name = "whisper"
 
-    def __init__(self, stt, wake_word: str = "jarvis", threshold: float = 0.012):
+    def __init__(self, stt, wake_word: str = "jarvis", energy_threshold: float = 0.012,
+                 vad_threshold: float = 0.5):
         self._stt = stt
         self.wake_word = (wake_word or "jarvis").lower().strip()
-        self._energy_threshold = threshold
+        self._energy_threshold = energy_threshold
+        self._vad_threshold = vad_threshold
+        self._vad: Any = None
+        self._vad_broken = False
         self._buffer: list[Any] = []
         self._pending: float = 0.0
         self.last_transcript = ""
@@ -176,16 +190,30 @@ class WhisperWakeDetector(WakeWordDetector):
     async def available(self) -> tuple[bool, str]:
         return await self._stt.available()
 
-    def process(self, frame: Any) -> float:
-        """Buffers audio; the manager calls :meth:`check` to do the real work."""
+    def _is_speech(self, frame: Any) -> bool:
+        if not self._vad_broken:
+            try:
+                if self._vad is None:
+                    from openwakeword.vad import VAD
+
+                    self._vad = VAD()
+                score = self._vad.predict(to_int16_frame(frame), frame_size=640)
+                return bool(score >= self._vad_threshold)
+            except Exception as exc:
+                log.warning("Silero VAD unavailable, falling back to a volume threshold: %s", exc)
+                self._vad_broken = True
         try:
             import numpy as np
         except ImportError:
-            return 0.0
+            return False
         samples = to_float32_frame(frame)
         rms = float(np.sqrt(np.mean(np.square(samples))) if samples.size else 0.0)
-        if rms > self._energy_threshold:
-            self._buffer.append(samples)
+        return rms > self._energy_threshold
+
+    def process(self, frame: Any) -> float:
+        """Buffers audio; the manager calls :meth:`check` to do the real work."""
+        if self._is_speech(frame):
+            self._buffer.append(to_float32_frame(frame))
             self._pending = time.time()
         elif self._buffer and time.time() - self._pending > 0.35:
             return 1.0  # a phrase has ended — ready to check
@@ -227,5 +255,6 @@ def build_wake_detector(config: Any, stt) -> WakeWordDetector:
     if voice.wake_engine == "openwakeword":
         return OpenWakeWordDetector(voice.wake_word, voice.wake_sensitivity)
     if voice.wake_engine == "whisper":
-        return WhisperWakeDetector(stt, voice.wake_word, voice.silence_threshold)
+        return WhisperWakeDetector(stt, voice.wake_word, voice.silence_threshold,
+                                    voice.wake_vad_threshold)
     return NullWakeDetector()

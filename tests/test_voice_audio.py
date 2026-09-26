@@ -211,18 +211,74 @@ def test_detection_debounces_repeated_frames():
     assert detector.process(pcm_bytes()) == 0.0     # debounced, not a second wake
 
 
+class _FakeVAD:
+    """Stands in for openwakeword.vad.VAD — a real speech/non-speech
+    classifier, unlike the volume threshold it's preferred over."""
+
+    def __init__(self, score: float = 1.0):
+        self.score = score
+        self.received: list[np.ndarray] = []
+
+    def predict(self, x, frame_size=640):
+        self.received.append(x)
+        return self.score
+
+
+class _BrokenVAD:
+    def __init__(self):
+        self.calls = 0
+
+    def predict(self, x, frame_size=640):
+        self.calls += 1
+        raise RuntimeError("onnxruntime blew up")
+
+
+class _StubSTT:
+    async def available(self):
+        return True, "ok"
+
+    async def transcribe(self, audio, sample_rate=16000):
+        return ""
+
+
 def test_whisper_detector_uses_the_same_conversion():
-    class _StubSTT:
-        async def available(self):
-            return True, "ok"
-
-        async def transcribe(self, audio, sample_rate=16000):
-            return ""
-
-    detector = WhisperWakeDetector(_StubSTT(), "jarvis", threshold=0.001)
+    detector = WhisperWakeDetector(_StubSTT(), "jarvis")
+    detector._vad = _FakeVAD(score=1.0)
     detector.process(pcm_bytes(amplitude=9000))
-    assert detector._buffer, "loud audio should have been buffered"
+    assert detector._buffer, "speech the VAD recognises should have been buffered"
     assert detector._buffer[0].dtype == np.float32
+    assert detector._vad.received, "the VAD must see the int16 frame, not bytes"
+
+
+def test_whisper_detector_prefers_the_vad_over_volume_alone():
+    """Quiet audio the VAD nonetheless calls speech must be buffered — the
+    volume threshold is only a fallback, not consulted when the VAD works."""
+    detector = WhisperWakeDetector(_StubSTT(), "jarvis", energy_threshold=0.5)
+    detector._vad = _FakeVAD(score=0.9)
+    detector.process(pcm_bytes(amplitude=10))
+    assert detector._buffer
+
+
+def test_whisper_detector_ignores_loud_audio_the_vad_calls_non_speech():
+    """A loud non-speech sound (a door, a fan) must not fool the gate just
+    because a volume-only check would have let it through."""
+    detector = WhisperWakeDetector(_StubSTT(), "jarvis", energy_threshold=0.001)
+    detector._vad = _FakeVAD(score=0.1)
+    detector.process(pcm_bytes(amplitude=9000))
+    assert not detector._buffer
+
+
+def test_whisper_detector_falls_back_to_the_volume_threshold_if_the_vad_breaks():
+    detector = WhisperWakeDetector(_StubSTT(), "jarvis", energy_threshold=0.001)
+    broken = _BrokenVAD()
+    detector._vad = broken
+    detector.process(pcm_bytes(amplitude=9000))
+    assert detector._buffer, "a broken VAD must fall back to the volume threshold, not go silent"
+    assert broken.calls == 1
+    assert detector._vad_broken is True
+
+    detector.process(pcm_bytes(amplitude=9000))
+    assert broken.calls == 1, "a VAD already known to be broken must not be retried every frame"
 
 
 # --- the listening loop ------------------------------------------------------

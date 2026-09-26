@@ -187,6 +187,11 @@ class VoiceConfig(BaseModel):
     #: "openwakeword" (offline neural detector) | "whisper" (chunked keyword spotting) | "off"
     wake_engine: Literal["openwakeword", "whisper", "off"] = "openwakeword"
     wake_sensitivity: float = 0.5
+    #: The "whisper" wake engine's speech/non-speech threshold (Silero VAD
+    #: score, 0-1, via openwakeword's own bundled model — no extra
+    #: dependency). Falls back to a plain volume threshold if the VAD can't
+    #: be loaded. Unused by "openwakeword", which does its own detection.
+    wake_vad_threshold: float = 0.5
     #: How long JARVIS keeps listening for a follow-up after answering.
     conversation_window_s: float = 12.0
     #: Speech-to-text. "auto" picks the best installed engine: MLX Whisper
