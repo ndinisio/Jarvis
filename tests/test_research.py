@@ -118,6 +118,78 @@ async def test_research_produces_a_cited_report(app, research, fake_provider):
     assert response.display["file"]
 
 
+async def test_research_flags_a_claim_the_cited_source_never_made(app, research, fake_provider):
+    """The grounding check: a claim invented from nothing the cited source
+    actually said gets flagged in the report rather than presented as fact
+    unverified — the one part of the pipeline that previously had none of
+    the evidence-checking the operator relies on elsewhere."""
+    fake_provider.json_responses.append('{"queries": ["macbook air m3 price"]}')
+    fake_provider.responses.append(
+        "The MacBook Air M3 ships with 32GB of RAM as standard [1]."
+    )
+    task = app.tasks.create("research", "test")
+    request = Request(text="research macbook air prices", args={"query": "macbook air prices"},
+                      ctx=app.deps.tool_context(task=task), task=task)
+    response = await research.handle(request)
+
+    assert "32GB" in response.text  # the claim itself is still shown, not silently dropped
+    assert "couldn't independently verify" in response.text.lower()
+
+
+def test_grounding_gaps_passes_a_claim_assembled_from_several_sources():
+    """A sentence citing two sources together for different facts (a price
+    from one, a discount price from another) must be checked against their
+    combined text, not flagged as ungrounded in either alone."""
+    from jarvis.capabilities.research import Source, _grounding_gaps
+
+    sources = [
+        Source(index=1, title="Review", url="https://a.example", domain="a.example",
+               excerpt="The MacBook Air M3 costs 1099 pounds with 18 hours of battery."),
+        Source(index=2, title="Deals", url="https://b.example", domain="b.example",
+               excerpt="Currently 949 pounds at several retailers."),
+    ]
+    report = "The M3 MacBook Air is 1099 pounds at list, and 949 from discounters [1][2]."
+    assert _grounding_gaps(report, sources) == []
+
+
+def test_grounding_gaps_catches_a_detail_the_source_never_mentioned():
+    from jarvis.capabilities.research import Source, _grounding_gaps
+
+    sources = [Source(index=1, title="Review", url="https://a.example", domain="a.example",
+                      excerpt="The MacBook Air M3 costs 1099 pounds with 18 hours of battery.")]
+    report = "The MacBook Air M3 ships with 32GB of RAM as standard [1]."
+    assert _grounding_gaps(report, sources) == [report]
+
+
+def test_grounding_gaps_exempts_sentences_marked_as_inference():
+    from jarvis.capabilities.research import Source, _grounding_gaps
+
+    sources = [Source(index=1, title="Review", url="https://a.example", domain="a.example",
+                      excerpt="The MacBook Air M3 costs 1099 pounds with 18 hours of battery.")]
+    report = "Inference: it probably also comes in more colours [1]."
+    assert _grounding_gaps(report, sources) == []
+
+
+async def test_fetch_page_retries_once_after_a_transient_connection_error(app, ctx, monkeypatch):
+    import httpx
+
+    attempts = {"n": 0}
+    real_response = httpx.Response(200, text="<title>Ok</title>hello",
+                                   headers={"content-type": "text/html"},
+                                   request=httpx.Request("GET", "https://example.com"))
+
+    async def flaky_get(self, url, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise httpx.ConnectError("no route to host")
+        return real_response
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", flaky_get)
+    result = await app.deps.registry.call("fetch_page", {"url": "https://example.com"}, ctx)
+    assert result.ok is True
+    assert attempts["n"] == 2
+
+
 async def test_research_reports_progress_steps(app, research, fake_provider):
     task = app.tasks.create("research", "test")
     request = Request(text="research something", args={"query": "something"},

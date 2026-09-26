@@ -7,6 +7,7 @@ local model without dragging in a headless browser.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
@@ -58,7 +59,14 @@ async def fetch_page(url: str, *, timeout: float = 20.0, user_agent: str = "",
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers)
     try:
-        resp = await client.get(url, headers=headers)
+        try:
+            resp = await client.get(url, headers=headers)
+        except (httpx.TimeoutException, httpx.ConnectError):
+            # One retry for a single flaky source — research already fetches
+            # several in parallel and copes if every one fails, so this is
+            # just for the common case of one transient hiccup among them.
+            await asyncio.sleep(0.5)
+            resp = await client.get(url, headers=headers)
         content_type = resp.headers.get("content-type", "")
         page = Page(url=str(resp.url), status=resp.status_code, content_type=content_type)
         if resp.status_code >= 400:

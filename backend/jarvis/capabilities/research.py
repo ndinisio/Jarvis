@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 from ..core.errors import Cancelled, NetworkUnavailable
 from ..core.logging import get_logger
+from ..intelligence.operator.observation import _significant, normalise
 from ..models.base import ChatMessage
 from ..models.registry import Slot
 from ..tools.web.extract import Page, fetch_page
@@ -282,7 +283,13 @@ class ResearchCapability(Capability):
             log.warning("synthesis failed: %s", exc)
             return _fallback_report(query, sources)
         text = "".join(parts).strip()
-        return text or _fallback_report(query, sources)
+        if not text:
+            return _fallback_report(query, sources)
+        gaps = _grounding_gaps(text, sources)
+        if gaps:
+            text += "\n\n_Couldn't independently verify against the cited source:_\n" + "\n".join(
+                f"- {gap}" for gap in gaps[:3])
+        return text
 
     async def _spoken_summary(self, report: str, request: Request) -> str:
         from ..core.personality import speakable
@@ -411,6 +418,50 @@ def _fallback_report(query: str, sources: list[Source]) -> str:
         lines.append(source.excerpt[:400].replace("\n", " "))
         lines.append("")
     return "\n".join(lines)
+
+
+_CITATION = re.compile(r"\[(\d+)\]")
+_INFERENCE_PREFIX = re.compile(r"^\s*inference\s*:", re.I)
+#: Share of a cited sentence's significant words that must appear somewhere
+#: in its source(s) — looser than the operator's own checklist-evidence
+#: match (which demands 80%, tuned for a literal quote copied verbatim): a
+#: synthesis report paraphrases its sources by design, so this only needs
+#: to catch a claim substantially invented, not police its wording.
+_GROUNDING_THRESHOLD = 0.6
+
+
+def _grounding_gaps(report: str, sources: list[Source]) -> list[str]:
+    """Sentences the report cites to a source whose own excerpt doesn't
+    substantially support them — the synthesis prompt asks the model to
+    cite honestly and mark what it infers, but nothing checked it actually
+    did until now. Cheap by design (word overlap, not real fact-checking):
+    it catches a claim assembled from nothing the sources said, not a
+    subtly wrong detail buried in an otherwise-grounded sentence.
+    """
+    by_index = {s.index: s for s in sources}
+    gaps: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", report):
+        sentence = sentence.strip()
+        if not sentence or _INFERENCE_PREFIX.match(sentence):
+            continue
+        cited = {int(n) for n in _CITATION.findall(sentence)}
+        if not cited:
+            continue
+        claim = set(_significant(normalise(_CITATION.sub("", sentence))))
+        if len(claim) < 4:
+            continue  # too short a claim to check meaningfully either way
+        # A sentence citing several sources together ("X costs £A [1] and £B
+        # from Y [2]") is checked against their combined text, not each
+        # excerpt alone — a legitimate claim assembled from two sources
+        # would otherwise look ungrounded in either one by itself.
+        combined: set[str] = set()
+        for index in sorted(cited):
+            source = by_index.get(index)
+            if source is not None:
+                combined.update(_significant(normalise(source.excerpt)))
+        if combined and len(claim & combined) / len(claim) < _GROUNDING_THRESHOLD:
+            gaps.append(sentence[:160])
+    return gaps
 
 
 def _domain(url: str) -> str:
