@@ -429,6 +429,46 @@ async def test_claiming_done_over_and_over_without_proof_stalls_the_run(app, fak
     assert len(script.prompts) == 3, "it must not spend the whole budget on the claim"
 
 
+async def test_a_task_still_proving_the_checklist_earns_one_budget_top_up(app, fake_provider,
+                                                                         approve_routine,
+                                                                         monkeypatch):
+    """A long errand mid-progress must not hard-stop the moment its step
+    budget runs out if it just proved a checklist item — one bounded
+    top-up, not an unlimited one, lets it finish rather than reporting
+    failure a step short of done."""
+    _stub(app, monkeypatch, "get_time", ToolResult(data={"t": 1}, summary="It is noon."))
+    reminders = _stub(app, monkeypatch, "create_reminder",
+                      ToolResult(data={"title": "Buy milk"}, summary="Reminder “Buy milk” created."))
+    Script(
+        fake_provider,
+        call("get_time"),
+        call("mark_done", item=1, evidence="It is noon."),
+        call("create_reminder", title="Buy milk"),
+        call("mark_done", item=2, evidence="Reminder “Buy milk” created."),
+        call("finish", summary="Done."),
+    )
+    objective = Objective(goal="know the time and set a reminder",
+                          success_criteria=["knows the time", "reminder made"])
+    result = await _operate(app, "know the time and set a reminder",
+                            tools=["get_time", "create_reminder"], objective=objective,
+                            budget=Budget(steps=2, wall_s=30, model_calls=20))
+    assert result.status == Status.FINISHED
+    assert len(reminders) == 1
+    assert all(item["done"] for item in result.checklist)
+
+
+async def test_a_task_with_no_progress_yet_gets_no_top_up(app, fake_provider, monkeypatch):
+    """The other half: a run that never proved anything must not get the
+    same grace — otherwise every genuinely stuck task would just get a
+    free 50% more budget for nothing."""
+    _stub(app, monkeypatch, "get_time", ToolResult(data={"t": 1}, summary="It is noon."))
+    Script(fake_provider, call("get_time"))
+    objective = Objective(goal="do something", success_criteria=["it happened"])
+    result = await _operate(app, "do something", tools=["get_time"], objective=objective,
+                            budget=Budget(steps=1, wall_s=30, model_calls=20))
+    assert result.status == Status.BUDGET
+
+
 async def test_a_summary_written_alongside_the_actions_is_not_trusted(app, approve_routine,
                                                                      monkeypatch):
     """With native tool calling a model can act and finish in one reply —

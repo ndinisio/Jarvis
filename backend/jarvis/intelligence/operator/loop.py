@@ -81,6 +81,13 @@ MODEL_RETRY_BACKOFF_FIRST_S: tuple[float, ...] = (1.0, 2.0)
 #: Unproven attempts to finish, with nothing done in between, before the run
 #: is called stalled rather than spending its whole budget on the claim.
 MAX_UNPROVEN_FINISHES = 3
+#: A checklist item proven within this many steps of hitting the budget
+#: ceiling counts as "still making progress" — worth the one top-up below
+#: rather than a hard stop mid-task.
+_EXTENSION_RECENCY_STEPS = 5
+#: The one-time top-up itself, applied to steps/wall-time/model-calls alike
+#: so nothing about the extended run is disproportionately tight.
+_EXTENSION_FACTOR = 1.5
 #: How much of one result (or page listing) the model is shown.
 RESULT_CHARS = 4000
 PAGE_CHARS = 5000
@@ -263,6 +270,12 @@ class _Run:
         self.app_in_use = ""
         self.trail: list[dict[str, Any]] = []
         self.used_skills: list[str] = []
+        #: For the one-time budget extension: the step a checklist item was
+        #: last proven on, and how many were done as of the last publish —
+        #: see _publish_checklist()/_grant_extension().
+        self._last_progress_step = 0
+        self._checklist_done_count = 0
+        self._extended = False
 
     def _control_defs(self) -> list[ToolDef]:
         defs = [FINISH, ASK_USER, GIVE_UP]
@@ -279,6 +292,8 @@ class _Run:
                 self._resumed()
             exhausted = self._exhausted()
             if exhausted:
+                if self._grant_extension():
+                    continue
                 return self._result(Status.BUDGET, reason=exhausted)
 
             think = None
@@ -612,6 +627,32 @@ class _Run:
             return f"ran out of time ({self.budget.wall_s:.0f} s)"
         return ""
 
+    def _grant_extension(self) -> bool:
+        """One bounded top-up when the budget just ran out but the run is
+        genuinely mid-progress, not spinning: the checklist still has
+        unproven items, and at least one was proven within the last few
+        steps. A task that stalled out long before the ceiling — or that
+        was never checklist-gated in the first place, where there is
+        nothing to measure progress by — gets no such grace; it already
+        had its whole budget to show it and didn't.
+        """
+        if (self._extended or not self.checklist.gated or self.checklist.all_done()
+                or self._checklist_done_count == 0
+                or self.steps - self._last_progress_step > _EXTENSION_RECENCY_STEPS):
+            return False
+        self._extended = True
+        # max(...+ 1, ...) guarantees a real increase even for a small
+        # budget the multiplication would otherwise round right back down to
+        # (int(1 * 1.5) == 1) — an extension that changes nothing would just
+        # hit the same ceiling again on the very next check.
+        self.budget.steps = max(self.budget.steps + 1, int(self.budget.steps * _EXTENSION_FACTOR))
+        self.budget.wall_s *= _EXTENSION_FACTOR
+        self.budget.model_calls = max(self.budget.model_calls + 1,
+                                       int(self.budget.model_calls * _EXTENSION_FACTOR))
+        if self.trace is not None:
+            self.trace.recover("extend", "still proving checklist items near the budget ceiling")
+        return True
+
     def _status(self, replan: str) -> str:
         parts = []
         if self.checklist.gated:
@@ -634,6 +675,10 @@ class _Run:
             log.exception("operator progress report failed")
 
     def _publish_checklist(self) -> None:
+        done_now = sum(1 for item in self.checklist.items if item.done)
+        if done_now > self._checklist_done_count:
+            self._checklist_done_count = done_now
+            self._last_progress_step = self.steps
         if self.trace is not None and self.checklist.items:
             self.trace.checklist(self.checklist.as_dicts())
 
