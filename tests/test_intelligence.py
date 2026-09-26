@@ -1038,6 +1038,50 @@ async def test_verification_notices_an_application_that_did_not_launch(app, monk
     assert verdict.verified is False and "Xcode" in verdict.problem
 
 
+async def test_verification_confirms_typed_text_against_the_readback(app):
+    verifier = Verifier(app.deps)
+    result = ToolResult(data={"value": "milk, eggs, bread", "application": "Notes"},
+                        summary="Typed.")
+    verdict = await verifier.verify("type_into", {"text": "bread"}, result,
+                                    Objective(goal="add bread to the list"), ConversationState())
+    assert verdict.verified is True and verdict.skipped is False
+
+
+async def test_verification_catches_typed_text_that_never_landed(app):
+    """The field's own post-type value is real evidence, not just an
+    exception check — a field that silently ignored the input (disabled,
+    read-only, autocompleted away) must be caught, not assumed to have
+    worked just because no NativeError was raised."""
+    verifier = Verifier(app.deps)
+    result = ToolResult(data={"value": "", "application": "Notes"}, summary="Typed.")
+    verdict = await verifier.verify("type_into", {"text": "bread"}, result,
+                                    Objective(goal="add bread to the list"), ConversationState())
+    assert verdict.verified is True and verdict.skipped is True, \
+        "an empty readback is inconclusive, not a confirmed failure"
+
+    result = ToolResult(data={"value": "something else entirely", "application": "Notes"},
+                        summary="Typed.")
+    verdict = await verifier.verify("type_into", {"text": "bread"}, result,
+                                    Objective(goal="add bread to the list"), ConversationState())
+    assert verdict.verified is False and "bread" in verdict.problem
+
+
+async def test_verification_confirms_the_chosen_option_against_the_readback(app):
+    verifier = Verifier(app.deps)
+    result = ToolResult(data={"option": "PDF", "current_value": "PDF"}, summary="Chose PDF.")
+    verdict = await verifier.verify("choose_option", {"option": "PDF"}, result,
+                                    Objective(goal="export as PDF"), ConversationState())
+    assert verdict.verified is True and verdict.skipped is False
+
+
+async def test_verification_catches_an_option_that_was_not_actually_selected(app):
+    verifier = Verifier(app.deps)
+    result = ToolResult(data={"option": "PDF", "current_value": "Plain Text"}, summary="Chose PDF.")
+    verdict = await verifier.verify("choose_option", {"option": "PDF"}, result,
+                                    Objective(goal="export as PDF"), ConversationState())
+    assert verdict.verified is False and "PDF" in verdict.problem
+
+
 async def test_multi_step_work_runs_as_an_errand_and_simple_work_does_not(app, brain, monkeypatch):
     """A multi-step objective becomes a background task with an errand-sized
     budget; a simple one is done in the turn, with no task at all."""

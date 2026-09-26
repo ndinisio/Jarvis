@@ -189,8 +189,15 @@ class ChooseOptionTool(_NativeTool):
             summary = await self.native.choose_option(str(args["handle"]), str(args["option"]))
         except NativeError as exc:
             return _failure(exc)
+        # A single-element re-read (not a full read_window) — cheap enough
+        # to do on every call, and gives the verifier real evidence that
+        # the control now actually shows what was chosen, rather than
+        # having to trust the action alone (intelligence/verify.py).
+        after = await self._target(str(args["handle"]))
+        current_value = str(after.get("value") or "") if after else ""
         return ToolResult(data={"handle": args["handle"], "option": args["option"],
-                                "application": self.native.last_app}, summary=summary)
+                                "application": self.native.last_app, "current_value": current_value},
+                          summary=summary)
 
 
 class ChooseMenuItemTool(_NativeTool):

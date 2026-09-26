@@ -698,6 +698,26 @@ async def test_click_element_now_finds_controls_at_any_depth(app, mac, ctx):
     assert missing.wrong_tool
 
 
+async def test_choose_option_reports_what_the_control_actually_shows_afterward(app, mac, ctx):
+    """The tool re-reads the target after choosing, so the verifier
+    (intelligence/verify.py) has real evidence the pop-up now shows what
+    was asked for — not just that the click ran without raising."""
+    surface, _, _, parts = mac
+    a4 = El("AXMenuItem", "A4")
+    popup = El("AXPopUpButton", "Paper size", value="Letter", frame=(300, 530, 100, 20))
+    menu = El("AXMenu", actions=(), children=[El("AXMenuItem", "Letter"), a4])
+    popup.on_perform = lambda action: popup.children.append(menu)
+    # A real pop-up's own displayed value changes once an item is chosen —
+    # the fake needs telling to do the same, on the menu item's own press.
+    a4.on_perform = lambda action: popup.attrs.update({"AXValue": "A4"})
+    parts["split"].children.append(popup)
+    handle = await _handle(surface, "Paper size")
+
+    result = await app.deps.registry.call("choose_option", {"handle": handle, "option": "a4"}, ctx)
+    assert result.ok
+    assert result.data["current_value"] == "A4"
+
+
 async def test_press_key_takes_whole_shortcuts(app, mac, ctx):
     _, _, recorder, _ = mac
     result = await app.deps.registry.call("press_key", {"key": "cmd+shift+n"}, ctx)

@@ -51,8 +51,8 @@ class Verifier:
         # real check at all, always falling through to the generic
         # skipped=True case at the bottom of this method.
         if tool in {"click_element", "click_page_element", "type_text", "fill_page_field",
-                    "submit_page_form"}:
-            return self._verify_interaction(tool, result)
+                    "submit_page_form", "type_into", "choose_option"}:
+            return self._verify_interaction(tool, arguments, result)
         if category == "browser" or tool in {"browse_to", "open_url", "get_current_page"}:
             return self._verify_navigation(arguments, result, objective, state)
         if category == "files":
@@ -138,12 +138,12 @@ class Verifier:
                             evidence=f"{name} {'is running' if running else 'is not running'}")
 
     @staticmethod
-    def _verify_interaction(tool: str, result: ToolResult) -> Verification:
+    def _verify_interaction(tool: str, arguments: dict, result: ToolResult) -> Verification:
         """click/type on a native window or a web page.
 
-        There is no cheap independent probe for "did that click do the
-        right thing" — the check runs entirely on evidence the tool already
-        returned, per this module's own stated approach. A web page
+        Mostly, there is no cheap independent probe for "did that click do
+        the right thing" — the check runs entirely on evidence the tool
+        already returned, per this module's own stated approach. A web page
         interaction's ``ok: true`` already came from JavaScript that
         genuinely located the element by its handle and acted on it (a
         stale handle fails before this is ever reached), so it earns
@@ -153,8 +153,22 @@ class Verifier:
         Nothing here is a hard failure: many correct clicks have no
         observable side effect at all, so an empty signal just means
         ``skipped``, never ``verified=False``.
+
+        ``type_into`` and ``choose_option`` are the two exceptions: each
+        already reads the target element back after acting on it (its
+        ``AXValue``), so what was intended can be compared against what's
+        actually there now — a real readback, not an absence-of-evidence
+        shrug, and the one case in this method that can turn up a genuine
+        ``verified=False`` from a native action.
         """
         data = result.data if isinstance(result.data, dict) else {}
+        if tool == "type_into":
+            return _verify_readback(str(arguments.get("text") or ""), str(data.get("value") or ""),
+                                    label="the field", verb="typed")
+        if tool == "choose_option":
+            return _verify_readback(str(arguments.get("option") or ""),
+                                    str(data.get("current_value") or ""),
+                                    label="the control", verb="chose")
         if tool == "click_element":
             matched = str(data.get("matched") or "")
             if matched:
@@ -215,6 +229,27 @@ class Verifier:
                 return str(candidate)
         url = str(arguments.get("url") or "")
         return _domain(url) if url else ""
+
+
+def _verify_readback(intended: str, actual: str, *, label: str, verb: str) -> Verification:
+    """Compare what an action meant to set against what a post-action
+    re-read of the target actually shows now. Case-insensitive and
+    substring-either-way, since an app may reformat what it's given (a
+    phone field adding dashes, a search box lowercasing) without that
+    meaning the action failed."""
+    if not intended:
+        return Verification(verified=True, confidence=0.4, skipped=True,
+                            evidence="nothing specific to check against")
+    if not actual:
+        return Verification(verified=True, confidence=0.4, skipped=True,
+                            evidence=f"{verb}, but {label}'s value couldn't be read back")
+    folded_intended, folded_actual = intended.strip().casefold(), actual.strip().casefold()
+    if folded_intended in folded_actual or folded_actual in folded_intended:
+        return Verification(verified=True, confidence=0.75, evidence=f"{label} now shows “{actual[:80]}”")
+    return Verification(
+        verified=False, confidence=0.65,
+        problem=f"{verb} “{intended[:60]}”, but {label} now shows “{actual[:60]}”",
+        evidence=f"expected {intended[:60]!r}, found {actual[:60]!r}")
 
 
 def _domain(url: str) -> str:
