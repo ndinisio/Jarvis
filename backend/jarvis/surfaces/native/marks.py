@@ -209,6 +209,25 @@ def parse_pick(reply: str, count: int) -> int | None:
     return number if 1 <= number <= count else None
 
 
+def parse_captions(reply: str, numbers: set[int]) -> dict[int, str]:
+    """A vision model's per-mark captions, one per requested number.
+
+    A line that doesn't match "<number>: <text>", or names a number that
+    wasn't asked about, is dropped rather than guessed at — the same
+    "no cheap way to verify this, don't pretend" stance the rest of the
+    codebase takes (intelligence/verify.py).
+    """
+    found: dict[int, str] = {}
+    for line in (reply or "").splitlines():
+        match = re.match(r"\s*(\d{1,3})\s*[:.\-]\s*(.+)$", line)
+        if not match:
+            continue
+        number = int(match.group(1))
+        if number in numbers:
+            found[number] = _clean(match.group(2))
+    return found
+
+
 def _inside(inner: Frame, outer: Frame, slack: float = 2.0) -> bool:
     cx, cy = inner.center
     return (outer.x - slack <= cx <= outer.x + outer.w + slack
@@ -220,4 +239,4 @@ def _clean(text: str) -> str:
 
 
 __all__ = ["Mark", "TextBox", "build_marks", "draw_overlay", "from_normalised", "image_size",
-           "parse_pick", "recognize_text", "render_marks", "to_pixels", "to_points"]
+           "parse_captions", "parse_pick", "recognize_text", "render_marks", "to_pixels", "to_points"]

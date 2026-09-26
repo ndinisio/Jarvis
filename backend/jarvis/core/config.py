@@ -372,6 +372,15 @@ class CapabilitiesConfig(BaseModel):
     #: the machine. See ScreenAwarenessConfig for its tuning. Requires
     #: ``screen`` to also be on.
     screen_awareness: bool = False
+    #: mark_screen (the fallback for windows with no accessibility tree —
+    #: canvases, games, some Electron apps) numbers icon-only controls as
+    #: "(unlabelled)" when neither the accessibility tree nor on-screen text
+    #: names them. On, it spends one extra vision-model call per mark_screen
+    #: batch-captioning every unlabelled mark at once ("a gear icon", "a
+    #: close button"), so later click_mark/find_on_screen calls see a real
+    #: description instead of nothing. Off skips that call entirely — no
+    #: change to mark_screen's own baseline behaviour.
+    caption_unlabelled_marks: bool = True
 
 
 class ResearchConfig(BaseModel):

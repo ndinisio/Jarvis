@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+from pathlib import Path
 from typing import Any
 
 from ...models.base import ChatMessage
 from ...models.registry import Slot
 from ...security.permissions import RiskLevel
 from ...surfaces.native import NativeError
-from ...surfaces.native.marks import parse_pick
+from ...surfaces.native.marks import Mark, parse_captions, parse_pick
 from ..base import Tool, ToolContext, ToolResult, ToolSpec
 
 _HANDLE = {"type": "string", "description": "the [axN] handle shown by read_window"}
@@ -302,6 +303,8 @@ class MarkScreenTool(_NativeTool):
                                                              overlay_dir=captures)
         except NativeError as exc:
             return _failure(exc)
+        if overlay is not None and self._deps.config.capabilities.caption_unlabelled_marks:
+            listing = await self._caption_unlabelled(marks, overlay, listing)
         display = None
         if overlay is not None:
             encoded = base64.b64encode(overlay.read_bytes()).decode("ascii")
@@ -310,6 +313,45 @@ class MarkScreenTool(_NativeTool):
         return ToolResult(data={"marks": len(marks), "overlay": str(overlay) if overlay else ""},
                           summary=f"Marked {len(marks)} things on screen.", observation=listing,
                           display=display)
+
+    async def _caption_unlabelled(self, marks: list[Mark], overlay: Path, listing: str) -> str:
+        """One extra vision-model call, batching every unlabelled mark at
+        once — not a call per icon — so click_mark/find_on_screen have a
+        real description to work from instead of "(unlabelled)". Mutates
+        the Mark objects in place: they're the same instances NativeSurface
+        keeps for later mark-number lookups, so the improved labels stick
+        around for this window, not just this one listing.
+
+        Best-effort: any problem (no vision model, an unparseable reply)
+        leaves marks exactly as read_window/mark_screen already had them —
+        this is a bonus on top of that baseline, never a requirement for it.
+        """
+        unlabelled = [m for m in marks if not m.label]
+        if not unlabelled:
+            return listing
+        numbers = {m.number for m in unlabelled}
+        prompt = (
+            "This screenshot has numbered boxes drawn on it. These numbers have no readable "
+            f"name: {', '.join(str(n) for n in sorted(numbers))}. For each one, look at just "
+            "that box and reply with a short 2-4 word description of what it shows (an icon, a "
+            "colour swatch, a picture) — not what it does, just what it looks like. Reply exactly "
+            "as one line per number, like:\n3: gear icon\n7: red circle"
+        )
+        try:
+            image = base64.b64encode(overlay.read_bytes()).decode("ascii")
+            completion = await self._deps.models.complete(
+                Slot.VISION, [ChatMessage("user", prompt, images=[image])],
+                max_tokens=20 * len(unlabelled), temperature=0.0)
+        except Exception:
+            return listing  # a bonus on top of the baseline listing, never a requirement for it
+        captions = parse_captions(completion.text, numbers)
+        if not captions:
+            return listing
+        for mark in unlabelled:
+            if mark.number in captions:
+                mark.label = captions[mark.number]
+        header, _, _ = listing.partition("\n")
+        return "\n".join([header, *(m.line() for m in marks)])
 
 
 class ClickMarkTool(_NativeTool):

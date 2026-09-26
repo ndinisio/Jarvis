@@ -20,15 +20,18 @@ from jarvis.surfaces.native import PERMISSION_HINT, NativeError, NativeSurface
 from jarvis.surfaces.native import ax as axmod
 from jarvis.surfaces.native.input import Keystroke, NativeInput, resolve_key, text_chunks
 from jarvis.surfaces.native.marks import (
+    Mark,
     TextBox,
     build_marks,
     draw_overlay,
     from_normalised,
+    parse_captions,
     parse_pick,
     render_marks,
     to_points,
 )
 from jarvis.tools.base import ToolResult
+from jarvis.tools.native.tools import MarkScreenTool
 
 pytestmark = pytest.mark.asyncio
 
@@ -634,6 +637,84 @@ def test_a_picked_mark_must_be_a_real_one():
     assert parse_pick("0", 5) is None and parse_pick("12", 5) is None and parse_pick("", 5) is None
 
 
+def test_captions_are_read_per_requested_number():
+    reply = "2: gear icon\n3: close button\n99: not asked about"
+    assert parse_captions(reply, {2, 3}) == {2: "gear icon", 3: "close button"}
+
+
+def test_an_unparseable_caption_line_is_dropped_not_guessed_at():
+    assert parse_captions("I can see a gear and a close button.", {2, 3}) == {}
+    assert parse_captions("", {2, 3}) == {}
+
+
+async def test_caption_unlabelled_marks_batches_one_vision_call(app, fake_provider, tmp_path):
+    """The real value: click_mark/find_on_screen see "gear icon" instead of
+    "(unlabelled)" afterward, and it costs one vision call, not one per icon."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    overlay = tmp_path / "overlay.png"
+    Image.new("RGB", (200, 100), "white").save(overlay)
+    marks = [
+        Mark(number=1, label="Share", kind="button", frame=axmod.Frame(0, 0, 20, 20), source="ax"),
+        Mark(number=2, label="", kind="button", frame=axmod.Frame(30, 0, 20, 20), source="ax"),
+        Mark(number=3, label="", kind="image", frame=axmod.Frame(60, 0, 20, 20), source="ax"),
+    ]
+    listing = "Marks on the screen (click_mark with a number clicks it):\n" + "\n".join(
+        m.line() for m in marks)
+    fake_provider.responses = ["2: gear icon\n3: close button"]
+
+    tool = MarkScreenTool(app.deps)
+    new_listing = await tool._caption_unlabelled(marks, overlay, listing)
+
+    assert marks[1].label == "gear icon" and marks[2].label == "close button"
+    assert marks[0].label == "Share", "an already-labelled mark is left untouched"
+    assert '[m2] button "gear icon"' in new_listing and '[m3] image "close button"' in new_listing
+    assert len(fake_provider.calls) == 1
+
+
+async def test_caption_unlabelled_marks_is_a_no_op_when_nothing_is_unlabelled(app, fake_provider, tmp_path):
+    marks = [Mark(number=1, label="Share", kind="button", frame=axmod.Frame(0, 0, 20, 20), source="ax")]
+    listing = "Marks on the screen:\n" + marks[0].line()
+    tool = MarkScreenTool(app.deps)
+    result = await tool._caption_unlabelled(marks, tmp_path / "overlay.png", listing)
+    assert result == listing
+    assert fake_provider.calls == []
+
+
+async def test_caption_unlabelled_marks_leaves_marks_alone_if_the_vision_model_fails(
+        app, fake_provider, tmp_path):
+    """Captioning is a bonus on top of the baseline listing, never a
+    requirement for it — a vision-model outage must not break mark_screen."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    overlay = tmp_path / "overlay.png"
+    Image.new("RGB", (200, 100), "white").save(overlay)
+    marks = [Mark(number=1, label="", kind="button", frame=axmod.Frame(0, 0, 20, 20), source="ax")]
+    listing = "Marks on the screen:\n" + marks[0].line()
+    fake_provider.fail = True
+
+    tool = MarkScreenTool(app.deps)
+    result = await tool._caption_unlabelled(marks, overlay, listing)
+    assert result == listing and marks[0].label == ""
+
+
+async def test_caption_unlabelled_marks_ignores_an_unparseable_reply(app, fake_provider, tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    overlay = tmp_path / "overlay.png"
+    Image.new("RGB", (200, 100), "white").save(overlay)
+    marks = [Mark(number=1, label="", kind="button", frame=axmod.Frame(0, 0, 20, 20), source="ax")]
+    listing = "Marks on the screen:\n" + marks[0].line()
+    fake_provider.responses = ["I can see a gear icon there."]
+
+    tool = MarkScreenTool(app.deps)
+    result = await tool._caption_unlabelled(marks, overlay, listing)
+    assert result == listing and marks[0].label == ""
+
+
 async def test_marking_a_window_and_clicking_a_mark(notes, tmp_path):
     pytest.importorskip("PIL")
     from PIL import Image
@@ -716,6 +797,39 @@ async def test_choose_option_reports_what_the_control_actually_shows_afterward(a
     result = await app.deps.registry.call("choose_option", {"handle": handle, "option": "a4"}, ctx)
     assert result.ok
     assert result.data["current_value"] == "A4"
+
+
+async def test_mark_screen_respects_the_caption_config_flag_end_to_end(app, mac, ctx, fake_provider,
+                                                                       monkeypatch):
+    """The config flag actually reaches mark_screen's tool layer: on, the
+    extra vision call happens; off, it doesn't and nothing else changes.
+    (What the call does with an unlabelled mark is already covered by the
+    isolated _caption_unlabelled tests above — this just proves the wiring.)"""
+    pytest.importorskip("PIL")
+    from jarvis.surfaces.native import marks as marks_module
+    from jarvis.tools.macos.controller import ShellResult
+    from PIL import Image
+
+    _, _, _, parts = mac
+    parts["split"].children.append(El("AXButton", "", frame=(800, 500, 20, 20)))
+    monkeypatch.setattr(marks_module, "recognize_text", lambda path: [])
+
+    async def fake_screencapture(argv, timeout=20.0):
+        Image.new("RGB", (1800, 1120), "white").save(argv[-1])
+        return ShellResult(0, "", "")
+
+    monkeypatch.setattr(app.deps.controller, "run", fake_screencapture)
+
+    app.config.capabilities.caption_unlabelled_marks = True
+    fake_provider.responses = ["1: gear icon"]
+    result_on = await app.deps.registry.call("mark_screen", {}, ctx)
+    assert result_on.ok and len(fake_provider.calls) == 1, "the flag must trigger the extra call"
+
+    fake_provider.calls.clear()
+    app.config.capabilities.caption_unlabelled_marks = False
+    result_off = await app.deps.registry.call("mark_screen", {}, ctx)
+    assert result_off.ok and fake_provider.calls == [], "the flag must actually stop the extra call"
+    assert "(unlabelled)" in result_off.observation, "the icon is still listed, just not captioned"
 
 
 async def test_press_key_takes_whole_shortcuts(app, mac, ctx):

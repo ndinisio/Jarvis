@@ -1085,6 +1085,16 @@ that changes anything.
   outright under Low Power Mode or real overheating — the app shell reports
   `ProcessInfo`'s thermal state for exactly this (`core/power.py`); nothing
   to configure, and nothing persisted.
+* **`mark_screen` (the fallback for windows with no accessibility tree —
+  canvases, games, some Electron apps) captions icon-only controls it can't
+  otherwise name.** A control with no accessible label and no on-screen
+  text next to it used to show up as `(unlabelled)` — impossible to
+  distinguish from any other unlabelled control of the same kind. One
+  extra vision-model call per `mark_screen`, batching every unlabelled
+  mark at once, now describes each ("a gear icon", "a close button") using
+  the vision model already configured for everything else — no new
+  dependency. Turn it off with `capabilities.caption_unlabelled_marks` if
+  you'd rather skip the extra call.
 * **Only the JARVIS window can drive JARVIS.** Each run has its own session
   token, carried by the link it opens; the API and the event stream refuse
   anything without it, and the event stream refuses pages from other sites
