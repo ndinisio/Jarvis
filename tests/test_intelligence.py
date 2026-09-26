@@ -793,6 +793,56 @@ async def test_do_that_still_resolves_against_real_recent_state(app, brain, desk
     assert "safari" in result.text.lower()
 
 
+async def test_understanding_prompt_asks_for_success_criteria():
+    """The actual fix, isolated from the wiring test below: UNDERSTANDING_PROMPT
+    used to never ask for success_criteria at all (unlike TRIAGE_PROMPT,
+    which already did), so an objective reaching Understanding's own model
+    call — which includes every ``refines_previous`` re-attachment of a
+    stale goal — could never come back gated, whatever it claimed to have
+    done. Asking for it here is what lets the checklist machinery below
+    apply to that path too."""
+    from jarvis.intelligence.understanding import UNDERSTANDING_PROMPT
+
+    normalised = " ".join(UNDERSTANDING_PROMPT.split())
+    assert "success_criteria" in normalised
+
+
+async def test_an_inherited_stale_goal_cannot_fabricate_completion(app, brain):
+    """The real live bug: "find some AirPods on Amazon and add them to my
+    basket" ran, got nowhere, and 90 seconds later an unrelated "are you
+    operating any APIs?" came back claiming *"I've added the AirPods Pro to
+    your basket for $249.95"* — a purchase that never happened.
+
+    Understanding is deliberately still shown the full working set (the test
+    above), so a misclassified `refines_previous` can still re-attach a
+    stale, unrelated goal — that part is accepted, not fixed here. What must
+    not happen is the operator treating its own unverified summary as fact.
+    This is the wiring half of the fix (the prompt half is tested just
+    above): once Understanding's model call actually names a checkable
+    real-world outcome, success_criteria has to survive `_inherit()` and
+    reach the operator as a gated checklist — background errand or not —
+    so an unproven "I've added it" is refused rather than repeated back to
+    the user."""
+    state = app.orchestrator.state
+    state.set_objective("Find some AirPods on Amazon and add them to my basket")
+    state.note_observation("read_page_manifest", {}, True,
+                           "Apple AirPods Pro (2nd Generation), $249.95, Prime eligible.")
+
+    brain.triage(mode="action", confidence=0.5, action_evidence=["are you operating"],
+                objective=None, requires_tools=True, reason="ambiguous, escalate to understanding")
+    brain.understand(goal="are you operating any APIs?", kind="chat", needs_tools=True,
+                     complexity=Complexity.SIMPLE, confidence=Confidence.CONFIDENT,
+                     refines_previous=True,
+                     success_criteria=["Apple AirPods Pro are in the Amazon basket"])
+    brain.decide(action="respond",
+                content="I've added the AirPods Pro to your basket for $249.95.")
+
+    result = await app.ask("are you operating any APIs?")
+
+    assert "249.95" not in result.text
+    assert "basket" not in result.text.lower()
+
+
 async def test_triage_prompt_excludes_stale_task_state(app, brain, monkeypatch):
     """Prior task state must not reach triage's own prompt as if it were
     evidence for a fresh utterance's classification, once it is genuinely

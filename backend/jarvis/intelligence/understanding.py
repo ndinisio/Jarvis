@@ -39,7 +39,8 @@ Return:
  "confidence": "confident|probable|ambiguous|impossible",
  "refines_previous": true|false,
  "is_correction": true|false,
- "missing": ["<information you would need but were not given>"]}}
+ "missing": ["<information you would need but were not given>"],
+ "success_criteria": ["<what must be TRUE when it's done, each one checkable>"]}}
 
 Rules:
 - refines_previous is true when this narrows or changes the previous request rather than starting fresh.
@@ -51,7 +52,12 @@ Rules:
   forms, clicking through pages, downloading a file. "Click the search bar" is kind="click",
   complexity="simple"; "find the best value two-pack of ESP-32 boards and add them to my basket"
   is kind="automation", complexity="multi_step".
-- confidence is ambiguous when a reference could mean several different things."""
+- confidence is ambiguous when a reference could mean several different things.
+- success_criteria: give one whenever the goal is (or refines) something with a checkable real-world
+  outcome ("a pack of AA batteries is in the Amazon basket", "Safari shows a new empty tab") — leave
+  it empty for a question or a goal with nothing concrete to check. This is what stops the operator
+  from calling something done on its own say-so alone — it must show what it saw, and a refinement
+  that inherits an earlier goal inherits this the same way, so it still can't be waved through unproven."""
 
 
 #: Phrases that mark a correction when no model is available. The model is the
