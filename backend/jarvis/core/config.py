@@ -54,8 +54,10 @@ class ModelSlotConfig(BaseModel):
     #: own default, which is small enough to silently cut the front off an
     #: agent prompt that carries a page's elements.
     num_ctx: int = 0
-    #: How long Ollama keeps the model loaded after a call.
-    keep_alive: str = "30m"
+    #: How long Ollama keeps the model loaded after a call. Kept short: on a
+    #: 16 GB Mac an idle 7-8B model sitting resident for half an hour costs
+    #: real desktop responsiveness for no benefit once nothing is using it.
+    keep_alive: str = "5m"
     #: Reasoning models (Qwen3 and friends) can think before answering.
     #: ``False`` turns that off for speed, ``True`` asks for it, ``None``
     #: leaves the model's default. Ignored by models that don't think.

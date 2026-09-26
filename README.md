@@ -743,9 +743,11 @@ to flash attention with an 8-bit KV cache (`OLLAMA_FLASH_ATTENTION=1`,
 `OLLAMA_KV_CACHE_TYPE=q8_0`, via `launchctl setenv`; quit and reopen Ollama
 once), which halves that context's memory: `qwen3:8b` then needs about 6 GB in
 all. Running `ollama serve` yourself? Export the same two variables first.
-JARVIS keeps the model loaded for `keep_alive` (30 minutes) and loads it again
-the moment it hears the wake word, so the model is ready by the time your
-sentence has been transcribed. **Which model is best on your Mac is measured, not guessed:**
+JARVIS doesn't load a model until something needs it — not at startup, so an
+idle app never carries a resident model for no reason — and keeps it loaded
+for only `keep_alive` (5 minutes) after that. Hearing the wake word loads it
+again ahead of time, so it's ready by the time your sentence has been
+transcribed. **Which model is best on your Mac is measured, not guessed:**
 `python -m evals.bake_off --pull` runs the understanding corpus and the web
 tasks against each candidate and prints success, latency and memory side by
 side (see [`evals/README.md`](evals/README.md)).

@@ -128,8 +128,10 @@ class JarvisApp:
                 asyncio.create_task(self.voice.start())
         if self.config.capabilities.screen_awareness and self.config.security.allow_screen_capture:
             asyncio.create_task(self.screen_watcher.start())
-        # Warm the fast model so the first real request isn't the cold one.
-        asyncio.create_task(self._warmup())
+        # Check a provider is reachable, but don't load a model into memory
+        # until something actually needs it — an idle Mac shouldn't be
+        # carrying a resident 7-8B model on JARVIS's account alone.
+        asyncio.create_task(self._check_model_availability())
         self.bus.add_hook(self._preload_when_spoken_to)
 
     def _preload_when_spoken_to(self, event) -> None:
@@ -156,7 +158,13 @@ class JarvisApp:
         if self.voice is not None and names:
             self.voice.teach(sorted(names, key=len)[:100])
 
-    async def _warmup(self) -> None:
+    async def _check_model_availability(self) -> None:
+        """Surface a notice if no model provider is reachable. Deliberately
+        does not load any model into memory: on a 16 GB Mac, a model sitting
+        resident from the moment the app opens — before anything has asked
+        for it — costs real desktop responsiveness for no benefit. The
+        request that actually needs a model pays its own cold-start cost;
+        voice gets a head start via ``_preload_when_spoken_to`` instead."""
         try:
             status = await self.models.status()
             ready = [k for k, v in status["providers"].items() if v["available"]]
@@ -170,17 +178,8 @@ class JarvisApp:
                     message="The local AI service isn't available. Start Ollama for "
                             "conversation and reasoning; system commands work regardless.",
                 )
-                return
-            await self.models.warmup(Slot.FAST)
-            log.info("fast model ready: %s", status["slots"]["fast"].get("resolved"))
-            # The first real action is decided on the reasoning slot, not the
-            # fast one; loading it now is what keeps that first decision from
-            # paying for a cold start.
-            reasoning = self.models.effective_slot(self.config.intelligence.reasoning_slot)
-            if reasoning != self.models.effective_slot(Slot.FAST):
-                await self.models.warmup(reasoning)
         except Exception as exc:
-            log.debug("warmup skipped: %s", exc)
+            log.debug("availability check skipped: %s", exc)
 
     async def shutdown(self) -> None:
         if self.voice is not None:

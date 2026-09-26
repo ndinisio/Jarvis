@@ -492,20 +492,6 @@ class ModelRouter:
         runtime.pop("think", None)
         return await resolution.provider.preload(resolution.model, **runtime)
 
-    async def warmup(self, slot: str = Slot.FAST) -> bool:
-        """Load a model into memory so the first real request isn't the cold one."""
-        try:
-            await self.complete(
-                slot,
-                [ChatMessage("user", "Reply with the single word: ready")],
-                max_tokens=5,
-                temperature=0.0,
-            )
-            return True
-        except Exception as exc:
-            log.debug("warmup(%s) failed: %s", slot, exc)
-            return False
-
     async def close(self) -> None:
         for provider in self._providers.values():
             await provider.close()
