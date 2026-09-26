@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import time
 from pathlib import Path
 from typing import Any
 
@@ -268,6 +269,14 @@ class DragControlTool(_NativeTool):
                                 "application": self.native.last_app}, summary=summary)
 
 
+#: How long a captioning result for the same marks is trusted before a
+#: fresh vision-model call is worth paying for again — long enough that
+#: re-reading the same mostly-static window a few steps into a task (the
+#: common case: look, act, look again) costs nothing extra, short enough
+#: that a real change to the window doesn't leave a stale caption stuck.
+_CAPTION_CACHE_TTL_S = 120.0
+
+
 class MarkScreenTool(_NativeTool):
     spec = ToolSpec(
         name="mark_screen",
@@ -282,6 +291,14 @@ class MarkScreenTool(_NativeTool):
         expected_ms=2500,
         returns="numbered marks [mN] with the text or control at each",
     )
+
+    def __init__(self, deps):
+        super().__init__(deps)
+        #: (app, unlabelled marks' shape) -> (recorded at, {number: caption}).
+        #: The vision call this replaces is the single most expensive step
+        #: in native desktop control; a window that hasn't meaningfully
+        #: changed shouldn't pay for it again on every look.
+        self._caption_cache: dict[tuple[Any, ...], tuple[float, dict[int, str]]] = {}
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         if not self._deps.config.security.allow_screen_capture:
@@ -325,33 +342,56 @@ class MarkScreenTool(_NativeTool):
         Best-effort: any problem (no vision model, an unparseable reply)
         leaves marks exactly as read_window/mark_screen already had them —
         this is a bonus on top of that baseline, never a requirement for it.
+        Cached per app and per shape of the unlabelled marks (their kind and
+        rounded position): a window looked at again a few steps into a task
+        — the common "act, then look again" pattern — usually hasn't moved
+        its unlabelled icons at all, so the one genuinely expensive step
+        here is worth skipping when nothing suggests it would answer any
+        differently.
         """
         unlabelled = [m for m in marks if not m.label]
         if not unlabelled:
             return listing
         numbers = {m.number for m in unlabelled}
-        prompt = (
-            "This screenshot has numbered boxes drawn on it. These numbers have no readable "
-            f"name: {', '.join(str(n) for n in sorted(numbers))}. For each one, look at just "
-            "that box and reply with a short 2-4 word description of what it shows (an icon, a "
-            "colour swatch, a picture) — not what it does, just what it looks like. Reply exactly "
-            "as one line per number, like:\n3: gear icon\n7: red circle"
-        )
-        try:
-            image = base64.b64encode(overlay.read_bytes()).decode("ascii")
-            completion = await self._deps.models.complete(
-                Slot.VISION, [ChatMessage("user", prompt, images=[image])],
-                max_tokens=20 * len(unlabelled), temperature=0.0)
-        except Exception:
-            return listing  # a bonus on top of the baseline listing, never a requirement for it
-        captions = parse_captions(completion.text, numbers)
-        if not captions:
-            return listing
+        key = (self.native.last_app, self._shape(unlabelled))
+        now = time.monotonic()
+        cached = self._caption_cache.get(key)
+        if cached is not None and now - cached[0] < _CAPTION_CACHE_TTL_S:
+            captions = cached[1]
+        else:
+            prompt = (
+                "This screenshot has numbered boxes drawn on it. These numbers have no readable "
+                f"name: {', '.join(str(n) for n in sorted(numbers))}. For each one, look at just "
+                "that box and reply with a short 2-4 word description of what it shows (an icon, a "
+                "colour swatch, a picture) — not what it does, just what it looks like. Reply exactly "
+                "as one line per number, like:\n3: gear icon\n7: red circle"
+            )
+            try:
+                image = base64.b64encode(overlay.read_bytes()).decode("ascii")
+                completion = await self._deps.models.complete(
+                    Slot.VISION, [ChatMessage("user", prompt, images=[image])],
+                    max_tokens=20 * len(unlabelled), temperature=0.0)
+            except Exception:
+                return listing  # a bonus on top of the baseline listing, never a requirement for it
+            captions = parse_captions(completion.text, numbers)
+            if not captions:
+                return listing
+            self._caption_cache[key] = (now, captions)
         for mark in unlabelled:
             if mark.number in captions:
                 mark.label = captions[mark.number]
         header, _, _ = listing.partition("\n")
         return "\n".join([header, *(m.line() for m in marks)])
+
+    @staticmethod
+    def _shape(unlabelled: list[Mark]) -> tuple[tuple[int, str, int, int, int, int], ...]:
+        """A cheap fingerprint of *unlabelled*'s numbers, kinds and rounded
+        positions — stable across two looks at an unchanged window, and
+        different the moment a real layout change adds, removes or moves
+        one of them."""
+        return tuple(sorted(
+            (m.number, m.kind, round(m.frame.x), round(m.frame.y), round(m.frame.w), round(m.frame.h))
+            for m in unlabelled))
 
 
 class ClickMarkTool(_NativeTool):

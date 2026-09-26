@@ -691,6 +691,55 @@ async def test_caption_unlabelled_marks_batches_one_vision_call(app, fake_provid
     assert len(fake_provider.calls) == 1
 
 
+async def test_caption_unlabelled_marks_reuses_a_recent_look_at_the_same_window(app, fake_provider,
+                                                                                tmp_path):
+    """The speed half of the fix: a vision call is the single most expensive
+    step in native desktop control, and a task that looks, acts, then looks
+    again at the same window shouldn't pay for it twice when nothing about
+    the unlabelled marks has actually moved."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    overlay = tmp_path / "overlay.png"
+    Image.new("RGB", (200, 100), "white").save(overlay)
+    marks = [Mark(number=2, label="", kind="button", frame=axmod.Frame(30, 0, 20, 20), source="ax")]
+    listing = "Marks on the screen:\n" + marks[0].line()
+    fake_provider.responses = ["2: gear icon"]
+
+    tool = MarkScreenTool(app.deps)
+    first = await tool._caption_unlabelled(marks, overlay, listing)
+    assert marks[0].label == "gear icon" and len(fake_provider.calls) == 1
+
+    marks[0].label = ""  # a fresh, otherwise-identical look at the same window
+    second = await tool._caption_unlabelled(marks, overlay, listing)
+    assert marks[0].label == "gear icon", "reused the cached caption"
+    assert len(fake_provider.calls) == 1, "no second vision call for an unchanged window"
+    assert first == second
+
+
+async def test_caption_unlabelled_marks_recaptions_when_the_marks_actually_changed(app, fake_provider,
+                                                                                   tmp_path):
+    """The other half: a real change (a mark that moved, or a different
+    app) must not be served a stale caption from the cache."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    overlay = tmp_path / "overlay.png"
+    Image.new("RGB", (200, 100), "white").save(overlay)
+    listing = "Marks on the screen:\n"
+    fake_provider.responses = ["2: gear icon", "2: a different icon"]
+
+    tool = MarkScreenTool(app.deps)
+    first_marks = [Mark(number=2, label="", kind="button", frame=axmod.Frame(30, 0, 20, 20), source="ax")]
+    await tool._caption_unlabelled(first_marks, overlay, listing)
+    assert first_marks[0].label == "gear icon"
+
+    moved_marks = [Mark(number=2, label="", kind="button", frame=axmod.Frame(80, 0, 20, 20), source="ax")]
+    await tool._caption_unlabelled(moved_marks, overlay, listing)
+    assert moved_marks[0].label == "a different icon"
+    assert len(fake_provider.calls) == 2
+
+
 async def test_caption_unlabelled_marks_is_a_no_op_when_nothing_is_unlabelled(app, fake_provider, tmp_path):
     marks = [Mark(number=1, label="Share", kind="button", frame=axmod.Frame(0, 0, 20, 20), source="ax")]
     listing = "Marks on the screen:\n" + marks[0].line()
