@@ -141,6 +141,14 @@ class Control:
         return self.subrole == "AXSecureTextField"
 
     @property
+    def identifiable(self) -> bool:
+        """Has a name or value a model could actually act on — an
+        ``AXButton`` with an empty accessible name tells the model nothing
+        more than its bare role would, and there's no way to tell it apart
+        from any other unlabelled control of the same role."""
+        return bool(self.label or self.value)
+
+    @property
     def editable(self) -> bool:
         return self.ax_role in EDITABLE and not self.secure
 
@@ -307,9 +315,14 @@ def render(snap: WindowSnapshot, *, changes: str = "", text_chars: int = 700) ->
     shown = len(snap.controls)
     if snap.total > shown:
         lines.append(f"Showing {shown} of {snap.total} controls (read_window with an offset shows more).")
-    if not snap.controls:
-        lines.append("No controls were readable here. mark_screen reads the window's text from "
-                     "a screenshot instead.")
+    if not any(control.identifiable for control in snap.controls):
+        # Fires on a genuinely empty listing, and just as much on a window
+        # that returned controls with no usable name at all (common in
+        # Electron/canvas apps that expose bare, unlabelled roles) — a list
+        # of unlabelled buttons is exactly as unusable to the model as no
+        # controls at all.
+        lines.append("No usable controls were found here. mark_screen reads the window's text "
+                     "from a screenshot instead.")
     # What the window shows is the app's (and whoever wrote its content's)
     # words: fenced, like a web page's (security/untrusted.py).
     said = list(snap.lines())

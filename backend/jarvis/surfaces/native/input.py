@@ -13,7 +13,10 @@ control it can name. This posts real HID events instead:
   (the clipboard is saved first and put back after).
 * **Mouse** — move, click, double-click, right-click and drag at a point in
   global screen coordinates, which is also what the Accessibility API
-  reports element positions in.
+  reports element positions in. A move far enough to matter glides there
+  in a few steps instead of teleporting — the destination is already known
+  from the accessibility tree, so this costs a few extra events, not a
+  recalculation.
 
 Everything that decides *what* to post is plain Python and tested; the
 posting itself goes through :class:`QuartzPoster`, a thin layer over
@@ -27,6 +30,7 @@ are Apple's documented ``kVK_*`` values (HIToolbox/Events.h).
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -196,12 +200,31 @@ class QuartzPoster:
         q.CGEventPost(q.kCGHIDEventTap, event)
 
 
+#: Below this distance a glide is pointless — a few pixels reads as jitter,
+#: not motion, so those moves stay an instant jump.
+_GLIDE_MIN_DISTANCE = 8.0
+_GLIDE_STEPS = 6
+_GLIDE_STEP_DELAY = 0.006
+
+
+def _glide_points(x0: float, y0: float, x1: float, y1: float,
+                   steps: int = _GLIDE_STEPS) -> list[tuple[float, float]]:
+    """*steps* points from just past ``(x0, y0)`` up to and including
+    ``(x1, y1)`` — a straight-line sweep is enough to read as a real cursor
+    move rather than a teleport; it doesn't need to be curved."""
+    return [(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps) for i in range(1, steps + 1)]
+
+
 class NativeInput:
     """Keys, text and mouse gestures, built from single events."""
 
     def __init__(self, poster: Any = None, *, sleep=time.sleep):
         self.poster = poster or QuartzPoster()
         self._sleep = sleep
+        #: Where the cursor last landed, so the next click can glide from
+        #: there instead of teleporting. Unknown until the first move —
+        #: querying the real OS position isn't worth it for one call.
+        self._last_position: tuple[float, float] | None = None
 
     def press(self, stroke: Keystroke, repeat: int = 1) -> None:
         for _ in range(max(1, repeat)):
@@ -223,7 +246,7 @@ class NativeInput:
         return events
 
     def click(self, x: float, y: float, *, button: str = "left", clicks: int = 1) -> None:
-        self.poster.mouse("move", x, y, button)
+        self._glide_to(x, y, button)
         self._sleep(0.03)
         for state in range(1, max(1, clicks) + 1):
             self.poster.mouse("down", x, y, button, state)
@@ -231,11 +254,21 @@ class NativeInput:
             self._sleep(0.04)
 
     def move(self, x: float, y: float) -> None:
-        self.poster.mouse("move", x, y)
+        self._glide_to(x, y)
+
+    def _glide_to(self, x: float, y: float, button: str = "left") -> None:
+        last = self._last_position
+        if last is not None and math.hypot(x - last[0], y - last[1]) >= _GLIDE_MIN_DISTANCE:
+            for px, py in _glide_points(last[0], last[1], x, y):
+                self.poster.mouse("move", px, py, button)
+                self._sleep(_GLIDE_STEP_DELAY)
+        else:
+            self.poster.mouse("move", x, y, button)
+        self._last_position = (x, y)
 
     def drag(self, start: tuple[float, float], end: tuple[float, float], steps: int = 12) -> None:
         (x0, y0), (x1, y1) = start, end
-        self.poster.mouse("move", x0, y0)
+        self._glide_to(x0, y0)
         self._sleep(0.05)
         self.poster.mouse("down", x0, y0, "left", 1)
         self._sleep(0.08)

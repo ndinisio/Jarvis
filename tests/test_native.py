@@ -522,6 +522,44 @@ def test_input_posts_real_events_in_order():
         ("down", 5, 6, "left", 2), ("up", 5, 6, "left", 2)]
 
 
+class _MoveRecordingPoster:
+    def __init__(self):
+        self.moves = []
+
+    def mouse(self, kind, x, y, button="left", state=1):
+        if kind == "move":
+            self.moves.append((x, y))
+
+
+def test_a_click_far_from_the_last_position_glides_there_instead_of_teleporting():
+    poster = _MoveRecordingPoster()
+    native = NativeInput(poster, sleep=lambda _s: None)
+    native.click(0, 0)  # nothing known yet: a direct move, establishes position
+    assert poster.moves == [(0, 0)]
+
+    native.click(100, 0)
+    assert len(poster.moves) > 2, "a real distance must produce more than one move event"
+    assert poster.moves[-1] == (100, 0), "the glide must still land exactly on the target"
+    xs = [p[0] for p in poster.moves[1:]]
+    assert xs == sorted(xs), "each step must move strictly toward the target, not overshoot or jitter back"
+
+
+def test_a_short_move_stays_a_single_direct_jump():
+    poster = _MoveRecordingPoster()
+    native = NativeInput(poster, sleep=lambda _s: None)
+    native.move(0, 0)
+    native.move(2, 2)  # well under the glide threshold
+    assert poster.moves == [(0, 0), (2, 2)], "a move this small must not be split into steps"
+
+
+def test_glide_points_end_exactly_on_the_target():
+    from jarvis.surfaces.native.input import _glide_points
+
+    points = _glide_points(0, 0, 30, 60, steps=6)
+    assert len(points) == 6
+    assert points[-1] == (30, 60)
+
+
 # ---------------------------------------------------------------------------
 # marks
 # ---------------------------------------------------------------------------
@@ -536,6 +574,32 @@ def test_screenshot_pixels_become_screen_points_on_a_retina_display():
 def _control(label, frame, role="button"):
     return axmod.Control(ref=None, ax_role="AXButton", subrole="", role=role, label=label,
                          frame=axmod.Frame(*frame))
+
+
+def _snapshot(controls):
+    snap = axmod.WindowSnapshot(app="Test", pid=1, title="Window", frame=None)
+    snap.controls = controls
+    return snap
+
+
+def test_render_hints_at_mark_screen_when_no_controls_were_found():
+    listing = axmod.render(_snapshot([]))
+    assert "No usable controls were found here" in listing
+
+
+def test_render_hints_at_mark_screen_when_every_control_is_unlabelled():
+    """A window that returned controls, but none with a name or value, tells
+    the model exactly as little as an empty listing would — common in
+    Electron/canvas apps that expose bare, unlabelled roles."""
+    controls = [_control("", (0, 0, 20, 20)), _control("", (30, 0, 20, 20))]
+    listing = axmod.render(_snapshot(controls))
+    assert "No usable controls were found here" in listing
+
+
+def test_render_does_not_hint_when_at_least_one_control_is_identifiable():
+    controls = [_control("", (0, 0, 20, 20)), _control("Share", (30, 0, 20, 20))]
+    listing = axmod.render(_snapshot(controls))
+    assert "No usable controls were found here" not in listing
 
 
 def test_marks_name_unlabelled_controls_by_their_text_and_number_in_reading_order():
