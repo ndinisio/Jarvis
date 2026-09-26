@@ -520,6 +520,77 @@ async def test_no_model_at_all_is_reported_as_unavailable(app):
     assert result.status == Status.UNAVAILABLE and result.model_calls == 0
 
 
+async def test_a_transient_failure_before_any_success_is_retried_not_fatal(app, fake_provider,
+                                                                           monkeypatch):
+    """The AirPods-adjacent finding: a local model can be briefly unavailable
+    (cold-starting, momentarily out of memory) — a single failed call must
+    not sink a whole errand the way it used to (zero retries on the very
+    first call)."""
+    from jarvis.core.errors import ModelUnavailable
+    from jarvis.intelligence.operator import loop as loop_module
+
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(loop_module.asyncio, "sleep", fake_sleep)
+
+    original = app.models.chat
+    attempts = {"n": 0}
+
+    async def flaky(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ModelUnavailable("cold start")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(app.models, "chat", flaky)
+    Script(fake_provider, call("finish", summary="Done."))
+    result = await _operate(app, "do it")
+    assert result.status == Status.FINISHED
+    # asyncio.sleep is patched globally, so incidental 0-second yields
+    # elsewhere (the fake provider's own chunking) show up too — only the
+    # real backoff delays matter here.
+    assert [s for s in slept if s > 0] == [1.0], "one short backoff, then it just works"
+
+
+async def test_a_failure_after_a_real_success_gets_the_longer_retry_schedule(app, fake_provider,
+                                                                             monkeypatch):
+    """Once the model has proven it works at least once this run, a later
+    failure is far more likely a passing hiccup than a dead model — it must
+    survive more than the couple of tries a stone-cold-unavailable model
+    gets before ever answering."""
+    from jarvis.core.errors import ModelUnavailable
+    from jarvis.intelligence.operator import loop as loop_module
+
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(loop_module.asyncio, "sleep", fake_sleep)
+
+    _stub(app, monkeypatch, "get_time", ToolResult(data={"t": 1}, summary="It is noon."))
+    original = app.models.chat
+    attempts = {"n": 0}
+
+    async def flaky(*args, **kwargs):
+        attempts["n"] += 1
+        # Calls 2-4 fail — more than the 2-try budget a never-succeeded model
+        # gets, which is exactly what this test is proving survives.
+        if 2 <= attempts["n"] <= 4:
+            raise ModelUnavailable("momentarily busy")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(app.models, "chat", flaky)
+    Script(fake_provider, call("get_time"), call("finish", summary="Done."))
+    result = await _operate(app, "check the time", tools=["get_time"])
+    assert result.status == Status.FINISHED
+    assert [s for s in slept if s > 0] == [1.0, 2.0, 5.0], \
+        "the longer, post-success schedule was used"
+
+
 def test_the_registry_offers_compact_tool_schemas(app):
     [definition] = app.deps.registry.tool_defs(["fill_page_field"])
     text = json.dumps(definition.parameters)

@@ -27,6 +27,7 @@ machinery that makes a small local model finish the job:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
@@ -63,8 +64,20 @@ log = get_logger("jarvis.intelligence.operator")
 MAX_CALLS_PER_REPLY = 5
 #: Replies without a tool call tolerated before the run is called stalled.
 MAX_NUDGES = 2
-#: Model errors in a row tolerated before giving up on the model.
-MAX_MODEL_FAILURES = 2
+#: Backoff before each retry of a failed model call, once at least one call
+#: in this run has already succeeded — short at first, longer if it
+#: persists. A local model can be briefly unavailable (swapped out under
+#: memory pressure, reloading after another app used the GPU) far more
+#: plausibly over a background errand's many-minute lifetime than a single
+#: bad call means the model is really gone — the run's own wall-clock
+#: budget, checked once per loop iteration, is what actually bounds how
+#: much of this a short foreground turn can afford, so one schedule serves
+#: both rather than hand-tuning per caller.
+MODEL_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0, 15.0)
+#: Before the very first success, a failure is just as likely to mean no
+#: model is configured at all as a momentary hiccup — worth a couple of
+#: quick tries, not the full schedule above.
+MODEL_RETRY_BACKOFF_FIRST_S: tuple[float, ...] = (1.0, 2.0)
 #: Unproven attempts to finish, with nothing done in between, before the run
 #: is called stalled rather than spending its whole budget on the claim.
 MAX_UNPROVEN_FINISHES = 3
@@ -284,9 +297,11 @@ class _Run:
             except Exception as exc:
                 self.model_failures += 1
                 log.debug("operator model call failed: %s", exc)
-                if self.model_calls == 0 or self.model_failures >= MAX_MODEL_FAILURES:
+                schedule = MODEL_RETRY_BACKOFF_S if self.model_calls else MODEL_RETRY_BACKOFF_FIRST_S
+                if self.model_failures > len(schedule):
                     status = Status.UNAVAILABLE if self.model_calls == 0 else Status.STALLED
                     return self._result(status, reason=f"the model is unavailable ({exc})")
+                await asyncio.sleep(schedule[self.model_failures - 1])
                 continue
             self.model_calls += 1
             self.model_failures = 0
