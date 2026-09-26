@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import platform
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from ..capabilities.registry import build_capabilities
@@ -223,6 +225,7 @@ class JarvisApp:
         voice_status = await self.voice.probe() if self.voice else {"enabled": False}
         return {
             "version": _version(),
+            "commit": _commit(),
             "platform": {
                 "system": platform.system(),
                 "release": platform.release(),
@@ -284,6 +287,30 @@ def _version() -> str:
     from .. import __version__
 
     return __version__
+
+
+_commit_cache: str | None = None
+
+
+def _commit() -> str:
+    """The short git commit hash of this checkout — deliberately not the
+    package version above (which tracks toward a real 3.0.0 release on its
+    own schedule and doesn't change per-commit). This is what actually lets
+    a running app be compared against ``git log`` or GitHub to answer "am I
+    on the latest code", which the version number alone cannot. Cached: it
+    can't change while this process is running, so there's no reason to
+    shell out to git on every status call."""
+    global _commit_cache
+    if _commit_cache is None:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).resolve().parent,
+                capture_output=True, text=True, timeout=2.0,
+            )
+            _commit_cache = result.stdout.strip() if result.returncode == 0 else ""
+        except Exception:
+            _commit_cache = ""
+    return _commit_cache
 
 
 def _skill_library(config):

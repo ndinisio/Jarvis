@@ -27,9 +27,28 @@ def _ws(client, token: str | None = None) -> str:
 def test_status_endpoint(client):
     data = client.get("/api/status").json()
     assert data["version"]
+    # The version alone can't answer "am I on the latest code" (it tracks
+    # toward a release on its own schedule, independent of any commit) —
+    # the commit hash is what's actually comparable against `git log` or
+    # GitHub.
+    assert data["commit"]
     assert data["capabilities"]
     assert "system" in data["tools"]
     assert data["workspace"]
+
+
+def test_commit_falls_back_quietly_if_git_is_unavailable(monkeypatch):
+    """A checkout with no git installed, or not a git repo at all, must
+    still answer /api/status — this is a nice-to-have, never a requirement."""
+    from jarvis.core import app as app_module
+
+    monkeypatch.setattr(app_module, "_commit_cache", None)
+
+    def broken_run(*args, **kwargs):
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(app_module.subprocess, "run", broken_run)
+    assert app_module._commit() == ""
 
 
 def test_tools_endpoint_exposes_schemas(client):

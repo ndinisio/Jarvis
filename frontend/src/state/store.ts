@@ -17,6 +17,7 @@ const nextId = () => `${Date.now().toString(36)}-${(counter++).toString(36)}`
 
 interface Status {
   version?: string
+  commit?: string
   platform?: { system: string; is_macos: boolean; machine: string }
   models?: any
   voice?: any

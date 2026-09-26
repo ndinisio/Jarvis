@@ -20,7 +20,11 @@ export function StatusBar({ send }: { send: (m: Record<string, unknown>) => bool
       <div className="statusbar__identity">
         <span className="statusbar__mark" aria-hidden="true" />
         <span className="statusbar__name">JARVIS</span>
-        {status?.version && <span className="statusbar__version">v{status.version}</span>}
+        {status?.version && (
+          <span className="statusbar__version" title="Compare against `git log -1 --oneline` or GitHub to check you're on the latest code">
+            v{status.version}{status.commit && ` (${status.commit})`}
+          </span>
+        )}
       </div>
 
       <div className="statusbar__meta">
