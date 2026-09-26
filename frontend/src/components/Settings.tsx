@@ -70,11 +70,20 @@ export function Settings() {
   const save = async () => {
     setSaving(true)
     try {
-      await apiFetch('/api/config', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(stripSecrets(draft)),
-      })
+      // Only the fields actually touched in this sheet, not the whole
+      // draft: `draft` is a snapshot taken when the sheet opened, so
+      // sending it whole would silently revert anything the backend
+      // changed on its own since then (a config-version migration moving
+      // an old default forward, another client's edit) back to what it
+      // was when this sheet was opened — not what the user asked for.
+      const changes = diffConfig(config, draft)
+      if (changes) {
+        await apiFetch('/api/config', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(stripSecrets(changes)),
+        })
+      }
       setShow(false)
     } finally {
       setSaving(false)
@@ -373,6 +382,32 @@ interface SkillRow {
   apps: string[]
   uses: number
   set_aside: boolean
+}
+
+/**
+ * The paths where `draft` actually differs from `original`, as a sparse
+ * object with the same nesting — suitable for a PATCH the backend merges in
+ * (core/config.py's ConfigStore.update()), which leaves everything not
+ * mentioned exactly as it already was. Arrays and other non-plain-object
+ * values are compared and replaced wholesale, never merged field-by-field.
+ */
+function diffConfig(original: any, draft: any): any {
+  if (original === draft) return undefined
+  const plainObject = (value: any) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+  if (!plainObject(original) || !plainObject(draft)) {
+    return JSON.stringify(original) === JSON.stringify(draft) ? undefined : draft
+  }
+  const changes: any = {}
+  let anyChanged = false
+  for (const key of Object.keys(draft)) {
+    const sub = diffConfig(original[key], draft[key])
+    if (sub !== undefined) {
+      changes[key] = sub
+      anyChanged = true
+    }
+  }
+  return anyChanged ? changes : undefined
 }
 
 function stripSecrets(draft: any) {
