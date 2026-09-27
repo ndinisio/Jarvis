@@ -39,6 +39,7 @@ from urllib.parse import urlsplit
 from ...core import latency
 from ...core.logging import get_logger
 from ...tools.browser import manifest_js, sensitive
+from ...tools.browser.observe import cached_inspect
 from ...tools.browser.tools import BrowserDriver, normalise_key
 
 log = get_logger("jarvis.surfaces.web.cdp")
@@ -364,7 +365,9 @@ class PlaywrightDriver(BrowserDriver):
                 "title": page.get("title", ""), **extra}
 
     async def click_handle(self, handle: str) -> dict[str, Any]:
-        info = await self.inspect_handle(handle)
+        info = cached_inspect(self, handle)
+        if info is None:
+            info = await self.inspect_handle(handle)
         locator = await self._locate(handle) if info.get("found") else None
         if locator is not None:
             try:
@@ -377,7 +380,9 @@ class PlaywrightDriver(BrowserDriver):
         return result
 
     async def fill_handle(self, handle: str, text: str, *, submit: bool = False) -> dict[str, Any]:
-        info = await self.inspect_handle(handle)
+        info = cached_inspect(self, handle)
+        if info is None:
+            info = await self.inspect_handle(handle)
         if not info.get("found"):
             return {"ok": False, "reason": "stale handle — the page has changed since it was read"}
         refused = sensitive.refusal(info)

@@ -18,6 +18,7 @@ from ..base import Tool, ToolContext, ToolResult, ToolSpec
 from ..macos.tools import normalise_url
 from ..web.search import search_url
 from . import manifest_js
+from .observe import remember_inspect
 
 #: Keys a page action may press, as the model names them → the standard
 #: ``KeyboardEvent.key`` value (which is also what Playwright expects).
@@ -79,7 +80,9 @@ class BrowserDriver(abc.ABC):
         return _parse_js_json(raw)
 
     async def inspect_handle(self, handle: str) -> dict[str, Any]:
-        return _parse_js_json(await self.run_js(manifest_js.build_inspect_script(handle), timeout=10.0))
+        info = _parse_js_json(await self.run_js(manifest_js.build_inspect_script(handle), timeout=10.0))
+        remember_inspect(self, handle, info)
+        return info
 
     async def click_handle(self, handle: str) -> dict[str, Any]:
         return _parse_js_json(await self.run_js(manifest_js.build_click_script(handle)))

@@ -276,6 +276,40 @@ def remember_manifest(driver, *, limit: int, offset: int, roles, manifest: dict[
         _manifest_cache[driver] = (record[1], _manifest_key(limit, offset, roles), manifest)
 
 
+#: The single most recent inspect_handle() result for a driver, alongside the
+#: handle it answered and the moment it was read. The registry's own
+#: consequence check (tools/registry.py) reads a handle immediately before
+#: genuinely acting on it; JARVIS Chrome's click_handle/fill_handle
+#: (surfaces/web/cdp.py) would otherwise repeat that exact JS round trip a
+#: heartbeat later to get the same answer, on every single click or fill —
+#: the most common actions in any web errand. Short TTL: if enough time
+#: passes for it to expire — a user confirmation prompt, in practice — a
+#: description that old shouldn't be acted on anyway, so a fresh read there
+#: is correct, not just cautious.
+_inspect_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_INSPECT_REUSE_S = 2.0
+
+
+def cached_inspect(driver, handle: str) -> dict[str, Any] | None:
+    """The last inspect_handle() answer for *driver*, if it was for this
+    exact handle and recent enough to still be trusted."""
+    try:
+        cached = _inspect_cache.get(driver)
+    except TypeError:
+        return None
+    if cached is None:
+        return None
+    at, cached_handle, info = cached
+    if cached_handle != handle or time.monotonic() - at > _INSPECT_REUSE_S:
+        return None
+    return info
+
+
+def remember_inspect(driver, handle: str, info: dict[str, Any]) -> None:
+    with contextlib.suppress(TypeError):
+        _inspect_cache[driver] = (time.monotonic(), handle, info)
+
+
 def acted(driver=None) -> None:
     """Something was done to the page (or, with no driver, possibly to any
     page — a key pressed at the system level, a link opened): the next
@@ -283,10 +317,12 @@ def acted(driver=None) -> None:
     if driver is None:
         _settled.clear()
         _manifest_cache.clear()
+        _inspect_cache.clear()
         return
     with contextlib.suppress(TypeError):
         _settled.pop(driver, None)
         _manifest_cache.pop(driver, None)
+        _inspect_cache.pop(driver, None)
 
 
 async def _still_settled(driver) -> bool:

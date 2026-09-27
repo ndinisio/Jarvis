@@ -503,6 +503,37 @@ async def test_live_inspecting_a_recycled_node_flags_the_content_change(lab):
 
 
 @live
+async def test_live_click_handle_reuses_an_inspect_taken_a_moment_ago(lab):
+    """The registry's own consequence check (tools/registry.py) calls
+    inspect_handle() on a handle immediately before click_handle/fill_handle
+    act on it — on JARVIS Chrome those used to redo the exact same JS round
+    trip a heartbeat later to get an answer already in hand. That doubled
+    the round trips of the two most common actions in any web errand."""
+    handle, _ = await _handle(lab, "Save")
+    calls: list[str] = []
+    original = lab.inspect_handle
+
+    async def counting(h):
+        calls.append(h)
+        return await original(h)
+
+    lab.inspect_handle = counting
+    info = await lab.inspect_handle(handle)
+    assert info["found"] and len(calls) == 1
+
+    result = await lab.click_handle(handle)
+    assert result["ok"]
+    assert len(calls) == 1, "click_handle must reuse the inspect just taken, not repeat it"
+
+    notes, _ = await _handle(lab, "Notes")
+    info = await lab.inspect_handle(notes)
+    assert info["found"] and len(calls) == 2
+    result = await lab.fill_handle(notes, "hello again")
+    assert result["ok"]
+    assert len(calls) == 2, "fill_handle must reuse the inspect just taken, not repeat it"
+
+
+@live
 async def test_live_scroll_keys_and_back(lab):
     result = await lab.scroll("bottom")
     assert result["ok"] and result["y"] > 0
