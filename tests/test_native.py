@@ -381,6 +381,35 @@ async def test_a_recycled_row_refuses_to_be_pressed_as_if_unchanged(notes):
         await surface.press(handle)
 
 
+async def test_describe_and_press_each_ask_the_accessibility_server_once(notes):
+    """_resolve() reads a control's full attributes to verify it and its
+    content are still what the handle promised — describe() (the registry's
+    own consequence check, run before every action) and each action
+    (press/type_into/choose_option/...) used to re-fetch that identical,
+    already-in-hand set of attributes right afterwards, doubling the
+    Accessibility-server round trips behind every single native action."""
+    surface, backend, _, parts = notes
+    handle = await _handle(surface, "New Note")
+
+    calls = {"n": 0}
+    original = backend.attributes
+
+    def counting(element, names):
+        calls["n"] += 1
+        return original(element, names)
+
+    backend.attributes = counting
+
+    info = await surface.describe(handle)
+    assert info["text"] == "New Note"
+    assert calls["n"] == 1, "describe() must fetch the control's attributes only once"
+
+    calls["n"] = 0
+    summary = await surface.press(handle)
+    assert parts["new_note"].performed == ["AXPress"] and "Pressed" in summary
+    assert calls["n"] == 1, "press() must reuse _resolve()'s own fetch, not repeat it"
+
+
 def test_poll_returns_as_soon_as_the_condition_is_true():
     """The fixed-sleep replacement: activation and menu-populate waits now
     poll instead of guessing one flat delay — this proves the poll itself

@@ -159,8 +159,7 @@ class NativeSurface:
         return await asyncio.to_thread(self._describe, handle)
 
     def _describe(self, handle: str) -> dict[str, Any]:
-        element, pid = self._resolve(handle)
-        attrs = self.backend.attributes(element, ax.ATTRIBUTES)
+        element, pid, attrs = self._resolve(handle)
         role = str(attrs.get("AXRole") or "")
         return {"role": ax.SUBROLE_NAMES.get(str(attrs.get("AXSubrole") or ""))
                 or ax.ROLE_NAMES.get(role, role), "text": ax.label_for(attrs),
@@ -172,9 +171,8 @@ class NativeSurface:
         return await asyncio.to_thread(self._press, handle, clicks, button)
 
     def _press(self, handle: str, clicks: int, button: str) -> str:
-        element, pid = self._resolve(handle)
+        element, pid, attrs = self._resolve(handle)
         backend = self.backend
-        attrs = backend.attributes(element, ax.ATTRIBUTES)
         name = ax.label_for(attrs) or ax.ROLE_NAMES.get(str(attrs.get("AXRole")), "control")
         if attrs.get("AXEnabled") is False:
             raise NativeError(f"“{name}” is greyed out right now.")
@@ -202,9 +200,8 @@ class NativeSurface:
         return await asyncio.to_thread(self._type_into, handle, text, replace, submit)
 
     def _type_into(self, handle: str, text: str, replace: bool, submit: bool) -> tuple[str, str]:
-        element, pid = self._resolve(handle)
+        element, pid, attrs = self._resolve(handle)
         backend = self.backend
-        attrs = backend.attributes(element, ax.ATTRIBUTES)
         name = ax.label_for(attrs) or "the field"
         if attrs.get("AXSubrole") == "AXSecureTextField":
             raise NativeError(f"“{name}” is a password field — I never type passwords. "
@@ -274,9 +271,9 @@ class NativeSurface:
         return await asyncio.to_thread(self._choose_option, handle, option)
 
     def _choose_option(self, handle: str, option: str) -> str:
-        element, pid = self._resolve(handle)
+        element, pid, attrs = self._resolve(handle)
         backend = self.backend
-        name = ax.label_for(backend.attributes(element, ax.ATTRIBUTES)) or "the menu"
+        name = ax.label_for(attrs) or "the menu"
         items = self._menu_items(element)
         opened = False
         if not items:
@@ -340,11 +337,8 @@ class NativeSurface:
         return await asyncio.to_thread(self._drag, source, target)
 
     def _drag(self, source: str, target: str) -> str:
-        start, pid = self._resolve(source)
-        end, _ = self._resolve(target)
-        backend = self.backend
-        a = backend.attributes(start, ax.ATTRIBUTES)
-        b = backend.attributes(end, ax.ATTRIBUTES)
+        start, pid, a = self._resolve(source)
+        end, _, b = self._resolve(target)
         fa, fb = ax.frame_of(a), ax.frame_of(b)
         if fa is None or fb is None:
             raise NativeError("One of those has no position on screen to drag from or to.")
@@ -357,8 +351,8 @@ class NativeSurface:
         await asyncio.to_thread(self._scroll_to, handle)
 
     def _scroll_to(self, handle: str) -> None:
-        element, pid = self._resolve(handle)
-        frame = ax.frame_of(self.backend.attributes(element, ("AXPosition", "AXSize")))
+        _, pid, attrs = self._resolve(handle)
+        frame = ax.frame_of(attrs)
         if frame is not None:
             self._front(pid)
             self.input.move(*frame.center)
@@ -496,7 +490,11 @@ class NativeSurface:
         self._fingerprints[handle] = label
         return handle
 
-    def _resolve(self, handle: str) -> tuple[Any, int]:
+    def _resolve(self, handle: str) -> tuple[Any, int, dict[str, Any]]:
+        """The live element behind *handle*, its owning app, and the
+        attributes just fetched to verify it — handed back rather than
+        discarded, so a caller that needs them too (every one does) reads
+        the app's Accessibility server once per action, not twice."""
         self._require()
         cleaned = str(handle).strip().strip("[]").lower()
         element = self._handles.get(cleaned)
@@ -522,7 +520,7 @@ class NativeSurface:
         window = self.backend.attribute(element, "AXWindow")
         self._guard(self._app_name(pid), _title(self.backend, window) if window is not None else "")
         self.last_app = self._app_name(pid) or self.last_app
-        return element, pid
+        return element, pid, attrs
 
 
 def _title(backend: Any, element: Any) -> str:
