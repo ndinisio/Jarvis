@@ -114,6 +114,32 @@ async def test_a_named_browser_wins(hub):
     assert await hub.for_action(_Ctx("n2"), browser="the JARVIS browser") is jarvis
 
 
+async def test_preferring_a_named_browser_keeps_a_navigating_errand_out_of_jarvis_chrome(hub):
+    """The live bug: "open Safari and search for dog pictures" named Safari
+    in the request, but the errand's first step navigates — which, absent
+    this preference, sends it straight to JARVIS Chrome regardless (see the
+    test above this one) because the operator's own model call has no
+    reason to think to pass browser="Safari" on every single tool call.
+    prefer() applies the interpreter's own objective.app up front, once,
+    so the rest of the policy (rule 2: a task keeps the browser it started
+    in) carries it through the whole errand."""
+    everyday, jarvis = hub.fakes
+    task = _Ctx("pref1")
+    await hub.prefer(task.task_id, "Safari")
+    assert await hub.for_action(task, navigating=True, url="https://duckduckgo.com/?q=dogs") is everyday
+    assert await hub.for_action(task) is everyday
+
+
+async def test_preferring_an_app_that_is_not_a_browser_is_a_no_op(hub):
+    """objective.app also fires for a native errand ("open Notes and…") —
+    that must never be mistaken for a browser preference and silently
+    steer an unrelated later web step towards Safari."""
+    everyday, jarvis = hub.fakes
+    task = _Ctx("pref2")
+    await hub.prefer(task.task_id, "Notes")
+    assert await hub.for_action(task, navigating=True, url="https://www.amazon.co.uk/") is jarvis
+
+
 async def test_off_macos_jarvis_chrome_is_the_only_browser(app, monkeypatch):
     monkeypatch.setattr(hub_module, "IS_MACOS", False)
     hub = BrowserHub(app.deps)

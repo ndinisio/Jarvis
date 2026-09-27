@@ -208,6 +208,20 @@ def _parse_js_json(raw: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {"ok": False, "reason": "unexpected response shape"}
 
 
+#: Real browsers driver_for() can actually reach over AppleScript — not
+#: just any app name a request happens to mention.
+_BROWSER_WORDS = ("safari", "chrome", "brave", "edge", "arc", "chromium")
+
+
+def is_browser_name(name: str) -> bool:
+    """Whether *name* names one of the browsers driver_for() can drive —
+    used to tell "open Safari and search…" (a real browser preference,
+    worth pinning a whole errand to) from an unrelated app name that
+    happens to fill the same field ("open Notes and…")."""
+    lowered = (name or "").strip().lower()
+    return any(word in lowered for word in _BROWSER_WORDS)
+
+
 def driver_for(controller, name: str) -> BrowserDriver:
     lowered = (name or "safari").lower()
     if "safari" in lowered:

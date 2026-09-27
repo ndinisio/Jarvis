@@ -155,6 +155,12 @@ class AutomationCapability(Capability):
         task_id = request.ctx.task_id
         if task_id:
             self.deps.permissions.grant_task(task_id)
+            if self.deps.browsers is not None:
+                # "Open Safari and search…" already named its browser in
+                # objective.app — honour it for the whole errand, not only
+                # if the operator's own model later happens to pass
+                # browser= on a tool call (surfaces/web/hub.py's rule 1).
+                await self.deps.browsers.prefer(task_id, objective.app)
         intelligence = self.deps.config.intelligence
         trace = Trace(self.deps.bus if intelligence.trace else None, self.deps.telemetry,
                       verbose=self.deps.config.ui.developer_mode, task_id=task_id)

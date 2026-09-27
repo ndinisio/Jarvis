@@ -123,6 +123,27 @@ class BrowserHub:
         self._bind(task_id, driver)
         return driver
 
+    async def prefer(self, task_id: str | None, name: str) -> None:
+        """Bind *task_id* to the browser *name* names, before its first web
+        action. Rule 1 above ("a browser named in the request wins") is
+        normally only honoured when a tool call's own ``browser=`` argument
+        happens to carry it — but the interpreter already extracts exactly
+        this as ``Objective.app`` from the request itself ("open Safari and
+        search…"), so there is no need to hope a small model remembers to
+        repeat it on every call it makes. Binding it here, once, up front,
+        means rule 2 ("a task keeps the browser it started in") then carries
+        it through the whole errand, including its first, navigating step —
+        which would otherwise default straight to JARVIS Chrome."""
+        if not task_id or not name:
+            return
+        from ...tools.browser.tools import is_browser_name
+
+        if not is_browser_name(name):
+            return
+        driver = await self._named(name)
+        if driver is not None:
+            self._bind(task_id, driver)
+
     def _bind(self, task_id: str | None, driver) -> None:
         if not task_id or driver is None:
             return

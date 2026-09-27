@@ -115,6 +115,31 @@ async def test_an_errand_runs_its_actions_and_finishes_with_proof(app, scripted,
         "the task grant must be revoked once the task ends"
 
 
+async def test_an_errand_names_its_browser_preference_before_its_first_step(app, scripted, monkeypatch):
+    """The live bug: "open Safari and search for dog pictures" — the
+    interpreter already reads "Safari" into objective.app, but nothing
+    used to act on it, so an errand whose first step navigates defaulted
+    to JARVIS Chrome regardless (surfaces/web/hub.py's own rule 1 only
+    fired when a tool call's browser= argument carried it). The capability
+    must hand objective.app to the hub before the operator's first step,
+    so the hub can bind the whole task to it (hub.py's prefer())."""
+    preferred = []
+
+    class FakeHub:
+        async def prefer(self, task_id, name):
+            preferred.append((task_id, name))
+
+        def release(self, task_id):
+            pass
+
+    app.deps.browsers = FakeHub()
+    scripted.step(finish("done"))
+    task, _ = await _run(app, "open Safari and search for dog pictures",
+                         Objective(goal="search for dog pictures", app="Safari",
+                                   complexity="multi_step"))
+    assert preferred == [(task.id, "Safari")]
+
+
 async def test_finish_is_refused_until_the_last_step_has_really_happened(app, scripted, monkeypatch):
     """The v2 failure this loop exists for: "complete" claimed one step
     before clicking Add to Basket. A claim with no proof is refused, the
