@@ -309,3 +309,41 @@ async def test_the_control_channel_turns_strangers_away_over_real_tcp():
     failed = [r["id"] for r in results if not r["ok"]]
     assert not failed, failed
     assert len(results) >= 9
+
+
+# ---------------------------------------------------------------------------- the dedicated Amazon benchmark
+def test_the_basket_family_keeps_only_fresh_add_to_basket_tasks():
+    from evals.run_amazon_basket import basket_family
+
+    chosen = basket_family(load_web_tasks())
+    ids = {t.id for t in chosen}
+    assert len(chosen) >= 15
+    assert all(t.category.startswith("shop") for t in chosen)
+    assert all(not t.setup for t in chosen)
+    # a removal task against a pre-seeded basket, not an addition
+    assert "shop-remove-kettle" not in ids
+    # a nav task that happens to share the "shop" prefix territory in spirit
+    # but not the category, and carries no basket_has check
+    assert "shop-deals" not in ids
+    assert "shop-usb-cable" in ids and "shop-mouse-blue" in ids
+
+
+def test_amazon_basket_summary_counts_false_completions_and_wrong_actions():
+    from evals.harness import TaskResult
+    from evals.run_amazon_basket import summarise
+
+    honest_failure = TaskResult(id="a", category="shop", phrasing="", ok=False, wall_s=1.0,
+                                task_claimed_success=False)
+    false_completion = TaskResult(id="b", category="shop", phrasing="", ok=False, wall_s=2.0,
+                                  task_claimed_success=True)
+    never_attempted = TaskResult(id="c", category="shop", phrasing="", ok=False, wall_s=0.5,
+                                 task_claimed_success=None)
+    passed = TaskResult(id="d", category="shop", phrasing="", ok=True, wall_s=3.0,
+                        task_claimed_success=True)
+    results = [(honest_failure, True), (false_completion, False), (never_attempted, False), (passed, False)]
+
+    summary = summarise(results)
+    assert summary["total"] == 4 and summary["passed"] == 1
+    assert summary["false_completions"] == 1
+    assert summary["never_attempted"] == 1
+    assert summary["wrong_actions_count"] == 1

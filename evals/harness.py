@@ -76,6 +76,16 @@ class TaskResult:
     #: confirmation ever being requested for it — should always be zero;
     #: a non-zero value means the permission gate missed something real.
     catastrophic_actions: int = 0
+    #: Traced replan escalations (three failed attempts in a row) — how
+    #: often the loop had to give up on its current approach and rethink.
+    replans: int = 0
+    #: What JARVIS itself believed: True/False once a background task
+    #: reached a terminal status, None if the turn never ran one (e.g. it
+    #: answered as plain chat instead of attempting the errand at all).
+    #: Compared against the harness's own independent `ok` check, this is
+    #: what tells a false completion (claimed success, state says no) apart
+    #: from a silent non-attempt (claimed nothing, state says no).
+    task_claimed_success: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -245,6 +255,9 @@ async def drive_turn(app, text: str, record: TaskResult, *, approve: list[str],
         elif (event.type == EventType.INTELLIGENCE_TRACE and payload.get("stage") == "recover"
               and payload.get("strategy") == "duplicate"):
             record.duplicate_actions += 1
+        elif (event.type == EventType.INTELLIGENCE_TRACE and payload.get("stage") == "recover"
+              and payload.get("strategy") == "replan"):
+            record.replans += 1
         elif event.type == EventType.CONFIRM_REQUEST:
             details = payload.get("details") or {}
             # A handoff ("sign in, then say done") is the user's own work; the
@@ -307,6 +320,8 @@ async def _converse(app, text: str, record: TaskResult) -> None:
     task = app.tasks.get(result.task_id)
     while task is not None and task.status not in {"succeeded", "failed", "cancelled"}:
         await asyncio.sleep(0.05)
+    if task is not None:
+        record.task_claimed_success = task.status == "succeeded"
     runner = task._runner if task is not None else None
     if runner is not None:
         with contextlib.suppress(Exception):
