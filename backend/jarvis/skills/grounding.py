@@ -67,7 +67,8 @@ def _normal(text: str) -> str:
 
 
 def find(listing: str, *, text: str | list[str] = "", role: str | list[str] = "",
-         href: str = "", best_match: str = "", fillable: bool = False) -> Listed | None:
+         href: str = "", best_match: str = "", fillable: bool = False,
+         exclude_text: str | list[str] = "") -> Listed | None:
     """The element best fitting the description, or None.
 
     * ``text`` — one label or several alternatives ("Add to Basket" / "Add
@@ -78,11 +79,17 @@ def find(listing: str, *, text: str | list[str] = "", role: str | list[str] = ""
     * ``best_match`` — the one sharing the most words with this text (the
       search result for "AA batteries"), first in the listing on a tie —
       never one sharing none.
+    * ``exclude_text`` — ruled out by an exact label match: page chrome that
+      happens to share a role with what's wanted ("Search in", a department
+      filter, is a ``select`` same as a product's own colour/size picker)
+      but is never the thing being described.
     """
     roles = {role} if isinstance(role, str) and role else set(role or [])
     roles = {r.lower() for r in roles}
     texts = [text] if isinstance(text, str) else list(text or [])
     texts = [_normal(t) for t in texts if t and t.strip()]
+    excluded = {_normal(t) for t in ([exclude_text] if isinstance(exclude_text, str) else exclude_text)
+               if t and t.strip()}
     candidates = []
     for item in parse(listing):
         if roles and item.role not in roles:
@@ -90,6 +97,8 @@ def find(listing: str, *, text: str | list[str] = "", role: str | list[str] = ""
         if fillable and item.role not in FILLABLE:
             continue
         if href and href.lower() not in item.href.lower():
+            continue
+        if excluded and _normal(item.text) in excluded:
             continue
         candidates.append(item)
     if texts:

@@ -219,7 +219,8 @@ def _find(view: str, wanted: dict[str, Any], *, fillable: bool = False):
     return grounding.find(view, text=wanted.get("text") or "", role=wanted.get("role") or "",
                           href=str(wanted.get("href") or ""),
                           best_match=str(wanted.get("best_match") or ""),
-                          fillable=fillable or bool(wanted.get("fillable")))
+                          fillable=fillable or bool(wanted.get("fillable")),
+                          exclude_text=wanted.get("exclude_text") or "")
 
 
 def _describe(wanted: dict[str, Any]) -> str:

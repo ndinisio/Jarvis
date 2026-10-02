@@ -170,6 +170,42 @@ async def test_harness_runs_a_real_jarvis_turn_against_the_mock_site():
 
 
 @live
+async def test_the_add_to_basket_recipe_picks_the_variant_select_not_page_chrome():
+    """A product's colour/size picker is a ``select``, same role as the page
+    header's "Search in" department filter and the product's own quantity
+    picker — both present on every product page regardless of the product.
+    Regression test for exactly this: the recipe's fill step once grounded
+    to whichever select came first in the page (the header one), silently
+    typed the colour into it, and the real variant was never chosen."""
+    from pathlib import Path
+
+    from jarvis.intelligence.schema import Complexity, Objective
+    from jarvis.skills.library import SkillLibrary
+    from jarvis.skills.runner import SkillRunner
+
+    from evals.harness import Harness, attach_browser
+
+    async with Harness(model="oracle") as harness:
+        harness.server.reset({})
+        await harness._reset_browser("")
+        app, _ = harness.build_app(Path(harness._tmp.name) / "variant-regression")
+        library = SkillLibrary()
+        skill = library.get("amazon-add-to-basket")
+        objective = Objective(goal="add a blue Logitech wireless mouse to my Amazon basket",
+                              targets=["blue Logitech wireless mouse"], complexity=Complexity.MULTI_STEP)
+        params = library.parameters(skill, objective,
+                                    text="add a blue Logitech wireless mouse to my Amazon basket")
+        assert params["variant"] == "Blue", "the deterministic word match itself"
+        with attach_browser(app, harness.driver):
+            outcome = await SkillRunner(app.deps, app.deps.tool_context()).run(skill, params)
+        assert outcome.ok, outcome.reason
+        cart = harness.server.state()["amazon"]["cart"]
+        assert cart == [{"asin": "B0MOUSEM185", "title": "Logitech M185 Wireless Mouse",
+                        "price": 12.99, "qty": 1, "variant": "Blue"}]
+        await app.shutdown()
+
+
+@live
 async def test_harness_blocks_the_real_internet():
     from evals.harness import Harness
 

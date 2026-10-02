@@ -132,7 +132,8 @@ def summarise(results: list[tuple[TaskResult, bool]]) -> dict[str, Any]:
         # for a cloud-provider run this mostly reflects the browser +
         # harness overhead, since inference happens on the provider's own
         # hardware; read it as the latency/network figure instead there.
-        "peak_rss_mb": round(usage.ru_maxrss / (1024.0 if sys.platform == "linux" else 1), 1),
+        # ru_maxrss is kilobytes on Linux but bytes on macOS (BSD-derived).
+        "peak_rss_mb": round(usage.ru_maxrss / (1024.0 if sys.platform == "linux" else 1024.0 * 1024.0), 1),
         "cpu_user_s": round(usage.ru_utime, 1),
         "cpu_sys_s": round(usage.ru_stime, 1),
     }

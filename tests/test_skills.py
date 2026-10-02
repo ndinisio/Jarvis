@@ -219,6 +219,24 @@ def test_an_element_is_found_by_what_it_is():
     assert grounding.mentions("Open dialog: Added to Basket", ["Added to Cart", "added to basket"])
 
 
+SELECTS = ('[jv1] select "Search in" options=All Departments|Electronics value="All Departments"\n'
+          '[jv3] select "Colour" options=Select|Grey|Blue|Red value="Select"\n'
+          '[jv4] select "Quantity" options=1|2|3|4|5 value="1"')
+
+
+def test_exclude_text_rules_out_page_chrome_that_shares_a_role():
+    """A product's own variant picker is a ``select``, same as the page
+    header's department filter and the product's own quantity picker — the
+    thing that actually distinguishes it is that it isn't either of those."""
+    found = grounding.find(SELECTS, role="select", fillable=True,
+                           exclude_text=["Search in", "Quantity"])
+    assert found.handle == "jv3"
+    # a page with no variant picker at all has nothing left to find
+    no_variant = SELECTS.split("\n")[0] + "\n" + SELECTS.split("\n")[2]
+    assert grounding.find(no_variant, role="select", fillable=True,
+                          exclude_text=["Search in", "Quantity"]) is None
+
+
 # ---------------------------------------------------------------------------
 # running
 # ---------------------------------------------------------------------------

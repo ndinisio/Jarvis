@@ -16,12 +16,12 @@ skills:
     steps:
       - go: "https://{domain}/s?k={query|url}"
       - click: {role: link, href: /dp/, best_match: "{query}"}
-      # A variant picker, when the product has one, is the first select on
-      # the page (ahead of quantity) — true for every product tested so far,
-      # not a guarantee for every site. Any product without one simply has
-      # no select to find, or one that doesn't take this value; either way
-      # this step is skippable and the next one proceeds regardless.
-      - fill: {role: select, fillable: true}
+      # The variant picker, when the product has one, is a select — but so is
+      # the department filter in the page header ("Search in") and the
+      # quantity picker, both on every product page regardless. Naming the
+      # two to rule out leaves whatever's left, which is the variant select
+      # exactly when one exists, and nothing when it doesn't.
+      - fill: {role: select, fillable: true, exclude_text: ["Search in", Quantity]}
         with: "{variant}"
         optional: true
       - click: {text: [Add to Basket, Add to Cart], role: button}
