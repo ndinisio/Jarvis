@@ -482,7 +482,8 @@ class _Run:
         if (spec.changes_state and not spec.safe_to_retry and spec.category not in _INTERACTIVE
                 and key in self.done_changes):
             return self._refuse(name, cleaned, "you already did exactly this and it worked "
-                                               f"(“{self.done_changes[key]}”); don't repeat it")
+                                               f"(“{self.done_changes[key]}”); don't repeat it",
+                                duplicate=True)
 
         if self.vet is not None:
             question = self.vet(name, cleaned)
@@ -497,7 +498,7 @@ class _Run:
         screen = self.screen if name in OBSERVE_AFTER or name in OBSERVERS else ""
         hint = self.stuck.already_seen(screen, name, cleaned)
         if hint:
-            return self._refuse(name, cleaned, hint)
+            return self._refuse(name, cleaned, hint, duplicate=True)
         started = time.monotonic()
         view_before = self.screen
         result = await self.registry.call(name, cleaned, self.ctx)
@@ -596,9 +597,14 @@ class _Run:
             text += "\n\nWhat's on screen now:\n" + outcome.view[:PAGE_CHARS]
         return _Outcome(text=text, short=first_line(text), ran=True, ok=outcome.ok)
 
-    def _refuse(self, name: str, arguments: dict, problem: str) -> _Outcome:
+    def _refuse(self, name: str, arguments: dict, problem: str, *, duplicate: bool = False) -> _Outcome:
         if self.trace is not None:
             self.trace.step(self.steps, name, arguments, f"rejected: {problem}")
+            if duplicate:
+                # A distinct, structured signal (not just free text in the
+                # step note) for "this would have repeated an action" —
+                # exactly what a benchmark's duplicate-action rate counts.
+                self.trace.recover("duplicate", problem, tool=name)
         self.stuck.record("", name, arguments, False)
         return _Outcome(text=f"Not run: {problem}.", ran=False, ok=False)
 

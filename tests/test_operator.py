@@ -288,6 +288,31 @@ async def test_an_identical_state_change_that_worked_is_not_repeated(app, fake_p
     assert result.status == Status.FINISHED
 
 
+async def test_a_repeated_action_is_recorded_as_a_duplicate_in_the_trace(app, fake_provider,
+                                                                         approve_routine, monkeypatch):
+    """A benchmark (evals/) needs a clean, structured signal for "this would
+    have repeated an action" to compute a duplicate-action rate — not just
+    the free-text hint folded into the model's own next prompt, which is
+    for the model, not for measurement."""
+    from jarvis.intelligence.observability import Trace
+
+    _stub(app, monkeypatch, "create_reminder",
+         ToolResult(data={"title": "Buy milk"}, summary="Reminder “Buy milk” created."))
+    Script(fake_provider,
+          call("create_reminder", title="Buy milk"),
+          call("create_reminder", title="Buy milk"),
+          call("finish", summary="Done."))
+    trace = Trace()
+    operator = Operator(app.deps, trace=trace)
+    await asyncio.wait_for(
+        operator.run("remind me to buy milk", app.deps.tool_context(), tools=["create_reminder"],
+                     budget=Budget(steps=10, wall_s=30, model_calls=20)),
+        timeout=10)
+    duplicates = [e for e in trace.entries if e.get("stage") == "recover" and e.get("strategy") == "duplicate"]
+    assert len(duplicates) == 1
+    assert duplicates[0]["tool"] == "create_reminder"
+
+
 @pytest.mark.parametrize("answer", ["timeout", "no"])
 async def test_a_decline_ends_the_run_without_asking_the_model_again(app, fake_provider, monkeypatch,
                                                                      answer):
@@ -327,6 +352,36 @@ async def test_a_repeated_action_on_an_unchanged_page_gets_a_hint(app, fake_prov
     assert "changed nothing" not in script.prompts[2]
     assert "changed nothing" in script.prompts[3]
     assert len(clicks) == 1, "the repeat must be refused outright, not run and only complained about after"
+
+
+async def test_a_refused_repeat_on_an_unchanged_screen_is_also_a_traced_duplicate(
+        app, fake_provider, approve_routine, monkeypatch):
+    """The other duplicate-refusal path (stuck.already_seen, pre-execution
+    on an unchanged screen) must emit the same structured trace signal as
+    the done_changes path above — a benchmark counting duplicates shouldn't
+    have to know there are two separate code paths that can produce one."""
+    from jarvis.intelligence.observability import Trace
+
+    _stub(app, monkeypatch, "click_page_element",
+         ToolResult(data={"clicked": True}, summary="Clicked “More”."))
+    _stub(app, monkeypatch, "read_page_manifest", ToolResult(
+        data={"url": "https://x.example"}, summary="3 elements found on X.",
+        observation='Page: X — https://x.example\n[jv1] button "More"'))
+    Script(fake_provider,
+          call("read_page_manifest"),
+          call("click_page_element", handle="jv1", label="More"),
+          call("click_page_element", handle="jv1", label="More"),
+          call("give_up", reason="stuck"))
+    trace = Trace()
+    operator = Operator(app.deps, trace=trace)
+    await asyncio.wait_for(
+        operator.run("do it", app.deps.tool_context(),
+                     tools=["click_page_element", "read_page_manifest"],
+                     budget=Budget(steps=10, wall_s=30, model_calls=20)),
+        timeout=10)
+    duplicates = [e for e in trace.entries if e.get("stage") == "recover" and e.get("strategy") == "duplicate"]
+    assert len(duplicates) == 1
+    assert duplicates[0]["tool"] == "click_page_element"
 
 
 async def test_repeated_navigation_to_the_same_page_is_refused_not_reloaded(app, fake_provider,
