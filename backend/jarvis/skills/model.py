@@ -52,10 +52,13 @@ class Param:
     required: bool = True
     #: Where a direct run finds it: "target" (the objective's first target),
     #: "domain" (the site the user named, when it's one of this skill's),
-    #: "app", or "" (only when the operator supplies it).
+    #: "app", "word" (the first of ``words`` said in the request, e.g. a
+    #: colour), or "" (only when the operator supplies it).
     source: str = ""
     #: Used when the source has nothing ("www.amazon.co.uk").
     default: str = ""
+    #: For ``source == "word"``: the vocabulary to look for ("Blue", "Red", …).
+    words: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -101,7 +104,7 @@ class Skill:
                 "words": self.words, "requires": self.requires, "excludes": self.excludes,
                 "implied": self.implied, "params": {p.name: {"description": p.description,
                                                          "required": p.required, "from": p.source,
-                                                         "default": p.default}
+                                                         "default": p.default, "words": list(p.words)}
                                                 for p in self.params},
                 "steps": self.steps, "done_when": self.done_when, "summary": self.summary,
                 "source": self.source, "uses": self.uses, "failures_in_row": self.failures_in_row}
@@ -135,7 +138,8 @@ def load(data: dict[str, Any], *, source: str = "builtin") -> Skill:
         params.append(Param(name=str(name), description=str(spec.get("description") or ""),
                             required=spec.get("required", True) is not False,
                             source=str(spec.get("from") or ""),
-                            default=str(spec.get("default") or "")))
+                            default=str(spec.get("default") or ""),
+                            words=tuple(str(w) for w in spec.get("words") or [])))
     return Skill(
         id=skill_id, title=title, steps=list(steps),
         description=str(data.get("description") or title),

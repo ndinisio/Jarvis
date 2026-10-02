@@ -180,11 +180,25 @@ def test_parameters_come_from_what_was_understood():
     skill = library.get("amazon-add-to-basket")
     us = library.parameters(skill, Objective(goal="add tea to my amazon.com cart", site="amazon.com",
                                              targets=["tea"]))
-    assert us == {"query": "tea", "domain": "www.amazon.com"}
+    assert us == {"query": "tea", "domain": "www.amazon.com", "variant": ""}
     uk = library.parameters(skill, Objective(goal="add tea to my basket", targets=["tea"]))
     assert uk["domain"] == "www.amazon.co.uk", "the default when no site was named"
     assert library.parameters(skill, Objective(goal="add something to my basket")) is None
     assert skill.parameter_schema()["required"] == ["query"], "defaults aren't asked for"
+
+
+def test_an_unresolved_colour_or_size_is_not_asked_for_but_a_mentioned_one_is_used():
+    library = SkillLibrary()
+    skill = library.get("amazon-add-to-basket")
+    plain = library.parameters(skill, Objective(goal="add a kettle to my basket", targets=["kettle"]))
+    assert plain["variant"] == ""
+    blue = library.parameters(skill, Objective(
+        goal="add a blue Logitech mouse to my amazon basket", targets=["blue Logitech mouse"]))
+    assert blue["variant"] == "Blue"
+    # case-insensitive, and the word's own listed casing is what's used to fill the page
+    shout = library.parameters(skill, Objective(
+        goal="ADD THE WHITE KETTLE TO MY BASKET", targets=["white kettle"]))
+    assert shout["variant"] == "White"
 
 
 # ---------------------------------------------------------------------------

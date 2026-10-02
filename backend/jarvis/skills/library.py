@@ -115,7 +115,7 @@ class SkillLibrary:
     def direct(self, objective: Any, text: str = "") -> tuple[Skill, dict[str, str]] | None:
         """The skill that can run without a model, and its parameters."""
         for skill in self.relevant(objective, text):
-            params = self.parameters(skill, objective)
+            params = self.parameters(skill, objective, text=text)
             if params is not None:
                 return skill, params
         return None
@@ -123,10 +123,11 @@ class SkillLibrary:
     def offer(self, objective: Any, text: str = "", limit: int = 3) -> list[Skill]:
         return self.relevant(objective, text)[:limit]
 
-    def parameters(self, skill: Skill, objective: Any, given: dict[str, Any] | None = None
-                   ) -> dict[str, str] | None:
+    def parameters(self, skill: Skill, objective: Any, given: dict[str, Any] | None = None,
+                   text: str = "") -> dict[str, str] | None:
         """Every parameter's value, or None if a required one is unknown."""
         given = {k: str(v) for k, v in (given or {}).items() if v not in (None, "")}
+        about = ""
         values: dict[str, str] = {}
         for param in skill.params:
             value = given.get(param.name, "")
@@ -137,10 +138,13 @@ class SkillLibrary:
                 value = _domain(getattr(objective, "site", "") or "", skill.sites)
             elif not value and param.source == "app":
                 value = str(getattr(objective, "app", "") or "").strip()
+            elif not value and param.source == "word" and param.words:
+                about = about or _about(objective, text)
+                value = next((w for w in param.words if _has(about, w.lower())), "")
             value = value or param.default
             if not value and param.required:
                 return None
-            if value:
+            if value or not param.required:
                 values[param.name] = value
         return values
 

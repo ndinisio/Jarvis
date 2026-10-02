@@ -10,9 +10,20 @@ skills:
     params:
       query: {description: what to buy, in a few words, from: target}
       domain: {from: domain, default: www.amazon.co.uk}
+      variant: {description: the colour or size asked for, if any, from: word, required: false,
+                words: [Black, White, Grey, Gray, Blue, Red, Green, Silver, Gold, Pink, Purple,
+                        Yellow, Orange, Brown, Small, Medium, Large]}
     steps:
       - go: "https://{domain}/s?k={query|url}"
       - click: {role: link, href: /dp/, best_match: "{query}"}
+      # A variant picker, when the product has one, is the first select on
+      # the page (ahead of quantity) — true for every product tested so far,
+      # not a guarantee for every site. Any product without one simply has
+      # no select to find, or one that doesn't take this value; either way
+      # this step is skippable and the next one proceeds regardless.
+      - fill: {role: select, fillable: true}
+        with: "{variant}"
+        optional: true
       - click: {text: [Add to Basket, Add to Cart], role: button}
     done_when: [Added to Basket, Added to Cart]
     summary: "I've added {query} to your Amazon basket."
