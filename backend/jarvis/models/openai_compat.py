@@ -166,10 +166,15 @@ class OpenAICompatibleProvider(ModelProvider):
             if resp.status_code < 400:
                 break
             body = resp.text[:600]
-            # Not every compatible server takes a JSON schema; plain JSON
-            # mode plus the caller's own validation is the next best thing.
-            if attempt == 0 and schema is not None and resp.status_code == 400 \
-                    and "response_format" in body.lower():
+            # Not every compatible server takes a JSON schema at all (the
+            # parameter itself is rejected), and some that do take it still
+            # 400 when their own generation doesn't satisfy it (Groq's
+            # "json_validate_failed" — a model stumbling on strict mode,
+            # not a request error). Either way, plain JSON mode plus the
+            # caller's own validation (schema.py's load()) is the next
+            # best thing, so any schema'd 400 on the first attempt is
+            # worth the one retry rather than failing the whole call.
+            if attempt == 0 and schema is not None and resp.status_code == 400:
                 payload["response_format"] = {"type": "json_object"}
                 continue
             if tools and resp.status_code == 400 and "tool" in body.lower() and "support" in body.lower():

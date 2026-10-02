@@ -366,6 +366,37 @@ async def test_openai_compatible_falls_back_to_json_mode_when_schemas_are_unsupp
     await provider.close()
 
 
+async def test_openai_compatible_falls_back_to_json_mode_on_a_generation_time_schema_failure():
+    """The live bug: Groq's strict json_schema mode can 400 because its own
+    generation didn't satisfy the schema (code="json_validate_failed") —
+    a different failure from "this server doesn't support response_format
+    at all" (the case above, whose body happens to mention the word). The
+    same safe fallback applies regardless of why strict mode failed: ask
+    for plain JSON instead, since the caller re-validates the result
+    against the schema anyway. Before this fix, a provider whose model
+    occasionally stumbles on strict mode would surface as the whole
+    request failing outright — which is exactly what silently sent a real
+    "add to basket" task through the chat fallback instead of automation
+    instead of raising where this test can catch it."""
+    formats: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        formats.append(body.get("response_format"))
+        if body["response_format"]["type"] == "json_schema":
+            return httpx.Response(400, json={"error": {
+                "message": "Failed to validate JSON. Please adjust your prompt.",
+                "type": "invalid_request_error", "code": "json_validate_failed",
+                "failed_generation": ""}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"mode": "action"}'}}]})
+
+    provider = _mount(OpenAICompatibleProvider("http://x.test/v1", "k"), handler)
+    completion = await provider.chat([ChatMessage("user", "x")], "m", schema={"type": "object"})
+    assert [f["type"] for f in formats] == ["json_schema", "json_object"]
+    assert completion.text == '{"mode": "action"}'
+    await provider.close()
+
+
 def test_thinking_filter_handles_split_tags_and_plain_text():
     from jarvis.models.base import ThinkingFilter, strip_thinking
 
