@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from jarvis.intelligence.catalog import ToolCatalog
@@ -484,6 +485,123 @@ async def test_triage_schema_requires_positive_evidence_for_action():
 
     grounded = Triage(mode="action", action_evidence=["open safari"])
     assert grounded.mode == "action"
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+async def test_triage_retries_a_transient_model_failure_before_falling_back(monkeypatch):
+    """A rate limit or a timeout is not "the model is gone" — the same
+    couple-of-quick-tries the operator loop gives its own model call, so a
+    brief hiccup doesn't silently drop the request as chat instead."""
+    import jarvis.intelligence.triage as triage_module
+    from jarvis.core.errors import RateLimited
+
+    monkeypatch.setattr(triage_module.asyncio, "sleep", _no_sleep)
+    calls = []
+
+    async def complete_json(slot, messages, **kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RateLimited("busy")
+        return {"mode": "chat", "action_evidence": [], "reason": "fine on the third try"}
+
+    triage = triage_module.IntentTriage(SimpleNamespace(complete_json=complete_json))
+    result = await triage.decide("hello", ConversationState())
+    assert len(calls) == 3
+    assert result.reason == "fine on the third try"
+
+
+async def test_triage_falls_back_to_chat_only_after_exhausting_retries(monkeypatch):
+    """Still gives up to the deliberately-safe chat fallback — just not on
+    the very first blip."""
+    import jarvis.intelligence.triage as triage_module
+    from jarvis.core.errors import ModelTimeout
+
+    monkeypatch.setattr(triage_module.asyncio, "sleep", _no_sleep)
+    calls = []
+
+    async def complete_json(slot, messages, **kwargs):
+        calls.append(1)
+        raise ModelTimeout("too slow")
+
+    triage = triage_module.IntentTriage(SimpleNamespace(complete_json=complete_json))
+    result = await triage.decide("hello", ConversationState())
+    assert len(calls) == 3, "the original attempt plus two retries, then give up"
+    assert result.mode == "chat" and result.reason == "triage model unavailable"
+
+
+async def test_triage_does_not_retry_a_non_transient_failure(monkeypatch):
+    """No provider configured at all, or a malformed reply, won't be fixed
+    by waiting a few seconds and asking again — so, unlike a rate limit or a
+    timeout, it fails immediately rather than taxing every such turn with a
+    few pointless extra seconds."""
+    import jarvis.intelligence.triage as triage_module
+
+    monkeypatch.setattr(triage_module.asyncio, "sleep", _no_sleep)
+    calls = []
+
+    async def complete_json(slot, messages, **kwargs):
+        calls.append(1)
+        raise RuntimeError("no model configured")
+
+    triage = triage_module.IntentTriage(SimpleNamespace(complete_json=complete_json))
+    result = await triage.decide("hello", ConversationState())
+    assert len(calls) == 1
+    assert result.mode == "chat" and result.reason == "triage model unavailable"
+
+
+async def test_understanding_retries_a_transient_model_failure_before_giving_up(monkeypatch):
+    import jarvis.intelligence.understanding as understanding_module
+    from jarvis.core.errors import RateLimited
+
+    monkeypatch.setattr(understanding_module.asyncio, "sleep", _no_sleep)
+    calls = []
+
+    async def complete_json(slot, messages, **kwargs):
+        calls.append(1)
+        if len(calls) < 2:
+            raise RateLimited("busy")
+        return {"goal": "add a kettle to my basket"}
+
+    understanding = understanding_module.Understanding(SimpleNamespace(complete_json=complete_json))
+    objective = await understanding._from_model("add a kettle to my basket", ConversationState())
+    assert len(calls) == 2
+    assert objective is not None and objective.goal == "add a kettle to my basket"
+
+
+async def test_understanding_gives_up_to_the_deterministic_fallback_after_retries(monkeypatch):
+    import jarvis.intelligence.understanding as understanding_module
+    from jarvis.core.errors import ModelTimeout
+
+    monkeypatch.setattr(understanding_module.asyncio, "sleep", _no_sleep)
+    calls = []
+
+    async def complete_json(slot, messages, **kwargs):
+        calls.append(1)
+        raise ModelTimeout("too slow")
+
+    understanding = understanding_module.Understanding(SimpleNamespace(complete_json=complete_json))
+    objective = await understanding._from_model("add a kettle to my basket", ConversationState())
+    assert len(calls) == 3, "the original attempt plus two retries, then give up"
+    assert objective is None
+
+
+async def test_understanding_does_not_retry_a_non_transient_failure(monkeypatch):
+    import jarvis.intelligence.understanding as understanding_module
+
+    monkeypatch.setattr(understanding_module.asyncio, "sleep", _no_sleep)
+    calls = []
+
+    async def complete_json(slot, messages, **kwargs):
+        calls.append(1)
+        raise RuntimeError("no model configured")
+
+    understanding = understanding_module.Understanding(SimpleNamespace(complete_json=complete_json))
+    objective = await understanding._from_model("add a kettle to my basket", ConversationState())
+    assert len(calls) == 1
+    assert objective is None
 
 
 async def test_triage_chat_never_touches_the_tool_machinery(app, brain):

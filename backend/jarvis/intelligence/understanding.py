@@ -12,8 +12,10 @@ pretending to understand offline would be worse than admitting the limit.
 
 from __future__ import annotations
 
+import asyncio
 import re
 
+from ..core.errors import ModelTimeout, RateLimited
 from ..core.logging import get_logger
 from ..models.base import ChatMessage
 from .entities import ReferenceResolver
@@ -21,6 +23,12 @@ from .schema import Complexity, Confidence, EntityRef, Objective, load
 from .state import ConversationState, PendingClarification
 
 log = get_logger("jarvis.intelligence.understanding")
+
+#: See triage.py's identical constant and reasoning: a couple of quick
+#: retries for a rate limit or a timeout specifically, before the
+#: deterministic fallback below — not for a non-transient failure (no
+#: provider configured, a malformed reply), which still fails immediately.
+_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0)
 
 UNDERSTANDING_PROMPT = """You work out what the user wants. Reply with JSON only.
 
@@ -111,17 +119,25 @@ class Understanding:
     async def _from_model(self, text: str, state: ConversationState) -> Objective | None:
         context = state.describe_for_model(include_turns=3) or "(no prior context)"
         prompt = UNDERSTANDING_PROMPT.format(context=context, text=text.replace('"', "'"))
-        try:
-            data = await self._models.complete_json(
-                self._slot,
-                [ChatMessage("system", "You extract structured intent. JSON only."),
-                 ChatMessage("user", prompt)],
-                max_tokens=400,
-                timeout_s=25.0,
-            )
-        except Exception as exc:
-            log.debug("understanding model unavailable: %s", exc)
-            return None
+        data = None
+        for attempt in range(len(_RETRY_BACKOFF_S) + 1):
+            try:
+                data = await self._models.complete_json(
+                    self._slot,
+                    [ChatMessage("system", "You extract structured intent. JSON only."),
+                     ChatMessage("user", prompt)],
+                    max_tokens=400,
+                    timeout_s=25.0,
+                )
+                break
+            except (RateLimited, ModelTimeout) as exc:
+                log.debug("understanding model call failed, attempt %d: %s", attempt + 1, exc)
+                if attempt == len(_RETRY_BACKOFF_S):
+                    return None
+                await asyncio.sleep(_RETRY_BACKOFF_S[attempt])
+            except Exception as exc:
+                log.debug("understanding model unavailable: %s", exc)
+                return None
         objective = load(Objective, data)
         if objective is None or not objective.goal.strip():
             return None

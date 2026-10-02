@@ -26,12 +26,27 @@ OpenAI-compatible ``json_schema``) cannot return a malformed reply at all.
 
 from __future__ import annotations
 
+import asyncio
+
+from ..core.errors import ModelTimeout, RateLimited
 from ..core.logging import get_logger
 from ..models.base import ChatMessage
 from .schema import Objective, Triage, load
 from .state import ConversationState
 
 log = get_logger("jarvis.intelligence.triage")
+
+#: A rate limit or a request that timed out is worth a couple of quick
+#: retries before trusting the deliberately-safe "answer as chat" fallback
+#: below — the same short schedule the operator loop gives its own
+#: first-ever model call (loop.py's ``MODEL_RETRY_BACKOFF_FIRST_S``), so a
+#: brief hiccup here doesn't silently drop the request instead of just
+#: taking a moment longer. Deliberately narrower than that one: this call
+#: is a one-shot, foreground, latency-sensitive decision, not a many-minute
+#: background loop, so anything that isn't specifically transient (no
+#: provider configured at all, a malformed reply) still fails immediately
+#: rather than adding seconds of pointless waiting to every such turn.
+_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0)
 
 TRIAGE_PROMPT = """You decide what the user wants. Two modes only.
 
@@ -136,18 +151,26 @@ class IntentTriage:
         # has already said "action".
         context = state.describe_recent_conversation(include_turns=2) or "(no prior context)"
         prompt = TRIAGE_PROMPT.format(context=context, text=text.replace('"', "'"))
-        try:
-            data = await self._models.complete_json(
-                self._slot,
-                [ChatMessage("system", "You decide chat or action. JSON only."),
-                 ChatMessage("user", prompt)],
-                schema=TRIAGE_SCHEMA,
-                max_tokens=500,
-                timeout_s=30.0,
-            )
-        except Exception as exc:
-            log.debug("triage model unavailable: %s", exc)
-            return self._fallback()
+        data = None
+        for attempt in range(len(_RETRY_BACKOFF_S) + 1):
+            try:
+                data = await self._models.complete_json(
+                    self._slot,
+                    [ChatMessage("system", "You decide chat or action. JSON only."),
+                     ChatMessage("user", prompt)],
+                    schema=TRIAGE_SCHEMA,
+                    max_tokens=500,
+                    timeout_s=30.0,
+                )
+                break
+            except (RateLimited, ModelTimeout) as exc:
+                log.debug("triage model call failed, attempt %d: %s", attempt + 1, exc)
+                if attempt == len(_RETRY_BACKOFF_S):
+                    return self._fallback()
+                await asyncio.sleep(_RETRY_BACKOFF_S[attempt])
+            except Exception as exc:
+                log.debug("triage model unavailable: %s", exc)
+                return self._fallback()
         if isinstance(data, dict) and isinstance(data.get("objective"), dict) and data["objective"]:
             # The same repair-pass loader as everywhere else, applied to the
             # nested objective before the outer model validates — otherwise a
