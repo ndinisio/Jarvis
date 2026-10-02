@@ -61,6 +61,20 @@ class OpenAICompatibleProvider(ModelProvider):
         except Exception:
             return False
 
+    #: ``think`` is honoured only where the wire format is known to take it.
+    accepts_think = True
+
+    def _reasoning_effort(self, model: str, think: bool | None) -> str | None:
+        """Groq reasoning models spend ``max_tokens`` on hidden reasoning, so a
+        small structured-output budget (triage's 500) runs out before any JSON
+        is written and the call 400s with ``json_validate_failed``. ``think=False``
+        maps to the least reasoning each family allows: gpt-oss only takes
+        low/medium/high; the others take ``none``. Other servers get nothing —
+        OpenAI itself rejects the parameter on non-reasoning models."""
+        if think is not False or "api.groq.com" not in self.base_url:
+            return None
+        return "low" if "gpt-oss" in model else "none"
+
     async def list_models(self) -> list[str]:
         try:
             resp = await self._http().get("/models", timeout=8.0)
@@ -151,6 +165,9 @@ class OpenAICompatibleProvider(ModelProvider):
         if tools:
             payload["tools"] = [tool.as_openai() for tool in tools]
             payload["tool_choice"] = "auto"
+        effort = self._reasoning_effort(model, think)
+        if effort:
+            payload["reasoning_effort"] = effort
         if schema is not None:
             payload["response_format"] = {"type": "json_schema",
                                           "json_schema": {"name": "reply", "schema": schema}}

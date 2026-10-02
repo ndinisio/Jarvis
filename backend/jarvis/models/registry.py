@@ -501,6 +501,10 @@ def _runtime(provider: ModelProvider, conf, think: bool | None = None) -> dict[s
     """The per-slot knobs only a self-hosted server has: context window,
     keep-alive, and whether a reasoning model thinks first."""
     if not getattr(provider, "accepts_runtime_options", False):
+        # A hosted reasoning model has no context window or keep-alive to set,
+        # but does need to be told not to burn a small token budget thinking.
+        if think is not None and getattr(provider, "accepts_think", False):
+            return {"think": think}
         return {}
     return {"num_ctx": conf.num_ctx, "keep_alive": conf.keep_alive, "think": think}
 

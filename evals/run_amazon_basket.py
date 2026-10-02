@@ -82,7 +82,12 @@ async def run(args) -> list[tuple[TaskResult, bool]]:
     async with Harness(model=args.model, config_path=Path(args.config) if args.config else None,
                        overrides=parse_overrides(args.set), headless=not args.headed,
                        channel=args.channel, task_timeout_s=args.timeout) as harness:
-        for task, phrasing in runs:
+        for index, (task, phrasing) in enumerate(runs):
+            if index and args.task_gap > 0:
+                # Outside the task's own wall time: lets a rate-limited tier
+                # (Groq free: 8k tokens/min) refill instead of the run
+                # measuring the quota rather than the model.
+                await asyncio.sleep(args.task_gap)
             result = await harness.run_task(task, phrasing)
             state = harness.server.state()
             wrong_action = bool(state["amazon"]["cart"]) and not result.ok
@@ -169,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--channel", default=None)
     parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--task-gap", type=float, default=0.0, metavar="SECONDS",
+                        help="sleep between tasks (not counted in latency) to stay under a "
+                             "provider's tokens-per-minute limit")
     parser.add_argument("--out", default="")
     parser.add_argument("--label", default="", help="tag this configuration, e.g. 'groq-qwen3-32b'")
     parser.add_argument("--verbose", "-v", action="store_true")

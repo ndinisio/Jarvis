@@ -404,3 +404,25 @@ def test_thinking_filter_handles_split_tags_and_plain_text():
     assert strip_thinking("<think>never closed") == ""
     plain = ThinkingFilter()
     assert plain.feed("Hel") + plain.feed("lo") + plain.flush() == "Hello"
+
+
+# --- Groq reasoning effort --------------------------------------------------
+
+@pytest.mark.parametrize("base_url,model,think,expected", [
+    ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b", False, "low"),
+    ("https://api.groq.com/openai/v1", "qwen/qwen3.8-27b", False, "none"),
+    ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b", None, None),
+    ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b", True, None),
+    ("https://api.openai.com/v1", "gpt-4o", False, None),
+])
+async def test_openai_compat_think_false_sets_groq_reasoning_effort(base_url, model, think, expected):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    provider = _mount(OpenAICompatibleProvider(base_url, "k"), handler)
+    await provider.chat([ChatMessage("user", "hi")], model, think=think)
+    assert seen.get("reasoning_effort") == expected
+    await provider.close()
