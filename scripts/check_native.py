@@ -19,8 +19,9 @@ Save sheet and a throwaway folder on the Desktop.
     .venv/bin/python scripts/check_native.py --stale    # re-finding a rebuilt control, for real
     .venv/bin/python scripts/check_native.py --observe  # do AXObserver notifications fire?
 
---stale opens a small window of its own (scripts/ax_fixture.py) whose button can
-be rebuilt, duplicated, replaced by a look-alike, renamed or moved on command,
+--stale opens a small application of its own (scripts/ax_fixture.py, built into an app
+bundle of its own by scripts/fixture_bundle.py and launched through LaunchServices) whose
+button can be rebuilt, duplicated, replaced by a look-alike, renamed or moved on command,
 and checks JARVIS re-finds the one it should and refuses every other case —
 against the window's own log of what was clicked. ⚠ means the check couldn't
 tell (macOS kept the old reference valid, so there was nothing to re-find).
@@ -49,6 +50,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -62,6 +64,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import fixture_bundle as fb  # noqa: E402  (this folder: the --stale fixture as an application bundle)
 import native_validation as nv  # noqa: E402  (this folder; see its docstring)
 from jarvis.surfaces.native import AmbiguousOption, NativeError, NativeSurface  # noqa: E402
 from jarvis.surfaces.native.input import resolve_key  # noqa: E402
@@ -1067,16 +1070,52 @@ async def controls(surface: NativeSurface) -> bool:
 FIXTURE = "JARVIS Fixture"
 
 
-class FixtureProcess:
-    """scripts/ax_fixture.py in a process of its own, driven through two files."""
+def launch_services_identity(pid: int) -> dict | None:
+    """What LaunchServices says the application with this pid is (``NSRunningApplication``): its bundle
+    identifier, the path of its bundle, its name, activation policy and whether it calls itself active; None when
+    it has no running application for that pid (or the call can't be made)."""
+    try:
+        import AppKit
 
-    def __init__(self, directory: Path):
+        running = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if running is None:
+            return None
+        url, identifier = running.bundleURL(), running.bundleIdentifier()
+        return {"bundle_id": str(identifier) if identifier else None, "bundle_path": str(url.path()) if url else None,
+                "name": str(running.localizedName() or ""), "policy": int(running.activationPolicy()),
+                "active": bool(running.isActive())}
+    except Exception:
+        return None
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class FixtureProcess:
+    """scripts/ax_fixture.py as a process of its own, driven through two files. By default it is an
+    application of its own: :mod:`fixture_bundle` builds ``JARVIS Fixture.app`` from the interpreter's
+    ``Python.app`` and ``open`` launches it, so that LaunchServices starts it from a bundle with an identifier
+    of its own, as it would any application, and the window that answers is checked to be that application (its
+    own account and LaunchServices' agree on the bundle identifier and path) before anything is driven.
+    ``bundled=False`` is the old launch - the interpreter, as a child of this process - for the tests."""
+
+    def __init__(self, directory: Path, *, bundled: bool = True):
         self.directory = Path(directory)
         self.log_path, self.commands_path = self.directory / "fixture.log", self.directory / "fixture.cmd"
         self.commands_path.write_text("")
         self.process: subprocess.Popen | None = None
         self.pid = 0
         self._sequence = 0
+        self.bundled = bundled
+        self.bundle: fb.Bundle | None = None
+        self.identity: dict = {}
 
     def lines(self) -> list[str]:
         try:
@@ -1085,20 +1124,99 @@ class FixtureProcess:
             return []
 
     def start(self, timeout_s: float = 15.0) -> int:
-        errors = (self.directory / "fixture.err").open("w")
-        self.process = subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts" / "ax_fixture.py"), "--log", str(self.log_path),
-             "--commands", str(self.commands_path)], stdout=subprocess.DEVNULL, stderr=errors)
+        script = ROOT / "scripts" / "ax_fixture.py"
+        arguments = ["--log", str(self.log_path), "--commands", str(self.commands_path)]
+        errors_path = self.directory / "fixture.err"
+        for name in ("fixture.out", "fixture.err"):
+            (self.directory / name).write_text("")         # `open` redirects into files that are there
+        if self.bundled:
+            try:
+                self.bundle = fb.build(self.directory, script)
+            except fb.BundleError as exc:
+                raise RuntimeError(f"the fixture could not be made into an application: {exc}") from exc
+            # LaunchServices starts it (a new instance, in front, as when a person opens an app); what it
+            # prints goes to the files, since `open` does not pass its output on.
+            self.process = subprocess.Popen(
+                ["open", "-n", "-a", str(self.bundle.path), "--stdout", str(self.directory / "fixture.out"),
+                 "--stderr", str(errors_path), "--args", str(self.bundle.script), *arguments],
+                stdout=subprocess.DEVNULL, stderr=(self.directory / "open.err").open("w"))
+        else:
+            self.process = subprocess.Popen([sys.executable, str(script), *arguments], stdout=subprocess.DEVNULL,
+                                            stderr=errors_path.open("w"))
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             ready = next((line for line in self.lines() if line.startswith("ready:")), None)
             if ready:
                 self.pid = int(ready.split(":")[1])
+                if self.bundled:
+                    self._verify_identity()
                 return self.pid
-            if self.process.poll() is not None:
-                raise RuntimeError("the fixture exited: " + (self.directory / "fixture.err").read_text()[-300:])
+            exited = self.process.poll()
+            if exited is not None and (exited != 0 or not self.bundled):      # `open` returns once it has launched
+                raise RuntimeError(f"the fixture {'could not be opened' if self.bundled else 'exited'}: "
+                                   + self._complaints())
             time.sleep(0.1)
-        raise RuntimeError(f"the fixture window didn't appear within {timeout_s:.0f} s")
+        raise RuntimeError(f"the fixture window didn't appear within {timeout_s:.0f} s"
+                           + (f" (open said it had launched it; {self._complaints()})" if self.bundled else ""))
+
+    def _complaints(self) -> str:
+        """What the launch and the fixture printed to their error streams, for a message."""
+        said = []
+        for name in ("fixture.err", "open.err"):
+            with contextlib.suppress(OSError):
+                text = (self.directory / name).read_text().strip()
+                if text:
+                    said.append(f"{name}: {text[-300:]}")
+        return " | ".join(said) or "nothing on its error streams"
+
+    #: How long LaunchServices gets to know about the application once it says it is ready.
+    IDENTITY_WAIT_S = 3.0
+
+    def _verify_identity(self) -> None:
+        """Refuse a window that is not the application that was launched: the fixture's own account (its
+        ``identity:`` line) and LaunchServices' (asked from outside, by pid) must both name the bundle
+        identifier that was built, at the path it was built at."""
+        assert self.bundle is not None
+        line = next((entry for entry in self.lines() if entry.startswith("identity:")), None)
+        try:
+            claimed = json.loads(line.split(":", 1)[1]) if line else {}
+        except ValueError:
+            claimed = {}
+        seen = launch_services_identity(self.pid)
+        deadline = time.monotonic() + self.IDENTITY_WAIT_S
+        while seen is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+            seen = launch_services_identity(self.pid)
+        wanted, path = self.bundle.identifier, os.path.realpath(self.bundle.path)
+        problems = []
+        if claimed.get("bundle_id") != wanted:
+            problems.append(f"the window says it is {claimed.get('bundle_id') or 'not in a bundle at all'}"
+                            f" ({claimed.get('bundle_path') or 'no bundle path'})")
+        elif claimed.get("pid") != self.pid:
+            problems.append(f"the window says it is pid {claimed.get('pid')}, not {self.pid}")
+        if seen is None:
+            problems.append(f"LaunchServices has no running application for pid {self.pid}")
+        elif seen.get("bundle_id") != wanted:
+            problems.append(f"LaunchServices says pid {self.pid} is {seen.get('bundle_id') or 'not in a bundle'} "
+                            f"({seen.get('bundle_path') or 'no bundle path'})")
+        elif not seen.get("bundle_path") or os.path.realpath(seen["bundle_path"]) != path:
+            problems.append(f"LaunchServices puts it at {seen.get('bundle_path')}, not {path}")
+        if problems:
+            raise RuntimeError(f"the window that opened is not the bundled fixture (expected {wanted} at {path}, "
+                               f"pid {self.pid}): " + "; ".join(problems))
+        self.identity = {"fixture": claimed, "launch_services": seen}
+
+    def identity_lines(self) -> list[str]:
+        """What is known of who the fixture is, for the output: how it was launched and both accounts of it."""
+        if not self.identity or self.bundle is None:
+            return []
+        own, outside = self.identity["fixture"], self.identity["launch_services"]
+        return [f"launched through LaunchServices as {self.bundle.identifier}, built from {self.bundle.source} "
+                f"(signature: {self.bundle.signing})",
+                f"the fixture says: pid {own.get('pid')}, {own.get('bundle_id')} at {own.get('bundle_path')}, "
+                f"policy {own.get('policy')}, named “{own.get('name')}”",
+                f"LaunchServices says: {outside.get('bundle_id')} at {outside.get('bundle_path')}, "
+                f"policy {outside.get('policy')}, named “{outside.get('name')}”"]
 
     def send(self, command: str, timeout_s: float = 5.0, settle: bool = True) -> dict:
         """Run *command* and return the fixture's answer. *settle*: wait a moment after it for Accessibility
@@ -1126,6 +1244,13 @@ class FixtureProcess:
     def stop(self) -> None:
         with contextlib.suppress(Exception):
             self.send("quit", timeout_s=1.0)
+        if self.bundled and self.pid:                  # the app is LaunchServices' child, not ours: wait for the pid
+            deadline = time.monotonic() + 3.0
+            while pid_alive(self.pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if pid_alive(self.pid):
+                with contextlib.suppress(OSError):
+                    os.kill(self.pid, signal.SIGTERM)
         if self.process is not None:
             try:
                 self.process.wait(2)
@@ -1415,6 +1540,8 @@ async def background_press(surface: NativeSurface, fixture: FixtureProcess) -> b
     run = await front_and_press(surface, finder[0], lambda: try_press(surface, handle), fixture)
 
     def show(result: bool) -> bool:
+        for line in getattr(fixture, "identity_lines", list)():
+            print("      fixture: " + line)
         for line in press_timeline(run):
             print("      baseline: " + line)
         return result
@@ -1550,6 +1677,8 @@ async def try_press(surface: NativeSurface, handle: str) -> tuple[str, str]:
 
 #: How long the target gets, after one way of asking, to say that it is inactive.
 BACKGROUND_WAIT_S = 1.5
+#: How long Accessibility gets to name an app frontmost after it was asked to come forward.
+FRONT_WAIT_S = 2.0
 
 
 def _yn(value: object) -> str:
@@ -1557,38 +1686,45 @@ def _yn(value: object) -> str:
 
 
 class Baseline:
-    """Whether the target was put in the background before a press - by *its own account*, not
-    Accessibility's - how, and what everything said along the way. ``established`` is True only when the
-    fixture itself reported ``isActive == false`` twice running, with nothing in its own log saying it became
-    active in between; False when it never did; None when it could not say. ``events`` is the evidence in
-    order, as ``(time, text)`` on ``time.monotonic()``, which the fixture's log shares: the requests made,
-    what the fixture said of itself, what Accessibility said, and (once the press is made) when the AXPress
-    was issued and what the fixture logged after it."""
+    """Whether, and how, the target was put in the background before a press - by *its own account*, not
+    Accessibility's - and what everything said along the way. ``established`` is True only when the fixture
+    itself reported ``isActive == false`` twice running, with nothing in its own log saying it became active in
+    between; False when it never did; None when it could not say. ``lifecycle`` says whether the transition
+    *fixture active -> another app active -> fixture inactive* was seen to happen. ``events`` is the evidence in
+    order, as ``(time, text)`` on ``time.monotonic()``, which the fixture's log shares: the requests made, what
+    the fixture said of itself, what Accessibility said, and (once the press is made) when the AXPress was
+    issued and what the fixture logged after it."""
 
     def __init__(self) -> None:
         self.began = time.monotonic()
         self.established: bool | None = None
         self.tried: list[str] = []          # the ways of asking, in the order they were used
         self.mechanism = ""                 # the one after which the fixture said it was inactive
+        self.lifecycle = ""                 # what was seen of active -> other app -> inactive
         self.active: bool | None = None     # the fixture's last account of itself
         self.stamp: float | None = None     # when (its clock) the confirming probe looked
         self.asked: float | None = None     # when the harness asked that probe
         self.log_from = 0                   # the fixture's log lines from here on are newer than that probe
         self.events: list[tuple[float, str]] = []
+        self.seen: tuple | None = None      # what the last sample said, so that only changes are noted
 
     def note(self, text: str, at: float | None = None) -> None:
         self.events.append((time.monotonic() if at is None else at, text))
+
+    def ways(self) -> str:
+        return (", ".join(self.tried[:-1]) + " and " + self.tried[-1]) if len(self.tried) > 1 else (
+            self.tried[0] if self.tried else "nothing")
 
     def summary(self, issued: float | None = None) -> str:
         if self.established is True:
             looked = f"the fixture itself said isActive=false after {self.mechanism}"
             if issued is not None and self.stamp is not None:
                 looked += f", {max(0.0, issued - self.stamp) * 1000:.0f} ms before the AXPress was issued"
-            return looked
-        ways = " and ".join(self.tried) or "nothing"
+            return looked + (f"; lifecycle: {self.lifecycle}" if self.lifecycle else "")
         if self.established is None:
-            return f"the fixture could not say whether it is active (asked after: {ways})"
-        return f"the fixture still said isActive=true after: {ways}"
+            return f"the fixture could not say whether it is active (asked after: {self.ways()})"
+        return f"the fixture still said isActive=true after: {self.ways()}" + (
+            f"; lifecycle: {self.lifecycle}" if self.lifecycle else "")
 
     def lines(self) -> list[str]:
         return [f"+{at - self.began:.3f} s {text}" for at, text in sorted(self.events, key=lambda e: e[0])]
@@ -1630,6 +1766,8 @@ def ax_account(backend, target_pid: int) -> dict:
 def describe_sample(state: dict, ax: dict) -> str:
     said = [f"isActive={_yn(state['active'])}"]
     said += [f"{key}={_yn(state[key])}" for key in ("key", "ls_active", "hidden", "bundled") if key in state]
+    if state.get("bundle_id"):
+        said.append(f"bundle={state['bundle_id']}")
     if state.get("ls_front") is not None:
         said.append(f"ls_front=pid {state['ls_front']}")
     if state.get("why"):
@@ -1645,23 +1783,42 @@ def became_after(lines: list[str], moment: float) -> float | None:
     return min(later) if later else None
 
 
+async def sample(base: Baseline, backend, fixture, target_pid: int) -> dict:
+    """Ask the fixture, and Accessibility, who is active; note it when anything changed since the last sample."""
+    state = await probe_target(fixture)
+    ax = await asyncio.to_thread(ax_account, backend, target_pid)
+    signature = (state["active"], state.get("key"), state.get("ls_active"), state.get("ls_front"), ax["focused"],
+                 ax["frontmost"])
+    if signature != base.seen:
+        base.note(describe_sample(state, ax), state["answered"])
+        base.seen = signature
+    base.active = state["active"]
+    return state
+
+
+async def await_active(base: Baseline, backend, fixture, target_pid: int, wait_s: float) -> bool | None:
+    """Ask the fixture whether it is active until it says yes. True when it does, False if it does not in
+    time, None if it can't say."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        state = await sample(base, backend, fixture, target_pid)
+        if state["active"] is not False:
+            return state["active"]
+        if time.monotonic() >= deadline:
+            return False
+        await pause(0.02)
+
+
 async def await_inactive(base: Baseline, backend, fixture, target_pid: int, wait_s: float) -> bool | None:
     """Ask the fixture whether it is active until it has said *no* twice running with nothing in its own log
     saying it became active in between (the wait is on that condition, bounded by *wait_s* - not a sleep). True
     when it has, False if it did not in time, None if it can't say. The second *no* is the confirming probe:
     nothing happens between it and the press but reading the log."""
     deadline = time.monotonic() + wait_s
-    quiet, since, previous = 0, None, None
+    quiet, since = 0, None
     while True:
         log_length = len(await asyncio.to_thread(fixture.lines))
-        state = await probe_target(fixture)
-        ax = await asyncio.to_thread(ax_account, backend, target_pid)
-        signature = (state["active"], state.get("key"), state.get("ls_active"), state.get("ls_front"), ax["focused"],
-                     ax["frontmost"])
-        if signature != previous:
-            base.note(describe_sample(state, ax), state["answered"])
-            previous = signature
-        base.active = state["active"]
+        state = await sample(base, backend, fixture, target_pid)
         if state["active"] is None:
             return None
         if state["active"]:
@@ -1676,30 +1833,53 @@ async def await_inactive(base: Baseline, backend, fixture, target_pid: int, wait
                     base.stamp, base.asked, base.log_from = stamp, state["asked"], log_length
                     return True
                 base.note("the fixture's own log says it became active again", revived)
-                quiet, since, previous = 0, None, None
+                quiet, since, base.seen = 0, None, None
         if time.monotonic() >= deadline:
             return False
         await pause(0.02)
 
 
-async def establish_background(backend, fixture, finder_pid: int, target_pid: int,
-                               wait_s: float | None = None) -> Baseline:
-    """Put the target in the background and show, from the fixture itself, that it is there. Two public
-    ways of asking, each followed by the wait above: Finder is asked to come forward (AXFrontmost, which is
-    how JARVIS brings an app forward), and if the fixture still says it is active, the fixture is asked to
-    deactivate itself (``NSApplication.deactivate``, macOS 14+). Repeating a request Accessibility already
-    considers done changes nothing, so a way of asking is not repeated. Whether it worked is only ever the
-    fixture's word; nothing is pressed on the strength of Accessibility's."""
+async def ask_front(base: Baseline, backend, pid: int, name: str) -> None:
+    """Ask Accessibility to bring *pid* forward (AXFrontmost - how JARVIS brings an app forward), and note
+    whether the request was accepted and whether Accessibility ever named that app in front."""
+    accepted = await asyncio.to_thread(backend.activate, pid)
+    seen = await asyncio.to_thread(wait_front, backend, pid, FRONT_WAIT_S)
+    base.note(f"asked {name} to come forward (AXFrontmost): {'accepted' if accepted else 'refused'}; "
+              + (f"Accessibility named {name} in front after {seen * 1000:.0f} ms" if seen is not None
+                 else f"Accessibility never named {name} in front"))
+
+
+async def establish_background(backend, fixture, finder_pid: int, target_pid: int, wait_s: float | None = None,
+                               host: tuple[int, str] | None = None) -> Baseline:
+    """Put the target in the background and show, from the fixture itself, that it is there - having first
+    seen it active, so that the transition *fixture active -> another app active -> fixture inactive* is the
+    thing observed (``Baseline.lifecycle``). Public ways of asking, each followed by the wait above: Finder is
+    asked to come forward (AXFrontmost, which is how JARVIS brings an app forward); if the fixture still says
+    it is active, so is *host*, the application this check is being run from (Accessibility may decline to
+    name Finder, which says nothing about the fixture); and last the fixture is asked to deactivate itself
+    (``NSApplication.deactivate``, macOS 14+). Repeating a request Accessibility already considers done
+    changes nothing, so a way of asking is not repeated. Whether it worked is only ever the fixture's word;
+    nothing is pressed on the strength of Accessibility's, and nothing private is used."""
     wait_s = BACKGROUND_WAIT_S if wait_s is None else wait_s
     base = Baseline()
-    for mechanism in ("ax-front", "self-deactivate"):
+    first = (await sample(base, backend, fixture, target_pid))["active"]
+    if first is False and target_pid:
+        base.note("the fixture is not active: asking it to come forward first (AXFrontmost), to see it become inactive")
+        await asyncio.to_thread(backend.activate, target_pid)
+        made = await await_active(base, backend, fixture, target_pid, wait_s) is True
+        base.lifecycle = ("made active first" if made
+                          else "could not be made active first, so active -> inactive was not seen")
+    else:
+        base.lifecycle = {True: "started active", False: "started inactive, so active -> inactive was not seen",
+                          None: "its state before the request is unknown"}[first]
+    rungs = [("ax-front", finder_pid, "Finder")]
+    if host is not None and host[0] not in (finder_pid, target_pid):
+        rungs.append(("ax-front-host", host[0], host[1]))
+    rungs.append(("self-deactivate", 0, ""))
+    for mechanism, pid, name in rungs:
         base.tried.append(mechanism)
-        if mechanism == "ax-front":
-            accepted = await asyncio.to_thread(backend.activate, finder_pid)
-            seen = await asyncio.to_thread(wait_front, backend, finder_pid)
-            base.note(f"asked Finder to come forward (AXFrontmost): {'accepted' if accepted else 'refused'}; "
-                      + (f"Accessibility named Finder in front after {seen * 1000:.0f} ms" if seen is not None
-                         else "Accessibility never named Finder in front"))
+        if pid:
+            await ask_front(base, backend, pid, name)
         else:
             try:
                 reply = await asyncio.to_thread(fixture.send, "deactivate", settle=False)
@@ -1713,10 +1893,14 @@ async def establish_background(backend, fixture, finder_pid: int, target_pid: in
         answer = await await_inactive(base, backend, fixture, target_pid, wait_s)
         if answer is True:
             base.established, base.mechanism = True, mechanism
+            if base.lifecycle in {"started active", "made active first"}:
+                base.lifecycle = f"active -> {name + ' active -> ' if name else ''}inactive was seen, after {mechanism}"
+            base.note("lifecycle: " + base.lifecycle)
             return base
         if answer is None:
             break
     base.established = None if base.active is None else False
+    base.note("lifecycle: " + base.lifecycle)
     return base
 
 
@@ -1777,6 +1961,14 @@ def press_timeline(run: Run) -> list[str]:
     return marked.lines()
 
 
+def host_candidate(backend, excluded: tuple[int, ...]) -> tuple[int, str] | None:
+    """The application this check is being run from (Terminal, an editor), as a second application to bring
+    forward when Finder will not take the front; None when it can't be told or is one of *excluded*."""
+    name = host_app(backend)
+    found = backend.find_app(name) if name else None
+    return found if found and found[0] not in excluded else None
+
+
 async def front_and_press(surface: NativeSurface, finder_pid: int, press, fixture=None) -> Run:
     """Put Finder in front and make the press, and see who is in front half a second later. With a *fixture*
     to ask, the press is made only once the fixture itself has said, twice running, that it is not the active
@@ -1785,7 +1977,9 @@ async def front_and_press(surface: NativeSurface, finder_pid: int, press, fixtur
     baseline = None
     if fixture is not None:
         target = backend.find_app(FIXTURE)
-        baseline = await establish_background(backend, fixture, finder_pid, target[0] if target else 0)
+        target_pid = target[0] if target else 0
+        baseline = await establish_background(backend, fixture, finder_pid, target_pid,
+                                              host=host_candidate(backend, (finder_pid, target_pid)))
         if baseline.established is not True:
             return Run(PressTrace(surface), "", "", False, [], time.monotonic(), baseline.active, None, baseline)
         before, log_before = False, baseline.log_from

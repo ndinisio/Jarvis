@@ -17,9 +17,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import itertools
 import json
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -54,6 +56,8 @@ def cn(monkeypatch):
     monkeypatch.setattr(module, "real_pause", module.pause, raising=False)
     monkeypatch.setattr(module, "pause", no_pause)
     monkeypatch.setattr(module, "BACKGROUND_WAIT_S", 0.05)         # the fakes answer at once; no need to wait for them
+    monkeypatch.setattr(module, "FRONT_WAIT_S", 0.05)
+    monkeypatch.setattr(module.FixtureProcess, "IDENTITY_WAIT_S", 0.05)
     monkeypatch.setattr(module, "launch", lambda app: calls.append(("launch", app)))
     monkeypatch.setattr(module, "open_path", lambda path: calls.append(("open", Path(path).name)))
     monkeypatch.setattr(module, "quit_app", lambda app: calls.append(("quit", app)))
@@ -1537,6 +1541,7 @@ class FakeFixtureView:
         self.ax_only, self.sticky_active, self.cannot_say = ax_only, sticky_active, cannot_say
         self.presses_twice, self.wrong_identity = presses_twice, wrong_identity
         self.active = sticky_active                  # the app's own account (AppKit's isActive); a sticky one starts active
+        self.was_active = sticky_active              # it has been active at some point
         self.process_name = process_name
         #: Everything the fixture's log would hold, in order (``log`` keeps only the presses).
         self.raw: list[str] = []
@@ -1562,8 +1567,9 @@ class FakeFixtureView:
         if self.cannot_say:
             return {"active": None, "key": None, "why": "RuntimeError"}
         answer = {"active": self.active, "key": self.active, "t": time.monotonic(), "ls_active": self.active,
-                  "ls_front": 303 if self.active else 202, "hidden": False, "bundled": False}
-        if not self.active and (self.flaps or self.flaps_quietly):
+                  "ls_front": 303 if self.active else 202, "hidden": False, "bundled": True,
+                  "bundle_id": "local.jarvis.ax-fixture"}
+        if not self.active and self.was_active and (self.flaps or self.flaps_quietly):
             time.sleep(0.002)                           # after the moment it looked, by more than the log can blur
             if self.flaps:
                 self.flaps = False
@@ -1583,7 +1589,7 @@ class FakeFixtureView:
 
     def log_activation(self):
         """The app's own didBecomeActive, which fires whoever activated it."""
-        self.active = True
+        self.active = self.was_active = True
         if self.logs_activation:
             self.raw.append(f"activation:became:t={time.monotonic():.6f}")
 
@@ -1705,11 +1711,17 @@ class StaleMac(FakeBackend):
     asks_for_activation = False
     device = None
 
+    #: Apps that accept a request to come forward and do not (Accessibility never names them in front).
+    ignores_front: tuple[int, ...] = ()
+
     def activate(self, pid):
         """JARVIS asks for an app to be brought forward (the call the press trace records)."""
         if pid == 303 and not self.activation_works:      # the fixture refuses to come forward
             self.activations.append(pid)
             return False
+        if pid in self.ignores_front:
+            self.activations.append(pid)
+            return True
         done = super().activate(pid)
         self._settle(pid)
         return done
@@ -1724,7 +1736,7 @@ class StaleMac(FakeBackend):
         if self.view is not None and pid != 303 and not self.view.sticky_active:
             self.view.log_resignation()                   # bringing another app forward deactivates the fixture
         elif self.view is not None and pid == 303:
-            self.view.active = True
+            self.view.active = self.view.was_active = True
 
 
 class PressingInput(RecordingInput):
@@ -1746,7 +1758,7 @@ def _stale_setup(fx, *, keep_references=False, steals_focus=False, axpress="work
                  jarvis_activates=False, calculator=None, logs_activation=True, ax_only=False,
                  sticky_active=False, cannot_say=False, presses_twice=False, wrong_identity=False,
                  stray_input=False, asks_for_activation=False, deactivation="works", flaps=False,
-                 flaps_quietly=False, wakes_before_press=False):
+                 flaps_quietly=False, wakes_before_press=False, ignores_front=()):
     """*calculator*: None (not installed), ``"behind"`` or ``"forward"`` (its clear button's press
     leaves it behind / brings it forward). The other options are the fakes' (see ``FakeFixtureView``
     and ``StaleMac``)."""
@@ -1765,6 +1777,7 @@ def _stale_setup(fx, *, keep_references=False, steals_focus=False, axpress="work
     backend.jarvis_activates = jarvis_activates
     backend.stray_input, backend.asks_for_activation = stray_input, asks_for_activation
     backend.wakes_before_press = wakes_before_press
+    backend.ignores_front = tuple(ignores_front)
     backend.view = None
     log: list[str] = []
     view = FakeFixtureView(backend, log, keep_references=keep_references, steals_focus=steals_focus,
@@ -1965,11 +1978,14 @@ async def test_the_step_prints_the_order_of_requests_the_fixtures_word_accessibi
         cn, fx, capsys, monkeypatch):
     _, out, _ = await _step(cn, fx, capsys, monkeypatch, sticky_active=True, steals_focus=True)
     lines = [line.split("baseline: ", 1)[1] for line in out.splitlines() if line.startswith("      baseline: ")]
-    order = ["asked Finder to come forward", "the fixture says isActive=true", "asked the fixture to deactivate itself",
-             "the fixture says isActive=false", "AXPress issued", "the fixture's own log: activation:became"]
+    order = ["the fixture says isActive=true", "asked Finder to come forward", "asked the fixture to deactivate itself",
+             "the fixture says isActive=false", "lifecycle: active -> inactive was seen", "AXPress issued",
+             "the fixture's own log: activation:became"]
     positions = [next(i for i, line in enumerate(lines) if fragment in line) for fragment in order]
     assert positions == sorted(positions), lines
-    assert all("Accessibility: focused Finder (pid 202)" in line for line in lines if "the fixture says" in line)
+    said = [line for line in lines if "the fixture says" in line]
+    assert "Accessibility: focused Notes (pid 101)" in said[0], "before Finder was asked"
+    assert "Accessibility: focused Finder (pid 202)" in said[-1], "and after"
     offsets = [float(line.split(" s ")[0]) for line in lines]
     assert offsets == sorted(offsets)
     assert "ms after the confirming probe looked" in out
@@ -1995,7 +2011,7 @@ async def test_a_control_that_cannot_be_put_in_the_background_leaves_the_foregro
     assert result is False and "⚠ a press works" in out and stub.calls == 0
     assert "AXPress succeeded: one press of Save" in out
     assert "(the bare-client comparison: nothing was pressed: the fixture still said isActive=true after: ax-front and "\
-           "self-deactivate)" in out
+           "self-deactivate; lifecycle: started active)" in out
     assert "no bare-client press could say" in out
 
 
@@ -2038,7 +2054,7 @@ async def test_a_press_that_activates_the_app_through_jarvis_is_not_excused_by_a
 # -- the baseline: nothing is pressed until the target itself says it is not the active application --
 async def _establish(cn, fx, **setup):
     surface, fixture, view, log = _stale_setup(fx, **setup)
-    view.active = True                                   # it is active, as the fixture is at launch
+    view.active = view.was_active = True                 # it is active, as the fixture is at launch
     base = await cn.establish_background(surface.backend, fixture, 202, 303)
     return base, SimpleNamespace(surface=surface, fixture=fixture, view=view, log=log)
 
@@ -2118,11 +2134,111 @@ async def test_a_target_whose_own_log_shows_it_became_active_between_two_noes_is
 async def test_the_baseline_is_a_timeline_with_the_requests_the_fixtures_word_and_accessibilitys(cn, fx):
     base, _ = await _establish(cn, fx)
     lines = base.lines()
-    assert lines[0].startswith("+0.0") and "asked Finder to come forward (AXFrontmost): accepted; Accessibility named "\
-                                           "Finder in front after" in lines[0]
-    assert any("the fixture says isActive=false key=false ls_active=false hidden=false bundled=false ls_front=pid 202 "
-               "· Accessibility: focused Finder (pid 202)" in line for line in lines)
+    assert lines[0].startswith("+0.0") and "the fixture says isActive=true" in lines[0], "before anything is asked"
+    assert any("asked Finder to come forward (AXFrontmost): accepted; Accessibility named Finder in front after" in line
+               for line in lines)
+    assert any("the fixture says isActive=false key=false ls_active=false hidden=false bundled=true "
+               "bundle=local.jarvis.ax-fixture ls_front=pid 202 · Accessibility: focused Finder (pid 202)" in line
+               for line in lines)
     assert [float(line.split(" s ")[0]) for line in lines] == sorted(float(line.split(" s ")[0]) for line in lines)
+
+
+async def test_the_lifecycle_active_then_another_app_then_inactive_is_what_is_looked_for_and_recorded(cn, fx):
+    base, run = await _establish(cn, fx)
+    assert base.lifecycle == "active -> Finder active -> inactive was seen, after ax-front"
+    assert any(line.endswith("lifecycle: " + base.lifecycle) for line in base.lines())
+    assert "lifecycle: active -> Finder active -> inactive was seen, after ax-front" in base.summary()
+
+
+async def test_a_target_that_is_not_active_is_made_active_first_so_that_it_can_be_seen_to_leave(cn, fx):
+    surface, fixture, view, _ = _stale_setup(fx)                       # inactive, as after another check
+    base = await cn.establish_background(surface.backend, fixture, 202, 303)
+    assert base.established is True
+    assert base.lifecycle == "active -> Finder active -> inactive was seen, after ax-front"
+    assert surface.backend.activations == [303, 202], "the fixture first, then Finder"
+    text = "\n".join(base.lines())
+    assert "the fixture is not active: asking it to come forward first" in text
+    states = [line for line in text.splitlines() if "the fixture says" in line]
+    assert "isActive=false" in states[0] and "isActive=true" in states[1] and "isActive=false" in states[-1]
+
+
+async def test_a_target_that_cannot_be_made_active_first_says_the_transition_was_not_seen(cn, fx):
+    surface, fixture, _, _ = _stale_setup(fx, activation_works=False)
+    base = await cn.establish_background(surface.backend, fixture, 202, 303)
+    assert base.established is True, "it is inactive by its own account, which is what the press needs"
+    assert base.lifecycle == "could not be made active first, so active -> inactive was not seen"
+    assert "lifecycle: could not be made active first" in base.summary()
+
+
+async def test_a_target_whose_state_is_unknown_has_an_unknown_lifecycle(cn, fx):
+    base, _ = await _establish(cn, fx, cannot_say=True)
+    assert base.established is None and base.lifecycle == "its state before the request is unknown"
+
+
+async def test_when_finder_will_not_take_the_front_the_application_this_is_run_from_is_asked_next(cn, fx):
+    surface, fixture, view, _ = _stale_setup(fx, ignores_front=(202,))
+    view.active = view.was_active = True
+    base = await cn.establish_background(surface.backend, fixture, 202, 303, host=(101, "Notes"))
+    assert base.established is True and base.mechanism == "ax-front-host"
+    assert base.tried == ["ax-front", "ax-front-host"]
+    assert base.lifecycle == "active -> Notes active -> inactive was seen, after ax-front-host"
+    text = "\n".join(base.lines())
+    assert "Accessibility never named Finder in front" in text
+    assert "asked Notes to come forward (AXFrontmost): accepted; Accessibility named Notes in front after" in text
+    assert surface.backend.activations == [202, 101], "each asked once"
+
+
+async def test_with_no_other_application_to_ask_it_is_asked_to_deactivate_itself(cn, fx):
+    surface, fixture, view, _ = _stale_setup(fx, ignores_front=(202,))
+    view.active = view.was_active = True
+    base = await cn.establish_background(surface.backend, fixture, 202, 303)
+    assert base.established is True and base.mechanism == "self-deactivate" and base.tried == ["ax-front", "self-deactivate"]
+    assert base.lifecycle == "active -> inactive was seen, after self-deactivate"
+
+
+@pytest.mark.parametrize("host", [(202, "Finder"), (303, "JARVIS Fixture")], ids=["finder", "the-fixture-itself"])
+async def test_an_application_already_asked_or_the_target_itself_is_not_a_second_candidate(cn, fx, host):
+    surface, fixture, view, _ = _stale_setup(fx, ignores_front=(202,), sticky_active=True, deactivation="ignored")
+    base = await cn.establish_background(surface.backend, fixture, 202, 303, host=host)
+    assert base.tried == ["ax-front", "self-deactivate"]
+
+
+async def test_every_way_of_asking_tried_and_none_working_is_named_in_order(cn, fx):
+    surface, fixture, view, _ = _stale_setup(fx, ignores_front=(202, 101), sticky_active=True, deactivation="ignored")
+    base = await cn.establish_background(surface.backend, fixture, 202, 303, host=(101, "Notes"))
+    assert base.established is False
+    assert base.tried == ["ax-front", "ax-front-host", "self-deactivate"]
+    assert "the fixture still said isActive=true after: ax-front, ax-front-host and self-deactivate" in base.summary()
+
+
+def test_the_host_application_is_found_by_the_process_it_runs_in_and_never_twice(cn, fx, monkeypatch):
+    surface, _, _, _ = _stale_setup(fx)
+    backend = surface.backend
+    assert cn.host_candidate(backend, (202, 303)) is None, "a backend that cannot name an application's process says nothing"
+    backend.app_for_pid = lambda pid: (pid, "Notes") if pid == 555 else None
+    monkeypatch.setattr(cn, "ancestors", lambda pid: [777, 555, 1])
+    assert cn.host_candidate(backend, (202, 303)) == (101, "Notes")
+    assert cn.host_candidate(backend, (202, 101)) is None, "it is already one of the others"
+
+
+async def test_a_press_goes_ahead_once_the_host_application_has_taken_the_front_when_finder_would_not(
+        cn, fx, capsys, monkeypatch):
+    monkeypatch.setattr(cn, "host_app", lambda backend: "Notes")
+    result, out, run = await _step(cn, fx, capsys, monkeypatch, ignores_front=(202,))
+    assert result is True and "✓ a press works with another app in front" in out, out
+    assert "baseline: the fixture itself said isActive=false after ax-front-host" in out
+    assert "lifecycle: active -> Notes active -> inactive was seen, after ax-front-host" in out
+    assert len(run.view.log) == 2, "the press, and the bare client's control press"
+
+
+async def test_the_identity_of_the_launched_fixture_is_printed_with_the_timeline(cn, fx, capsys, monkeypatch):
+    surface, fixture, view, _ = _stale_setup(fx)
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view))
+    fixture.identity_lines = lambda: ["launched through LaunchServices as local.jarvis.ax-fixture", "LaunchServices says: x"]
+    await cn.background_press(surface, fixture)
+    out = capsys.readouterr().out
+    assert "      fixture: launched through LaunchServices as local.jarvis.ax-fixture" in out
+    assert out.index("fixture: launched") < out.index("baseline: +0.0"), "who it is, then what happened to it"
 
 
 async def test_the_targets_own_account_is_none_unless_it_answers_with_a_yes_or_a_no(cn):
@@ -2539,7 +2655,7 @@ async def test_the_client_starts_the_window_sends_commands_and_reads_the_presses
     import threading
 
     monkeypatch.setattr(cn.subprocess, "Popen", lambda *a, **k: _Child())
-    process = cn.FixtureProcess(tmp_path)
+    process = cn.FixtureProcess(tmp_path, bundled=False)
     log = fx.Log(process.log_path)
     log("ready:4242")
 
@@ -2581,7 +2697,163 @@ async def test_a_fixture_that_dies_on_start_says_why(cn, tmp_path, monkeypatch):
 
     monkeypatch.setattr(cn.subprocess, "Popen", dies)
     with pytest.raises(RuntimeError, match="exited.*AppKit"):
-        cn.FixtureProcess(tmp_path).start(timeout_s=2.0)
+        cn.FixtureProcess(tmp_path, bundled=False).start(timeout_s=2.0)
+
+
+# --- the bundled fixture: built, launched through LaunchServices, and checked to be who it says ----------
+class _Opens(_Child):
+    """`open`: returns at once, having handed the launch to LaunchServices."""
+
+
+def _bundled(cn, fx, tmp_path, monkeypatch, *, own=None, outside="same", pid=4242, exits_with=0, identity=True):
+    """A FixtureProcess whose bundle is built by a stand-in and whose launch is recorded, with the identity the
+    fixture and LaunchServices will give. Returns it and the commands `open` was given."""
+    app = tmp_path / "JARVIS Fixture.app"
+    bundle = cn.fb.Bundle(app, "local.jarvis.ax-fixture", app / "Contents" / "MacOS" / "Python",
+                          app / "Contents" / "Resources" / "ax_fixture.py", Path("/fw/Python.app"), "ad hoc")
+    monkeypatch.setattr(cn.fb, "build", lambda directory, script: bundle)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(cn.subprocess, "Popen", lambda command, **kw: launched.append(command) or _Opens(exits_with))
+    process = cn.FixtureProcess(tmp_path)
+    log = fx.Log(process.log_path)
+    claimed = {"pid": pid, "bundle_id": "local.jarvis.ax-fixture", "bundle_path": str(app), "executable": "x",
+               "policy": 0, "name": "JARVIS Fixture", **(own or {})}
+    if identity:
+        log("identity:" + json.dumps(claimed))
+    log(f"ready:{pid}")
+    seen = {"bundle_id": "local.jarvis.ax-fixture", "bundle_path": str(app), "name": "JARVIS Fixture", "policy": 0,
+            "active": True}
+    if outside != "same":
+        seen = outside if outside is None else {**seen, **outside}
+    monkeypatch.setattr(cn, "launch_services_identity", lambda asked: seen)
+    return process, launched, bundle
+
+
+async def test_the_fixture_is_launched_through_launchservices_from_its_own_bundle(cn, fx, tmp_path, monkeypatch):
+    process, launched, bundle = _bundled(cn, fx, tmp_path, monkeypatch)
+    assert process.start() == 4242
+    [command] = launched
+    assert command[:4] == ["open", "-n", "-a", str(bundle.path)], "a new instance of the bundle, by LaunchServices"
+    assert command[command.index("--args") + 1] == str(bundle.script), "the fixture inside the bundle runs, not the repo's"
+    assert command[command.index("--args") + 2:] == ["--log", str(process.log_path), "--commands", str(process.commands_path)]
+    assert command[command.index("--stdout") + 1].endswith("fixture.out") and command[command.index("--stderr") + 1].endswith(
+        "fixture.err")
+    assert not any(part.endswith("ax_fixture.py") and "scripts" in part for part in command)
+    assert cn.sys.executable not in command, "not the interpreter, spawned as a child"
+    assert (tmp_path / "fixture.out").exists() and (tmp_path / "fixture.err").exists(), "open redirects into files that exist"
+
+
+async def test_the_launch_that_is_not_the_bundle_is_refused_before_anything_is_driven(cn, fx, tmp_path, monkeypatch):
+    process, _, _ = _bundled(cn, fx, tmp_path, monkeypatch, own={"bundle_id": "org.python.python",
+                                                                   "bundle_path": "/fw/Python.app"})
+    with pytest.raises(RuntimeError, match=r"not the bundled fixture.*the window says it is org\.python\.python"):
+        process.start()
+
+
+@pytest.mark.parametrize("outside, why", [
+    ({"bundle_id": "org.python.python", "bundle_path": "/fw/Python.app"}, "LaunchServices says pid 4242 is org.python.python"),
+    ({"bundle_path": "/somewhere/else/JARVIS Fixture.app"}, "LaunchServices puts it at /somewhere/else"),
+    (None, "LaunchServices has no running application for pid 4242"),
+    ({"bundle_id": None}, "LaunchServices says pid 4242 is not in a bundle"),
+])
+async def test_what_launchservices_says_has_to_agree_with_what_the_window_says(
+        cn, fx, tmp_path, monkeypatch, outside, why):
+    process, _, _ = _bundled(cn, fx, tmp_path, monkeypatch, outside=outside)
+    with pytest.raises(RuntimeError, match="not the bundled fixture") as refused:
+        process.start()
+    assert why in str(refused.value)
+
+
+async def test_a_window_with_no_identity_line_or_another_pid_is_not_taken_for_the_fixture(cn, fx, tmp_path, monkeypatch):
+    process, _, _ = _bundled(cn, fx, tmp_path, monkeypatch, identity=False)
+    with pytest.raises(RuntimeError, match="the window says it is not in a bundle at all"):
+        process.start()
+    second = tmp_path / "second"
+    second.mkdir()
+    process, _, _ = _bundled(cn, fx, second, monkeypatch, own={"pid": 7})
+    with pytest.raises(RuntimeError, match="the window says it is pid 7, not 4242"):
+        process.start()
+
+
+async def test_the_identity_both_accounts_agree_on_is_kept_and_described(cn, fx, tmp_path, monkeypatch):
+    process, _, bundle = _bundled(cn, fx, tmp_path, monkeypatch)
+    assert process.identity_lines() == [] and process.start() == 4242
+    lines = process.identity_lines()
+    assert lines[0] == ("launched through LaunchServices as local.jarvis.ax-fixture, built from /fw/Python.app "
+                        "(signature: ad hoc)")
+    assert lines[1].startswith("the fixture says: pid 4242, local.jarvis.ax-fixture at ") and "policy 0" in lines[1]
+    assert lines[2].startswith("LaunchServices says: local.jarvis.ax-fixture at ")
+
+
+async def test_a_bundle_that_cannot_be_built_stops_the_fixture_with_the_reason_instead_of_launching_a_bare_one(
+        cn, tmp_path, monkeypatch):
+    def refuses(directory, script):
+        raise cn.fb.BundleError("this Python (/usr) has no Resources/Python.app, so it is not a macOS framework build")
+
+    monkeypatch.setattr(cn.fb, "build", refuses)
+    popen = []
+    monkeypatch.setattr(cn.subprocess, "Popen", lambda *a, **k: popen.append(a) or _Child())
+    with pytest.raises(RuntimeError, match="could not be made into an application: this Python"):
+        cn.FixtureProcess(tmp_path).start()
+    assert popen == [], "no fallback to the interpreter as a child: that is the launch this replaces"
+
+
+async def test_open_failing_or_the_app_never_reporting_ready_says_what_was_printed(cn, fx, tmp_path, monkeypatch):
+    def prints(error_stream, file_name, text, exits_with):
+        def popen(command, **kwargs):
+            if error_stream:
+                kwargs["stderr"].write(text)
+                kwargs["stderr"].flush()
+            else:
+                (tmp_path / file_name).write_text(text)
+            return _Opens(exits_with)
+        return popen
+
+    process, _, _ = _bundled(cn, fx, tmp_path, monkeypatch, exits_with=1)
+    process.log_path.write_text("")                       # never ready
+    monkeypatch.setattr(cn.subprocess, "Popen", prints(True, "", "Unable to find application named 'JARVIS Fixture'", 1))
+    with pytest.raises(RuntimeError, match=r"could not be opened.*open\.err: Unable to find"):
+        process.start(timeout_s=1.0)
+    monkeypatch.setattr(cn.subprocess, "Popen",
+                        prints(False, "fixture.err", "dyld: Library not loaded: @executable_path/../../../../Python", 0))
+    with pytest.raises(RuntimeError, match=r"didn't appear within.*open said it had launched it.*Library not loaded"):
+        process.start(timeout_s=0.3)
+
+
+async def test_stopping_the_bundled_app_waits_for_its_pid_and_ends_it_if_it_stays(cn, fx, tmp_path, monkeypatch):
+    process, _, _ = _bundled(cn, fx, tmp_path, monkeypatch)
+    process.start()
+    alive, killed = itertools.chain([True, True], itertools.repeat(False)), []
+    monkeypatch.setattr(cn, "pid_alive", lambda pid: next(alive))
+    monkeypatch.setattr(cn.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(cn.time, "sleep", lambda s: None)
+    process.stop()
+    assert killed == [], "it left by itself when asked to quit"
+    stubborn = iter([True] * 200)
+    monkeypatch.setattr(cn, "pid_alive", lambda pid: next(stubborn))
+    ticks = iter(range(0, 1000))
+    monkeypatch.setattr(cn.time, "monotonic", lambda: next(ticks) / 10)
+    process.stop()
+    assert killed == [(4242, cn.signal.SIGTERM)]
+
+
+def test_launchservices_is_asked_by_pid_for_the_bundle_identifier_and_path(cn, monkeypatch):
+    class URL:
+        def path(self):
+            return "/tmp/JARVIS Fixture.app"
+
+    running = SimpleNamespace(bundleURL=lambda: URL(), bundleIdentifier=lambda: "local.jarvis.ax-fixture",
+                              localizedName=lambda: "JARVIS Fixture", activationPolicy=lambda: 0, isActive=lambda: True)
+    appkit = SimpleNamespace(NSRunningApplication=SimpleNamespace(
+        runningApplicationWithProcessIdentifier_=lambda pid: running if pid == 9 else None))
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+    assert cn.launch_services_identity(9) == {"bundle_id": "local.jarvis.ax-fixture", "bundle_path": "/tmp/JARVIS Fixture.app",
+                                              "name": "JARVIS Fixture", "policy": 0, "active": True}
+    assert cn.launch_services_identity(10) is None
+    appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_ = lambda pid: 1 / 0
+    assert cn.launch_services_identity(9) is None, "a call that fails is no answer, not a crash"
+    monkeypatch.setitem(sys.modules, "AppKit", None)
+    assert cn.launch_services_identity(9) is None
 
 
 async def test_a_command_nobody_answers_is_an_error_not_a_hang(cn, tmp_path):

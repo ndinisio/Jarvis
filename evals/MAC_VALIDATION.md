@@ -75,27 +75,46 @@ but the app recorded no press`, `the app recorded 2 presses for one`, `JARVIS al
 `JARVIS also asked for an app to be brought forward (pid …)`, `the press raised …`). Each line ends with what the
 surface returned (`'Pressed “Save”.'` is AXPress; `'Clicked …'` is the click) and what the window recorded.
 
-**Nothing is pressed until the fixture itself says it is in the background.** Accessibility naming Finder as the
-focused application is not that: it is a different account, and v8.59's run showed the fixture still active by its
-own (`NSApplication.isActive`) while Accessibility already named another app. So before the press the harness asks
-Finder to come forward (`AXFrontmost`, the way JARVIS brings an app forward) and waits - on the fixture's own answer,
-not on a timer - until the fixture's `probe` has said `isActive=false` twice running with nothing in its own log
-saying it became active in between. If it still says it is active, it is asked once to deactivate itself
-(`NSApplication.deactivate`, public, macOS 14+) and waited for the same way. If neither does it, **the step is a
-⚠ `not run: the target could not be put in the background by its own account, so nothing was pressed`** - it did
-not test a background press, and no press was made, so the checks above are not exercised by that run either. If it
-had gone inactive and its own log then shows it became active again before the AXPress was issued, the step is a ⚠
-`baseline lost`.
+**The fixture is an application of its own.** `--stale` builds `JARVIS Fixture.app` in a temporary folder
+(`scripts/fixture_bundle.py`): a copy of the running Python's own `Resources/Python.app` - python.org and Homebrew
+builds have one - under a bundle identifier (`local.jarvis.ax-fixture`) and name of its own, signed ad hoc, and
+launches it with `open -n -a …` so that LaunchServices starts it, as it would any application. Before anything is
+driven the window is checked to be that application: the fixture's own `identity:` line and LaunchServices' answer
+for the pid must both name that identifier at that path, or the run stops with `the window that opened is not the
+bundled fixture` and says which account disagreed. The `fixture:` lines say how it was launched and what both
+accounts said. A Python with no `Python.app` (conda, uv, python-build-standalone) cannot be bundled this way:
+`the fixture could not be made into an application: …` - run it with a python.org or Homebrew Python. Nothing falls
+back to the old launch (the interpreter as a child of the harness), which is the launch this replaces. Whether macOS
+accepts the copy is what the run shows: `open` that fails, or an app that never reports ready, prints what the
+launch and the app wrote to their error streams (`dyld: Library not loaded …` means the copied executable could
+not find its framework).
 
-Under every result there are `baseline:` lines in time order (seconds from the first request): what was asked of
-Finder (accepted or refused, and when Accessibility first named it frontmost), what the fixture said about itself at
-each change (`isActive`, whether its window is key, `ls_active` / `ls_front` - what LaunchServices says of it and
-which pid it calls frontmost - `hidden`, `bundled` - whether the process has a bundle identifier, a bare
-interpreter does not), what Accessibility said (the focused application and the fixture's own `AXFrontmost`), the
-self-deactivate request, `AXPress issued` with how long after the confirming probe looked, and the fixture's own
-`activation:became` / `activation:resigned` lines. They are the evidence for *why* a target stays active: the fixture
-saying `isActive=true` with `ls_front` naming Finder means AppKit has not caught up; `ls_front` naming the fixture
-means LaunchServices never moved; `bundled=false` points at the fixture being a bare interpreter. Send them whole.
+**Nothing is pressed until the fixture itself says it is in the background.** Accessibility naming Finder as the
+focused application is not that: it is a different account, and the v8.60 run showed the fixture still active by its
+own (`NSApplication.isActive`) with Accessibility never naming Finder at all. So before the press the harness
+reads the fixture's state, makes it active first if it is not (so that *fixture active → another app active →
+fixture inactive* is what is observed), and then asks, one way at a time and waiting on the fixture's own answer
+after each - not on a timer: Finder to come forward (`AXFrontmost`, the way JARVIS brings an app forward); if the
+fixture is still active, the application the check is being run from (Terminal), because Accessibility declining to
+name Finder says nothing about the fixture; and last the fixture itself (`NSApplication.deactivate`, public, macOS
+14+). Each is public API; none is repeated, since repeating a request Accessibility already considers done changes
+nothing. The wait ends when the fixture's `probe` has said `isActive=false` twice running with nothing in its own
+log saying it became active in between. If it still says it is active, **the step is a ⚠ `not run: the target
+could not be put in the background by its own account, so nothing was pressed`** - it did not test a background
+press, and no press was made, so the checks above are not exercised by that run either. If it had gone inactive and
+its own log then shows it became active again before the AXPress was issued, the step is a ⚠ `baseline lost`.
+
+Under every result there are `baseline:` lines in time order (seconds from the first sample): the fixture's state
+before anything is asked, what was asked of each application (accepted or refused, and when Accessibility first
+named it frontmost), what the fixture said about itself at each change (`isActive`, whether its window is key,
+`ls_active` / `ls_front` - what LaunchServices says of it and which pid it calls frontmost - `hidden`, `bundle` and
+`bundled`), what Accessibility said (the focused application and the fixture's own `AXFrontmost`), the
+self-deactivate request, a `lifecycle:` line (`active -> Finder active -> inactive was seen, after ax-front`, or why
+the transition was not seen), `AXPress issued` with how long after the confirming probe looked, and the fixture's own
+`activation:became` / `activation:resigned` lines. They are the evidence for *why* a target stays active: the
+fixture saying `isActive=true` with `ls_front` naming another app means AppKit has not caught up; `ls_front` naming
+the fixture means LaunchServices never moved; `Accessibility never named Finder in front` with the next application
+working means Finder was the problem and not the fixture. Send them whole.
 
 After the `·  foreground:` is what happened to the target's standing, by the **app's own account** (AppKit's
 `isActive`, asked of the fixture with the `probe` command - not Accessibility's idea of the focused application,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -292,13 +293,14 @@ def test_the_cocoa_probe_gives_the_other_accounts_of_being_active_as_evidence_an
     appkit.NSApplication.sharedApplication.return_value.isHidden.return_value = False
     appkit.NSRunningApplication.currentApplication.return_value.isActive.return_value = False
     appkit.NSWorkspace.sharedWorkspace.return_value.frontmostApplication.return_value.processIdentifier.return_value = 202
-    appkit.NSBundle.mainBundle.return_value.bundleIdentifier.return_value = None
+    foundation.NSBundle.mainBundle.return_value.bundleIdentifier.return_value = None
     probed = view.probe()
-    assert (probed["hidden"], probed["ls_active"], probed["ls_front"], probed["bundled"]) == (False, False, 202, False)
+    assert (probed["hidden"], probed["ls_active"], probed["ls_front"], probed["bundled"]) == (False, False, 202, None)
+    assert probed["bundle_id"] is None
     assert probed["active"] is True, "LaunchServices disagreeing does not change the app's own answer"
     json.dumps(probed)                                        # it goes into the log as JSON
     appkit.NSWorkspace.sharedWorkspace.side_effect = RuntimeError("no workspace")
-    appkit.NSBundle.mainBundle.side_effect = RuntimeError("no bundle")
+    foundation.NSBundle.mainBundle.side_effect = RuntimeError("no bundle")
     probed = view.probe()
     assert probed["active"] is True and probed["ls_front"] is None and probed["bundled"] is None
 
@@ -351,5 +353,41 @@ def test_running_it_announces_itself_and_starts_the_app(fx, tmp_path, monkeypatc
     monkeypatch.setitem(sys.modules, "Foundation", foundation)
     log, commands = tmp_path / "log", tmp_path / "commands"
     assert fx.run(["--log", str(log), "--commands", str(commands)]) == 0
-    assert log.read_text().startswith("ready:")
+    first, second = log.read_text().splitlines()[:2]
+    assert first.startswith("identity:") and second.startswith("ready:"), "who it is, then that it is ready"
+    assert json.loads(first.split(":", 1)[1])["pid"] == int(second.split(":")[1])
     appkit.NSApplication.sharedApplication.return_value.run.assert_called_once()
+    foundation.NSProcessInfo.processInfo.return_value.beginActivityWithOptions_reason_.assert_called_once_with(
+        foundation.NSActivityUserInitiatedAllowingIdleSystemSleep, "JARVIS accessibility fixture")
+
+
+def test_the_fixture_opts_out_of_app_nap_and_says_so_when_it_cannot(fx):
+    appkit, foundation = stand_in_modules()
+    token = object()
+    foundation.NSProcessInfo.processInfo.return_value.beginActivityWithOptions_reason_.return_value = token
+    assert fx.keep_awake(foundation, [].append) is token, "the token has to be kept"
+    foundation.NSProcessInfo.processInfo.side_effect = RuntimeError("no process info")
+    log = []
+    assert fx.keep_awake(foundation, log.append) is None
+    assert log == ["note:no App Nap opt-out: RuntimeError"]
+
+
+def test_the_identity_line_says_which_application_this_process_is_and_never_raises(fx):
+    appkit, foundation = stand_in_modules()
+    view = fx.CocoaView(appkit, foundation, [].append)
+    bundle = foundation.NSBundle.mainBundle.return_value
+    bundle.bundleIdentifier.return_value = "local.jarvis.ax-fixture"
+    bundle.bundlePath.return_value = "/tmp/x/JARVIS Fixture.app"
+    bundle.executablePath.return_value = "/tmp/x/JARVIS Fixture.app/Contents/MacOS/Python"
+    appkit.NSApplication.sharedApplication.return_value.activationPolicy.return_value = 0
+    appkit.NSRunningApplication.currentApplication.return_value.localizedName.return_value = "JARVIS Fixture"
+    identity = view.identity()
+    assert identity == {"pid": os.getpid(), "bundle_id": "local.jarvis.ax-fixture",
+                        "bundle_path": "/tmp/x/JARVIS Fixture.app",
+                        "executable": "/tmp/x/JARVIS Fixture.app/Contents/MacOS/Python", "policy": 0,
+                        "name": "JARVIS Fixture"}
+    json.dumps(identity)
+    foundation.NSBundle.mainBundle.side_effect = RuntimeError("no bundle")
+    appkit.NSRunningApplication.currentApplication.side_effect = RuntimeError("no app")
+    gone = view.identity()
+    assert gone["bundle_id"] is None and gone["bundle_path"] is None and gone["name"] is None and gone["policy"] == 0

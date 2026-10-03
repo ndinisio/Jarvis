@@ -10,7 +10,8 @@ what was actually clicked in a log of its own, so a check can verify an action
 against the app's own account of it rather than against the Accessibility tree
 that is under test.
 
-    scripts/check_native.py --stale     # starts this, drives it, stops it
+    scripts/check_native.py --stale     # builds this into JARVIS Fixture.app (scripts/fixture_bundle.py),
+                                        # launches it through LaunchServices, drives it, stops it
 
 Run on its own it is a window and a command file:
 
@@ -33,7 +34,8 @@ Commands, one per line, ``<number> <name> [argument]``:
                      whether it worked
     quit
 
-Log lines: ``ready:<pid>``, ``ack:<number>:<json state>``, ``error:<number>:<why>``,
+Log lines: ``identity:<json>`` (who this process is, once, before ``ready``), ``ready:<pid>``,
+``ack:<number>:<json state>``, ``error:<number>:<why>``,
 and for every press ``click:<name>:<identifier>:born=<generation>`` (a button) or
 ``toggle:…`` (a checkbox). ``born`` says which build of the control was pressed.
 
@@ -146,6 +148,23 @@ class Log:
             handle.write(line + "\n")
 
 
+def _text(value: Any) -> str | None:
+    """A Foundation string as a Python one; None stays None."""
+    return None if value is None else str(value)
+
+
+def keep_awake(Foundation: Any, log: Callable[[str], None]) -> Any:
+    """Opt out of App Nap for as long as the process lives, so that a window which is not the active
+    application, and may be covered, still answers its command file on time. ``NSProcessInfo``'s public
+    activity API; the token it returns has to be kept. A fixture that can't do it says so and carries on."""
+    try:
+        return Foundation.NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+            Foundation.NSActivityUserInitiatedAllowingIdleSystemSleep, "JARVIS accessibility fixture")
+    except Exception as exc:
+        log(f"note:no App Nap opt-out: {type(exc).__name__}")
+        return None
+
+
 class CocoaView:
     """The window itself. Takes the AppKit and Foundation modules as arguments
     so the CI smoke test can run it against stand-ins."""
@@ -204,9 +223,9 @@ class CocoaView:
         ``t`` (``time.monotonic()`` at the moment it looked). Beside it, the other accounts the app can
         give of itself, so that a disagreement between them can be seen rather than guessed at:
         ``ls_active`` (NSRunningApplication, LaunchServices' view of this process), ``ls_front`` (the pid
-        LaunchServices calls frontmost), ``hidden``, and ``bundled`` (whether this process has a bundle
-        identifier - a bare interpreter does not). Only the first two are the answer; the rest are evidence,
-        each best effort. Never raises."""
+        LaunchServices calls frontmost), ``hidden``, and ``bundle_id`` / ``bundled`` (the bundle identifier
+        this process runs under, and whether it has one). Only the first two are the answer; the rest are
+        evidence, each best effort. Never raises."""
         try:
             app = self.AK.NSApplication.sharedApplication()
             state: dict[str, Any] = {"active": bool(app.isActive()), "key": bool(self.main.isKeyWindow())}
@@ -217,12 +236,31 @@ class CocoaView:
                           ("ls_active", lambda: bool(self.AK.NSRunningApplication.currentApplication().isActive())),
                           ("ls_front", lambda: int(self.AK.NSWorkspace.sharedWorkspace()
                                                    .frontmostApplication().processIdentifier())),
-                          ("bundled", lambda: bool(self.AK.NSBundle.mainBundle().bundleIdentifier()))):
+                          ("bundle_id", lambda: _text(self.F.NSBundle.mainBundle().bundleIdentifier()))):
             try:
                 state[name] = ask()
             except Exception:
                 state[name] = None
+        state["bundled"] = None if state["bundle_id"] is None else bool(state["bundle_id"])
         return state
+
+    def identity(self) -> dict[str, Any]:
+        """Who this process is, by its own account: pid, bundle identifier and path, the executable, its
+        activation policy and the name LaunchServices gives it. Written to the log once at start, so a check
+        can tell that the window it is about to drive is the application it launched and not another process.
+        Each field is best effort (None when it can't be read); never raises."""
+        bundle = lambda: self.F.NSBundle.mainBundle()  # noqa: E731
+        info: dict[str, Any] = {"pid": os.getpid()}
+        for name, ask in (("bundle_id", lambda: _text(bundle().bundleIdentifier())),
+                          ("bundle_path", lambda: _text(bundle().bundlePath())),
+                          ("executable", lambda: _text(bundle().executablePath())),
+                          ("policy", lambda: int(self.AK.NSApplication.sharedApplication().activationPolicy())),
+                          ("name", lambda: _text(self.AK.NSRunningApplication.currentApplication().localizedName()))):
+            try:
+                info[name] = ask()
+            except Exception:
+                info[name] = None
+        return info
 
     def deactivate(self) -> dict[str, Any]:
         """Ask the app to stop being the active application: ``NSApplication.deactivate``, public since
@@ -354,8 +392,11 @@ def run(argv: list[str] | None = None) -> int:
     commands = CommandFile(args.commands, Fixture(view), log)
     view.start(commands.poll)
     app.activateIgnoringOtherApps_(True)
+    awake = keep_awake(Foundation, log)
+    log("identity:" + json.dumps(view.identity(), sort_keys=True))
     log(f"ready:{os.getpid()}")
     app.run()
+    del awake
     return 0
 
 
