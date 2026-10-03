@@ -58,31 +58,44 @@ turning anything on.
 
 ## Reading the background-press line (`--stale`)
 
-`a press works with another app in front` passes only when a semantic AXPress was accepted by the app,
-the app recorded it, and Finder stayed in front. Its ✗ says which way it went wrong:
+`a press works with another app in front` separates what JARVIS owns from what macOS decides. The v8.58
+real-Mac evidence (a bare `AXUIElementPerformAction` from another process, a button with no action, and
+Calculator's own clear button all bring their app forward) means the app coming forward on an AXPress is not
+something JARVIS does and not something it can prevent, so it is **reported, not demanded**. What the step
+fails on is what JARVIS controls:
 
-* `AXPress succeeded, JARVIS posted no click and activated nothing, and the app still came forward` -
-  the press worked and the app activated itself in response: AXPress, or the app's handling of it.
-* `AXPress did not do the press: AXPress was refused … fell back to a coordinate click` (or `the button
-  does not offer AXPress`) - the press was done by a synthetic click, which brings the app forward.
-* `AXPress succeeded but the app recorded no press`, `the press raised …`, `not an AXPress: …` - the
-  mechanism is named in the line.
+* the press was a semantic AXPress that the app accepted - not a coordinate click (which activates the app and
+  moves the pointer), not a refused or absent AXPress that fell back to one;
+* JARVIS posted no other synthetic input (move, key, typing, drag) and asked for no app to be brought forward;
+* the app itself recorded **exactly one** press, of the control that was read (name, identifier and which build
+  of the window) - not none, not two, not a look-alike.
 
-When the verdict is "AXPress succeeded … and the app still came forward", `--stale` then runs controlled
-trials (Finder put in front before each) and prints `evidence:` lines that say whose doing it is:
+Its ✗ names which one broke (`AXPress did not do the press … fell back to a coordinate click`, `AXPress succeeded
+but the app recorded no press`, `the app recorded 2 presses for one`, `JARVIS also posted synthetic input (move)`,
+`JARVIS also asked for an app to be brought forward (pid …)`, `the press raised …`). Each line ends with what the
+surface returned (`'Pressed “Save”.'` is AXPress; `'Clicked …'` is the click) and what the window recorded.
 
-* the Save button pressed by a bare `AXUIElementPerformAction` in a process of its own (nothing of JARVIS in it);
-* the fixture's `Inert` button, which has no action, pressed by JARVIS;
-* Calculator's clear button pressed by JARVIS (Calculator is launched for it and quit again);
-* from the fixture's own log: whether the app was already active when its action began, and whether the app
-  itself ever reported becoming active (its own `didBecomeActive`, not Accessibility's focus).
+After the `·  foreground:` is what happened to the target's standing, by the **app's own account** (AppKit's
+`isActive`, asked of the fixture with the `probe` command - not Accessibility's idea of the focused application,
+which a press can move without the app ever activating). Before each press the target is put in the background
+and checked to be there by that account. Then the same AXPress is made by a bare client (nothing of JARVIS in the
+process) as a control, and the foreground is judged against it:
 
-The last line names the cause most consistent with them: JARVIS's invocation, the fixture's handling, this fixture
-and its host process, macOS/AppKit itself, or the measurement (Accessibility names the fixture as focused but the app
-never became active). It is a reading, not a proof, and the step's verdict is unchanged: activation stays a failure.
+* ✓ `stayed inactive by its own account` - nothing came forward (`only Accessibility's focus moved to it` when
+  that did - not an activation);
+* ✓ `became active, as it does for the same AXPress from a bare client` - the OS's or the app's response, which
+  JARVIS requested nothing of;
+* ⚠ cannot be assessed (`already active … when the press began`, `could not say whether it is active`, or no
+  bare-client press could be made) - a ⚠ is not a pass, and says what is missing;
+* ✗ `became active for JARVIS's press but not for the same AXPress from a bare client` - JARVIS's way of
+  invoking the press adds an activation. This is the only foreground finding that fails the step, and it is
+  followed by `evidence:` lines (the button with no action, Calculator's clear button, and the fixture's own log
+  of whether it was already active when its action began and whether it ever reported becoming active) that say
+  where it comes from.
 
-Each line ends with what the surface returned (`'Pressed “Save”.'` is AXPress; `'Clicked …'` is the click)
-and what the window recorded.
+Whether an app is activated when it is asked to press a button is not documented either way; this step does not
+claim that it is inherent, only that JARVIS adds nothing to it. What it cannot show is that the press left a
+different app, or a person's typing, undisturbed: that is not measured here.
 
 ## What the marks mean
 

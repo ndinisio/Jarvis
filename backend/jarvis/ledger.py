@@ -13,4 +13,4 @@ into its build (frontend/vite.config.ts reads this file), so the interface can t
 the backend it is talking to.
 """
 
-LEDGER_VERSION = "v8.58"
+LEDGER_VERSION = "v8.59"

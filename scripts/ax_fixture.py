@@ -26,6 +26,7 @@ Commands, one per line, ``<number> <name> [argument]``:
     impostor         replace it with a checkbox that is also called Save
     rename <name>    change the Save button's name, in place
     move             take Save out of this window and put it in another
+    probe            change nothing; answer whether the app is active and its window key
     quit
 
 Log lines: ``ready:<pid>``, ``ack:<number>:<json state>``, ``error:<number>:<why>``,
@@ -58,7 +59,7 @@ from typing import Any
 
 TITLE = "JARVIS Fixture"
 OTHER_TITLE = "JARVIS Fixture (other)"
-COMMANDS = ("restore", "rebuild", "duplicate", "twin", "impostor", "rename", "move", "quit")
+COMMANDS = ("restore", "rebuild", "duplicate", "twin", "impostor", "rename", "move", "probe", "quit")
 
 
 def parse_command(line: str) -> tuple[int, str, str] | None:
@@ -80,6 +81,8 @@ class Fixture:
         self.generation = 0
 
     def apply(self, name: str, argument: str = "") -> dict[str, Any]:
+        if name == "probe":            # a question, not a build: it must not move the generation presses are matched on
+            return {"generation": self.generation, **self.view.probe()}
         self.generation += 1
         if name in {"restore", "rebuild"}:
             self.view.build(self.generation, saves=1, kind="button", title="Save")
@@ -189,6 +192,15 @@ class CocoaView:
 
     def state(self) -> dict[str, Any]:
         return {"saves": len(self.saves), "other_window": self.other is not None}
+
+    def probe(self) -> dict[str, Any]:
+        """The app's own account of whether it is the active application - AppKit's ``isActive``, which
+        is not Accessibility's idea of the focused application - and whether its window is key."""
+        try:
+            app = self.AK.NSApplication.sharedApplication()
+            return {"active": bool(app.isActive()), "key": bool(self.main.isKeyWindow())}
+        except Exception as exc:
+            return {"active": None, "key": None, "why": type(exc).__name__}
 
     def quit(self) -> None:
         self.AK.NSApp.terminate_(None)

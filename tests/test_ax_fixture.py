@@ -46,6 +46,10 @@ class RecordingView:
     def state(self):
         return {"saves": 1}
 
+    def probe(self):
+        self.calls.append(("probe",))
+        return {"active": False, "key": True}
+
 
 @pytest.mark.parametrize("line, expected", [
     ("3 rebuild", (3, "rebuild", "")),
@@ -120,6 +124,23 @@ def test_a_missing_command_file_is_not_an_error(fx, tmp_path):
     log = []
     fx.CommandFile(tmp_path / "nope", fx.Fixture(RecordingView()), log.append).poll()
     assert log == []
+
+
+def test_a_probe_answers_the_apps_own_state_and_changes_nothing(fx, tmp_path):
+    """So a check can ask the app, not Accessibility, whether it is active - without a probe counting as a
+    build: the generation presses are matched against must not move."""
+    view = RecordingView()
+    fixture = fx.Fixture(view)
+    first = fixture.apply("restore")
+    probed = fixture.apply("probe")
+    assert probed == {"generation": first["generation"], "active": False, "key": True}
+    assert fixture.apply("probe")["generation"] == first["generation"], "asking twice moves nothing"
+    assert fixture.apply("rebuild")["generation"] == first["generation"] + 1
+    assert [call[0] for call in view.calls] == ["build", "probe", "probe", "build"]
+    log, path = [], tmp_path / "commands"
+    path.write_text("1 probe\n")
+    fx.CommandFile(path, fixture, log.append).poll()
+    assert log[0].startswith("ack:1:") and json.loads(log[0].split(":", 2)[2])["active"] is False
 
 
 def test_the_log_appends_lines(fx, tmp_path):
@@ -231,6 +252,19 @@ def test_the_app_logs_when_it_becomes_active_and_when_it_stops_being(fx):
     view.target.resigned_(None)
     assert [line.split(":t=")[0] for line in log[-2:]] == ["activation:became", "activation:resigned"]
     assert float(log[-1].split(":t=")[1]) >= float(log[-2].split(":t=")[1]), "one monotonic clock"
+
+
+def test_the_cocoa_probe_reports_appkits_active_flag_and_the_key_window_and_never_raises(fx):
+    appkit, foundation = stand_in_modules()
+    view = fx.CocoaView(appkit, foundation, [].append)
+    application = appkit.NSApplication.sharedApplication.return_value
+    application.isActive.return_value = False
+    view.main.isKeyWindow.return_value = True
+    assert view.probe() == {"active": False, "key": True}
+    application.isActive.return_value = True
+    assert view.probe()["active"] is True
+    appkit.NSApplication.sharedApplication.side_effect = RuntimeError("no application")
+    assert view.probe() == {"active": None, "key": None, "why": "RuntimeError"}
 
 
 def test_a_notification_centre_that_refuses_is_noted_and_does_not_stop_the_window(fx):
