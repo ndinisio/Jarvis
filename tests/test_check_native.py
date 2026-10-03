@@ -53,6 +53,7 @@ def cn(monkeypatch):
     monkeypatch.setattr(module, "calls", calls, raising=False)
     monkeypatch.setattr(module, "real_pause", module.pause, raising=False)
     monkeypatch.setattr(module, "pause", no_pause)
+    monkeypatch.setattr(module, "BACKGROUND_WAIT_S", 0.05)         # the fakes answer at once; no need to wait for them
     monkeypatch.setattr(module, "launch", lambda app: calls.append(("launch", app)))
     monkeypatch.setattr(module, "open_path", lambda path: calls.append(("open", Path(path).name)))
     monkeypatch.setattr(module, "quit_app", lambda app: calls.append(("quit", app)))
@@ -1513,7 +1514,8 @@ class FakeFixtureView:
                  process_name: str = "JARVIS Fixture", steals_focus: bool = False, axpress: str = "works",
                  enabled: bool = True, inert_activates: bool = False, activation_first: bool = False,
                  logs_activation: bool = True, ax_only: bool = False, sticky_active: bool = False,
-                 cannot_say: bool = False, presses_twice: bool = False, wrong_identity: bool = False):
+                 cannot_say: bool = False, presses_twice: bool = False, wrong_identity: bool = False,
+                 deactivation: str = "works", flaps: bool = False, flaps_quietly: bool = False):
         """*axpress*: ``works``; ``absent`` (the button offers no AXPress); ``silent`` (the app accepts
         AXPress and records nothing). Refusing AXPress is the backend's doing (``StaleMac``).
         *steals_focus*: the app activates when a control's action runs (*activation_first*: just before
@@ -1522,8 +1524,13 @@ class FakeFixtureView:
         *ax_only*: the press moves Accessibility's focus to the app and nothing else (the app is never
         active by its own account); *sticky_active*: the app is active from the start and stays so when another is brought forward;
         *cannot_say*: it answers no probe; *presses_twice* / *wrong_identity*: one press logs two, or logs
-        another control."""
+        another control.
+        *deactivation*: what asking the app to deactivate itself does - ``works``, ``ignored`` (it says it
+        will and stays active) or ``unavailable`` (the OS has no such call); *flaps*: after it first says it
+        is inactive it becomes active again (and stays so until deactivated); *flaps_quietly*: it becomes
+        active and resigns again between two probes, which only its own log shows."""
         self.backend, self.log, self.keep, self.steals_focus = backend, log, keep_references, steals_focus
+        self.deactivation, self.flaps, self.flaps_quietly = deactivation, flaps, flaps_quietly
         self.axpress, self.enabled = axpress, enabled
         self.inert_activates, self.activation_first = inert_activates, activation_first
         self.logs_activation = logs_activation       # False: Accessibility says "front", the app says nothing
@@ -1554,13 +1561,37 @@ class FakeFixtureView:
     def probe(self):
         if self.cannot_say:
             return {"active": None, "key": None, "why": "RuntimeError"}
-        return {"active": self.active, "key": self.active}
+        answer = {"active": self.active, "key": self.active, "t": time.monotonic(), "ls_active": self.active,
+                  "ls_front": 303 if self.active else 202, "hidden": False, "bundled": False}
+        if not self.active and (self.flaps or self.flaps_quietly):
+            time.sleep(0.002)                           # after the moment it looked, by more than the log can blur
+            if self.flaps:
+                self.flaps = False
+                self.log_activation()                   # it says no now, and is active by the next time anyone asks
+            else:
+                self.flaps_quietly = False
+                self.log_activation()
+                self.log_resignation()
+        return answer
+
+    def deactivate(self):
+        if self.deactivation == "unavailable":
+            return {"requested": False, "why": "NSApplication.deactivate needs macOS 14", "t": time.monotonic()}
+        if self.deactivation == "works":
+            self.log_resignation()
+        return {"requested": True, "t": time.monotonic()}
 
     def log_activation(self):
         """The app's own didBecomeActive, which fires whoever activated it."""
         self.active = True
         if self.logs_activation:
-            self.raw.append(f"activation:became:t={time.monotonic():.4f}")
+            self.raw.append(f"activation:became:t={time.monotonic():.6f}")
+
+    def log_resignation(self):
+        """...and its didResignActive."""
+        self.active = False
+        if self.logs_activation:
+            self.raw.append(f"activation:resigned:t={time.monotonic():.6f}")
 
     def _press_line(self, line):
         self.log.append(line)
@@ -1577,7 +1608,7 @@ class FakeFixtureView:
             if self.steals_focus and self.activation_first:
                 self._activate()
             active = int(self.active)
-            self.raw.append(f"handler:{verb}:active={active}:key=1:main=1:event=none:t={time.monotonic():.4f}")
+            self.raw.append(f"handler:{verb}:active={active}:key=1:main=1:event=none:t={time.monotonic():.6f}")
             name, ident = ("Save", "save2") if self.wrong_identity else (control.attrs['AXTitle'], identifier)
             for _ in range(2 if self.presses_twice else 1):
                 self._press_line(f"{verb}:{name}:{ident}:born={born}")
@@ -1625,7 +1656,7 @@ class FakeFixtureProcess:
     def __init__(self, view: FakeFixtureView, log: list[str], fx):
         self.fixture, self.log = fx.Fixture(view), log
 
-    def send(self, command, timeout_s=5.0):
+    def send(self, command, timeout_s=5.0, settle=True):
         name, _, argument = command.partition(" ")
         return self.fixture.apply(name, argument)
 
@@ -1658,6 +1689,17 @@ class StaleMac(FakeBackend):
             self.activate(404)
         return done
 
+    #: The app becomes active just before the AXPress is issued (after any baseline was taken).
+    wakes_before_press = False
+
+    def actions(self, element):
+        if self.wakes_before_press and element.attrs.get("AXIdentifier") == "save":
+            self.wakes_before_press = False
+            self.os_activate(303)
+            self.view.log_activation()
+            time.sleep(0.002)
+        return super().actions(element)
+
     #: JARVIS's press also posts a stray synthetic input / asks for another app to be brought forward.
     stray_input = False
     asks_for_activation = False
@@ -1680,7 +1722,7 @@ class StaleMac(FakeBackend):
 
     def _settle(self, pid):
         if self.view is not None and pid != 303 and not self.view.sticky_active:
-            self.view.active = False                      # bringing another app forward deactivates the fixture
+            self.view.log_resignation()                   # bringing another app forward deactivates the fixture
         elif self.view is not None and pid == 303:
             self.view.active = True
 
@@ -1703,7 +1745,8 @@ def _stale_setup(fx, *, keep_references=False, steals_focus=False, axpress="work
                  activation_works=True, enabled=True, inert_activates=False, activation_first=False,
                  jarvis_activates=False, calculator=None, logs_activation=True, ax_only=False,
                  sticky_active=False, cannot_say=False, presses_twice=False, wrong_identity=False,
-                 stray_input=False, asks_for_activation=False):
+                 stray_input=False, asks_for_activation=False, deactivation="works", flaps=False,
+                 flaps_quietly=False, wakes_before_press=False):
     """*calculator*: None (not installed), ``"behind"`` or ``"forward"`` (its clear button's press
     leaves it behind / brings it forward). The other options are the fakes' (see ``FakeFixtureView``
     and ``StaleMac``)."""
@@ -1721,13 +1764,15 @@ def _stale_setup(fx, *, keep_references=False, steals_focus=False, axpress="work
     backend.refuse_axpress, backend.activation_works = refuse_axpress, activation_works
     backend.jarvis_activates = jarvis_activates
     backend.stray_input, backend.asks_for_activation = stray_input, asks_for_activation
+    backend.wakes_before_press = wakes_before_press
     backend.view = None
     log: list[str] = []
     view = FakeFixtureView(backend, log, keep_references=keep_references, steals_focus=steals_focus,
                            axpress=axpress, enabled=enabled, inert_activates=inert_activates,
                            activation_first=activation_first, logs_activation=logs_activation, ax_only=ax_only,
                            sticky_active=sticky_active, cannot_say=cannot_say, presses_twice=presses_twice,
-                           wrong_identity=wrong_identity)
+                           wrong_identity=wrong_identity, deactivation=deactivation, flaps=flaps,
+                           flaps_quietly=flaps_quietly)
     device = PressingInput()
     device.view = backend.view = view
     backend.device = device
@@ -1824,10 +1869,21 @@ PRESSED = "the surface returned 'Pressed “Save”.'"
     ({"steals_focus": True}, "no permission", "⚠",
      ["AXPress succeeded: one press of Save", "the target became active, and no bare-client press could say whether "
                                               "that is the OS's own doing"]),
-    ({"sticky_active": True}, "", "⚠", ["the target was already active by its own account when the press began, so "
-                                        "whether the press activated it can't be told"]),
-    ({"cannot_say": True}, "", "⚠", ["the target could not say whether it is active, so the foreground can't be "
-                                     "assessed"]),
+    ({"sticky_active": True}, "", "✓", ["baseline: the fixture itself said isActive=false after self-deactivate",
+                                        "foreground: the target stayed inactive by its own account"]),
+    ({"flaps": True}, "", "✓", ["baseline: the fixture itself said isActive=false after self-deactivate"]),
+    # --- the baseline can't be shown: nothing is pressed, and the step says it did not test a background press
+    ({"sticky_active": True, "deactivation": "ignored"}, "", "⚠",
+     ["not run: the target could not be put in the background by its own account, so nothing was pressed",
+      "the fixture still said isActive=true after: ax-front and self-deactivate"]),
+    ({"sticky_active": True, "deactivation": "unavailable"}, "", "⚠",
+     ["so nothing was pressed", "asked the fixture to deactivate itself: not possible - NSApplication.deactivate "
+                                "needs macOS 14"]),
+    ({"cannot_say": True}, "", "⚠", ["so nothing was pressed", "the fixture could not say whether it is active"]),
+    # --- the baseline was taken, then lost before the AXPress was issued: the press is not a background press
+    ({"wakes_before_press": True}, "", "⚠",
+     ["AXPress succeeded: one press of Save", "baseline lost: the fixture logged becoming active",
+      "ms before the AXPress was issued, after it had said it was inactive"]),
     # --- JARVIS adds an activation a bare AXPress does not: a failure
     ({"jarvis_activates": True}, "", "✗",
      ["foreground: the target became active for JARVIS's press but not for the same AXPress from a bare client: "
@@ -1849,7 +1905,8 @@ PRESSED = "the surface returned 'Pressed “Save”.'"
     ({"asks_for_activation": True, "calculator": "behind"}, "", "✗",
      ["AXPress succeeded, but JARVIS also asked for an app to be brought forward (pid 404)"]),
 ], ids=["background", "os-activates", "ax-focus-only", "no-control-needed", "no-control-and-activated",
-        "baseline-not-established", "target-cannot-say", "jarvis-activates", "axpress-refused", "axpress-absent",
+        "self-deactivated", "flaps-then-deactivated", "baseline-ignored", "baseline-unavailable", "target-cannot-say",
+        "woken-before-press", "jarvis-activates", "axpress-refused", "axpress-absent",
         "fallback-fails-to-activate", "axpress-unrecorded", "raises", "pressed-twice", "wrong-control",
         "stray-input", "asks-for-activation"])
 async def test_a_background_press_passes_on_what_jarvis_owns_and_reports_the_foreground_against_a_control(
@@ -1860,6 +1917,86 @@ async def test_a_background_press_passes_on_what_jarvis_owns_and_reports_the_for
     for fragment in expected:
         assert fragment in out, (fragment, out)
     assert [m for m in "✓⚠✗" if f"{m} a press works" in out] == [mark], "exactly one verdict"
+
+
+async def test_nothing_is_pressed_when_the_target_cannot_be_shown_to_be_in_the_background(
+        cn, fx, capsys, monkeypatch):
+    result, out, run = await _step(cn, fx, capsys, monkeypatch, sticky_active=True, deactivation="ignored",
+                                   calculator="behind")
+    assert result is False and "⚠ a press works" in out and "✗" not in out
+    assert run.log == [] and run.view.raw == [r for r in run.view.raw if not r.startswith(("click:", "toggle:", "handler:"))]
+    assert run.surface.input.events == [], "no synthetic input of any kind"
+    assert 303 not in run.surface.backend.activations, "no activation request for the target either"
+    assert run.stub.calls == 0 and ("launch", "Calculator") not in cn.calls, "no control press, no trials"
+    assert "evidence: " not in out
+
+
+async def test_a_control_press_that_began_from_active_or_never_began_is_not_a_measurement(cn, monkeypatch):
+    trace = cn.PressTrace.__new__(cn.PressTrace)
+    trace.performed, trace.performed_at, trace.offered, trace.clicks = [], [], [], []
+    base = cn.Baseline()
+    base.established, base.stamp = True, 10.0
+    runs = [cn.Run(trace, "", "", True, ["activation:became:t=10.100000"], 10.5, False, True, base)]
+    never = cn.Baseline()
+    never.established, never.tried = False, ["ax-front", "self-deactivate"]
+    runs.append(cn.Run(trace, "", "", False, [], 10.5, True, None, never))
+
+    async def front_and_press(*_args, **_kwargs):
+        return runs.pop(0)
+
+    monkeypatch.setattr(cn, "front_and_press", front_and_press)
+    woken = await cn.raw_trial(None, None, 202, 303)
+    assert woken.note.startswith("the fixture logged becoming active") and not woken.usable
+    refused = await cn.raw_trial(None, None, 202, 303)
+    assert refused.note.startswith("nothing was pressed: the fixture still said isActive=true") and not refused.usable
+
+
+def test_a_build_waits_for_accessibility_to_catch_up_and_a_question_about_the_app_does_not(cn, tmp_path, monkeypatch):
+    fixture = cn.FixtureProcess(tmp_path)
+    slept = []
+    monkeypatch.setattr(cn.time, "sleep", slept.append)
+    fixture.log_path.write_text('ack:1:{"generation": 1}\nack:2:{"active": false}\n')
+    assert fixture.send("restore") == {"generation": 1} and slept == [0.2]
+    slept.clear()
+    assert fixture.send("probe", settle=False) == {"active": False} and slept == []
+
+
+async def test_the_step_prints_the_order_of_requests_the_fixtures_word_accessibility_and_the_press(
+        cn, fx, capsys, monkeypatch):
+    _, out, _ = await _step(cn, fx, capsys, monkeypatch, sticky_active=True, steals_focus=True)
+    lines = [line.split("baseline: ", 1)[1] for line in out.splitlines() if line.startswith("      baseline: ")]
+    order = ["asked Finder to come forward", "the fixture says isActive=true", "asked the fixture to deactivate itself",
+             "the fixture says isActive=false", "AXPress issued", "the fixture's own log: activation:became"]
+    positions = [next(i for i, line in enumerate(lines) if fragment in line) for fragment in order]
+    assert positions == sorted(positions), lines
+    assert all("Accessibility: focused Finder (pid 202)" in line for line in lines if "the fixture says" in line)
+    offsets = [float(line.split(" s ")[0]) for line in lines]
+    assert offsets == sorted(offsets)
+    assert "ms after the confirming probe looked" in out
+
+
+async def test_a_control_that_cannot_be_put_in_the_background_leaves_the_foreground_unassessed(
+        cn, fx, capsys, monkeypatch):
+    surface, fixture, view, _ = _stale_setup(fx, sticky_active=True, steals_focus=True)
+    stub = _raw_stub(view)
+    monkeypatch.setattr(cn, "raw_press_process", stub)
+    asked = []
+    original = view.deactivate
+
+    def once():
+        asked.append(1)
+        reply = original()
+        view.deactivation = "ignored"                    # it gives way the first time and never again
+        return reply
+
+    view.deactivate = once
+    result = await cn.background_press(surface, fixture)
+    out = capsys.readouterr().out
+    assert result is False and "⚠ a press works" in out and stub.calls == 0
+    assert "AXPress succeeded: one press of Save" in out
+    assert "(the bare-client comparison: nothing was pressed: the fixture still said isActive=true after: ax-front and "\
+           "self-deactivate)" in out
+    assert "no bare-client press could say" in out
 
 
 async def test_activation_by_the_os_is_reported_but_activation_by_jarvis_is_what_fails_the_whole_run(
@@ -1898,49 +2035,103 @@ async def test_a_press_that_activates_the_app_through_jarvis_is_not_excused_by_a
     assert result is False and "⚠ a press works" in out
 
 
-# -- the baseline: the target must be in the background by its own account, not merely by Accessibility's --
-async def test_the_target_is_put_in_the_background_until_it_says_it_is(cn, fx):
-    surface, fixture, view, _ = _stale_setup(fx)
-    view.active = True                                   # the app is active until another one is brought forward
-    assert await cn.put_in_background(surface.backend, fixture, 202) is False
-    assert surface.backend.front == "Finder" and view.active is False
+# -- the baseline: nothing is pressed until the target itself says it is not the active application --
+async def _establish(cn, fx, **setup):
+    surface, fixture, view, log = _stale_setup(fx, **setup)
+    view.active = True                                   # it is active, as the fixture is at launch
+    base = await cn.establish_background(surface.backend, fixture, 202, 303)
+    return base, SimpleNamespace(surface=surface, fixture=fixture, view=view, log=log)
 
 
-async def test_a_target_that_will_not_go_to_the_background_is_reported_after_a_bounded_number_of_tries(cn, fx):
+async def test_the_target_is_put_in_the_background_by_asking_finder_and_waiting_for_its_own_word(cn, fx):
+    base, run = await _establish(cn, fx)
+    assert base.established is True and base.mechanism == "ax-front" and base.tried == ["ax-front"]
+    assert run.view.active is False and run.surface.backend.front == "Finder"
+    assert run.surface.backend.activations.count(202) == 1, "one request: asking again would change nothing"
+    assert base.stamp is not None and base.asked is not None and base.asked <= base.stamp + 1
+
+
+async def test_a_target_that_stays_active_when_finder_comes_forward_is_asked_to_deactivate_itself(cn, fx):
+    base, run = await _establish(cn, fx, sticky_active=True)
+    assert base.established is True and base.mechanism == "self-deactivate"
+    assert base.tried == ["ax-front", "self-deactivate"]
+    assert run.surface.backend.activations.count(202) == 1, "Finder was asked once, not once per attempt"
+    text = "\n".join(base.lines())
+    assert "asked Finder to come forward (AXFrontmost): accepted" in text
+    assert "asked the fixture to deactivate itself (NSApplication.deactivate)" in text
+    assert "the fixture says isActive=true" in text and "the fixture says isActive=false" in text
+
+
+@pytest.mark.parametrize("setup, tried, fragment", [
+    (dict(sticky_active=True, deactivation="ignored"), ["ax-front", "self-deactivate"],
+     "still said isActive=true after: ax-front and self-deactivate"),
+    (dict(sticky_active=True, deactivation="unavailable"), ["ax-front", "self-deactivate"],
+     "not possible - NSApplication.deactivate needs macOS 14"),
+], ids=["ignored", "unavailable"])
+async def test_a_target_that_cannot_be_made_inactive_is_not_established_and_says_what_was_tried(
+        cn, fx, setup, tried, fragment):
+    base, run = await _establish(cn, fx, **setup)
+    assert base.established is False and base.tried == tried and base.active is True
+    assert fragment in base.summary() + "\n".join(base.lines())
+    assert run.view.active is True and run.log == []
+
+
+async def test_a_target_that_cannot_say_is_not_pushed_any_further(cn, fx):
+    base, run = await _establish(cn, fx, cannot_say=True)
+    assert base.established is None and base.tried == ["ax-front"], "no point asking it to deactivate"
+    assert "could not say whether it is active" in base.summary()
+
+
+async def test_a_target_that_gives_way_late_is_waited_for_on_its_own_word_and_not_on_a_count(cn, fx):
     surface, fixture, view, _ = _stale_setup(fx, sticky_active=True)
     view.active = True
-    assert await cn.put_in_background(surface.backend, fixture, 202, attempts=4) is True
-    assert surface.backend.activations.count(202) == 4
+    asked = []
+    original = view.probe
 
+    def probe():
+        asked.append(1)
+        if len(asked) == 7:
+            view.log_resignation()                       # the deactivation arrives on the seventh question
+        return original()
 
-async def test_a_target_that_leaves_the_active_state_late_is_waited_for(cn, fx):
-    surface, fixture, view, _ = _stale_setup(fx, sticky_active=True)
-    backend = surface.backend
-    original = backend.activate
-
-    def activate(pid):
-        done = original(pid)
-        if backend.activations.count(pid) >= 3:
-            view.active = False                          # it gives way on the third time of asking
-        return done
-
-    backend.activate = activate
-    assert await cn.put_in_background(backend, fixture, 202) is False
-    assert backend.activations.count(202) == 3
-
-
-async def test_a_target_that_cannot_say_is_taken_at_accessibilitys_word_after_one_try(cn, fx):
-    surface, fixture, view, _ = _stale_setup(fx, cannot_say=True)
-    assert await cn.put_in_background(surface.backend, fixture, 202) is None
+    view.probe = probe
+    base = await cn.establish_background(surface.backend, fixture, 202, 303)
+    assert base.established is True and base.mechanism == "ax-front" and len(asked) >= 8
     assert surface.backend.activations.count(202) == 1
+
+
+async def test_a_target_that_says_no_and_is_active_again_has_not_been_established(cn, fx):
+    base, run = await _establish(cn, fx, flaps=True)
+    assert base.established is True and base.mechanism == "self-deactivate", "it came back, so it was asked to leave"
+    assert "the fixture says isActive=true" in "\n".join(base.lines())
+
+
+async def test_a_target_whose_own_log_shows_it_became_active_between_two_noes_is_not_taken_at_its_word(cn, fx):
+    base, run = await _establish(cn, fx, flaps_quietly=True)
+    text = "\n".join(base.lines())
+    assert "the fixture's own log says it became active again" in text
+    assert base.established is True and base.mechanism == "ax-front"
+    assert base.stamp > min(float(line.split(":t=")[1]) for line in run.fixture.lines()
+                            if line.startswith("activation:became")), "the confirming probe came after it"
+
+
+async def test_the_baseline_is_a_timeline_with_the_requests_the_fixtures_word_and_accessibilitys(cn, fx):
+    base, _ = await _establish(cn, fx)
+    lines = base.lines()
+    assert lines[0].startswith("+0.0") and "asked Finder to come forward (AXFrontmost): accepted; Accessibility named "\
+                                           "Finder in front after" in lines[0]
+    assert any("the fixture says isActive=false key=false ls_active=false hidden=false bundled=false ls_front=pid 202 "
+               "· Accessibility: focused Finder (pid 202)" in line for line in lines)
+    assert [float(line.split(" s ")[0]) for line in lines] == sorted(float(line.split(" s ")[0]) for line in lines)
 
 
 async def test_the_targets_own_account_is_none_unless_it_answers_with_a_yes_or_a_no(cn):
     class Fixture:
         def __init__(self, reply):
-            self.reply = reply
+            self.reply, self.settles = reply, []
 
-        def send(self, command, timeout_s=5.0):
+        def send(self, command, timeout_s=5.0, settle=True):
+            self.settles.append(settle)
             if isinstance(self.reply, Exception):
                 raise self.reply
             return self.reply
@@ -1951,6 +2142,10 @@ async def test_the_targets_own_account_is_none_unless_it_answers_with_a_yes_or_a
     assert await cn.target_active(Fixture({})) is None
     assert await cn.target_active(Fixture({"active": "yes"})) is None
     assert await cn.target_active(Fixture(RuntimeError("the window didn't answer"))) is None
+    asked = Fixture({"active": False, "t": 5.0})
+    state = await cn.probe_target(asked)
+    assert asked.settles == [False], "a question about the app's own state is not made stale by a settling pause"
+    assert state["t"] == 5.0 and state["asked"] <= state["answered"]
 
 
 @pytest.mark.parametrize("jarvis, control, status, fragment", [
@@ -2230,8 +2425,29 @@ def test_a_trial_is_only_a_measurement_of_axpress_when_the_surface_did_a_plain_a
         cn, performed, clicks, error, accepted, note):
     trace = cn.PressTrace.__new__(cn.PressTrace)
     trace.performed, trace.offered, trace.clicks = performed, [["AXPress"]], clicks
-    trial = cn.trial_from("t", trace, "Pressed.", error, True, [], 0.0, logs=False)
+    trial = cn.trial_from("t", cn.Run(trace, "Pressed.", error, True, [], 0.0, None, None), logs=False)
     assert trial.accepted is accepted and trial.note == note and trial.usable is (accepted and not note)
+
+
+def test_a_trial_that_pressed_nothing_or_began_from_active_is_not_a_measurement(cn):
+    trace = cn.PressTrace.__new__(cn.PressTrace)
+    trace.performed, trace.offered, trace.clicks, trace.inputs, trace.activations = [], [], [], [], []
+    never = cn.Baseline()
+    never.established, never.tried = False, ["ax-front", "self-deactivate"]
+    trial = cn.trial_from("t", cn.Run(trace, "", "", False, [], 0.0, True, None, never), logs=True)
+    assert trial.note == "nothing was pressed: the fixture still said isActive=true after: ax-front and self-deactivate"
+    assert not trial.usable and trial.accepted is False
+
+    good = cn.Baseline()
+    good.established, good.stamp = True, 10.0
+    trace.performed, trace.performed_at, trace.offered = [("AXPress", True)], [10.5], [["AXPress"]]
+    woke = ["activation:became:t=10.200000"]
+    trial = cn.trial_from("t", cn.Run(trace, "Pressed.", "", True, woke, 10.4, False, True, good), logs=True)
+    assert trial.note.startswith("the fixture logged becoming active 300 ms before the AXPress was issued")
+    assert not trial.usable
+    after = ["activation:became:t=10.700000"]
+    trial = cn.trial_from("t", cn.Run(trace, "Pressed.", "", True, after, 10.4, False, True, good), logs=True)
+    assert trial.note == "" and trial.usable, "an activation after the AXPress is what is being measured"
 
 
 def test_the_independent_client_is_a_bare_accessibility_script_and_is_run_as_one(cn, monkeypatch):

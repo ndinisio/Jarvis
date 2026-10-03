@@ -26,7 +26,11 @@ Commands, one per line, ``<number> <name> [argument]``:
     impostor         replace it with a checkbox that is also called Save
     rename <name>    change the Save button's name, in place
     move             take Save out of this window and put it in another
-    probe            change nothing; answer whether the app is active and its window key
+    probe            change nothing; answer whether the app is active and its window key, with the time it
+                     looked and what LaunchServices says (see below)
+    deactivate       change nothing in the window; ask the app to stop being the active application, by
+                     the public NSApplication.deactivate (macOS 14+). It waits for nothing: a probe says
+                     whether it worked
     quit
 
 Log lines: ``ready:<pid>``, ``ack:<number>:<json state>``, ``error:<number>:<why>``,
@@ -38,7 +42,7 @@ presses needs to attribute (the fixture's action itself only writes a line; it n
 orders a window or asks for focus): ``handler:<click|toggle>:active=<0|1>:key=<0|1>:main=<0|1>:
 event=<none|type>:t=<seconds>`` just before a press is logged - whether the app was already active
 when its action ran - and ``activation:<became|resigned>:t=<seconds>`` whenever it changes. ``t`` is
-``time.monotonic()``, the same clock in every process on the machine. The window also has an
+``time.monotonic()`` to the microsecond, the same clock in every process on the machine. The window also has an
 ``Inert`` button with no action, to press without any fixture code running at all.
 
 Needs the ``native`` extra (PyObjC). The command and log handling is plain
@@ -59,7 +63,8 @@ from typing import Any
 
 TITLE = "JARVIS Fixture"
 OTHER_TITLE = "JARVIS Fixture (other)"
-COMMANDS = ("restore", "rebuild", "duplicate", "twin", "impostor", "rename", "move", "probe", "quit")
+COMMANDS = ("restore", "rebuild", "duplicate", "twin", "impostor", "rename", "move", "probe", "deactivate",
+            "quit")
 
 
 def parse_command(line: str) -> tuple[int, str, str] | None:
@@ -81,8 +86,8 @@ class Fixture:
         self.generation = 0
 
     def apply(self, name: str, argument: str = "") -> dict[str, Any]:
-        if name == "probe":            # a question, not a build: it must not move the generation presses are matched on
-            return {"generation": self.generation, **self.view.probe()}
+        if name in {"probe", "deactivate"}:    # not builds: they must not move the generation presses are matched on
+            return {"generation": self.generation, **getattr(self.view, name)()}
         self.generation += 1
         if name in {"restore", "rebuild"}:
             self.view.build(self.generation, saves=1, kind="button", title="Save")
@@ -195,12 +200,42 @@ class CocoaView:
 
     def probe(self) -> dict[str, Any]:
         """The app's own account of whether it is the active application - AppKit's ``isActive``, which
-        is not Accessibility's idea of the focused application - and whether its window is key."""
+        is not Accessibility's idea of the focused application - and whether its window is key, with
+        ``t`` (``time.monotonic()`` at the moment it looked). Beside it, the other accounts the app can
+        give of itself, so that a disagreement between them can be seen rather than guessed at:
+        ``ls_active`` (NSRunningApplication, LaunchServices' view of this process), ``ls_front`` (the pid
+        LaunchServices calls frontmost), ``hidden``, and ``bundled`` (whether this process has a bundle
+        identifier - a bare interpreter does not). Only the first two are the answer; the rest are evidence,
+        each best effort. Never raises."""
         try:
             app = self.AK.NSApplication.sharedApplication()
-            return {"active": bool(app.isActive()), "key": bool(self.main.isKeyWindow())}
+            state: dict[str, Any] = {"active": bool(app.isActive()), "key": bool(self.main.isKeyWindow())}
         except Exception as exc:
             return {"active": None, "key": None, "why": type(exc).__name__}
+        state["t"] = time.monotonic()
+        for name, ask in (("hidden", lambda: bool(app.isHidden())),
+                          ("ls_active", lambda: bool(self.AK.NSRunningApplication.currentApplication().isActive())),
+                          ("ls_front", lambda: int(self.AK.NSWorkspace.sharedWorkspace()
+                                                   .frontmostApplication().processIdentifier())),
+                          ("bundled", lambda: bool(self.AK.NSBundle.mainBundle().bundleIdentifier()))):
+            try:
+                state[name] = ask()
+            except Exception:
+                state[name] = None
+        return state
+
+    def deactivate(self) -> dict[str, Any]:
+        """Ask the app to stop being the active application: ``NSApplication.deactivate``, public since
+        macOS 14. It is a request - the answer says whether it could be made, and a probe afterwards says
+        whether it did anything."""
+        try:
+            ask = getattr(self.AK.NSApplication.sharedApplication(), "deactivate", None)
+            if ask is None:
+                return {"requested": False, "why": "NSApplication.deactivate needs macOS 14", "t": time.monotonic()}
+            ask()
+            return {"requested": True, "t": time.monotonic()}
+        except Exception as exc:
+            return {"requested": False, "why": type(exc).__name__, "t": time.monotonic()}
 
     def quit(self) -> None:
         self.AK.NSApp.terminate_(None)
@@ -219,9 +254,9 @@ class CocoaView:
             event = app.currentEvent()
             return (f"handler:{kind}:active={int(bool(app.isActive()))}:key={int(bool(self.main.isKeyWindow()))}:"
                     f"main={int(bool(self.main.isMainWindow()))}:"
-                    f"event={event.type() if event is not None else 'none'}:t={time.monotonic():.4f}")
+                    f"event={event.type() if event is not None else 'none'}:t={time.monotonic():.6f}")
         except Exception as exc:
-            return f"handler:{kind}:unavailable={type(exc).__name__}:t={time.monotonic():.4f}"
+            return f"handler:{kind}:unavailable={type(exc).__name__}:t={time.monotonic():.6f}"
 
     def _watch_activation(self) -> None:
         """Log when the app becomes active or stops being (see the module docstring). Best effort."""
@@ -247,10 +282,10 @@ class CocoaView:
                 view.log(f"toggle:{sender.title()}:{sender.identifier()}:born={sender.tag()}")
 
             def activated_(self, _note):
-                view.log(f"activation:became:t={time.monotonic():.4f}")
+                view.log(f"activation:became:t={time.monotonic():.6f}")
 
             def resigned_(self, _note):
-                view.log(f"activation:resigned:t={time.monotonic():.4f}")
+                view.log(f"activation:resigned:t={time.monotonic():.6f}")
 
             def tick_(self, _timer):
                 view.tick()

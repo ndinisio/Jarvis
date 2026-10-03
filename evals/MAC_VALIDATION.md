@@ -75,18 +75,40 @@ but the app recorded no press`, `the app recorded 2 presses for one`, `JARVIS al
 `JARVIS also asked for an app to be brought forward (pid …)`, `the press raised …`). Each line ends with what the
 surface returned (`'Pressed “Save”.'` is AXPress; `'Clicked …'` is the click) and what the window recorded.
 
+**Nothing is pressed until the fixture itself says it is in the background.** Accessibility naming Finder as the
+focused application is not that: it is a different account, and v8.59's run showed the fixture still active by its
+own (`NSApplication.isActive`) while Accessibility already named another app. So before the press the harness asks
+Finder to come forward (`AXFrontmost`, the way JARVIS brings an app forward) and waits - on the fixture's own answer,
+not on a timer - until the fixture's `probe` has said `isActive=false` twice running with nothing in its own log
+saying it became active in between. If it still says it is active, it is asked once to deactivate itself
+(`NSApplication.deactivate`, public, macOS 14+) and waited for the same way. If neither does it, **the step is a
+⚠ `not run: the target could not be put in the background by its own account, so nothing was pressed`** - it did
+not test a background press, and no press was made, so the checks above are not exercised by that run either. If it
+had gone inactive and its own log then shows it became active again before the AXPress was issued, the step is a ⚠
+`baseline lost`.
+
+Under every result there are `baseline:` lines in time order (seconds from the first request): what was asked of
+Finder (accepted or refused, and when Accessibility first named it frontmost), what the fixture said about itself at
+each change (`isActive`, whether its window is key, `ls_active` / `ls_front` - what LaunchServices says of it and
+which pid it calls frontmost - `hidden`, `bundled` - whether the process has a bundle identifier, a bare
+interpreter does not), what Accessibility said (the focused application and the fixture's own `AXFrontmost`), the
+self-deactivate request, `AXPress issued` with how long after the confirming probe looked, and the fixture's own
+`activation:became` / `activation:resigned` lines. They are the evidence for *why* a target stays active: the fixture
+saying `isActive=true` with `ls_front` naming Finder means AppKit has not caught up; `ls_front` naming the fixture
+means LaunchServices never moved; `bundled=false` points at the fixture being a bare interpreter. Send them whole.
+
 After the `·  foreground:` is what happened to the target's standing, by the **app's own account** (AppKit's
 `isActive`, asked of the fixture with the `probe` command - not Accessibility's idea of the focused application,
-which a press can move without the app ever activating). Before each press the target is put in the background
-and checked to be there by that account. Then the same AXPress is made by a bare client (nothing of JARVIS in the
-process) as a control, and the foreground is judged against it:
+which a press can move without the app ever activating). With the baseline shown, the same AXPress is made by a
+bare client (nothing of JARVIS in the process) as a control - itself only after the fixture has again shown it is
+inactive - and the foreground is judged against it:
 
 * ✓ `stayed inactive by its own account` - nothing came forward (`only Accessibility's focus moved to it` when
   that did - not an activation);
 * ✓ `became active, as it does for the same AXPress from a bare client` - the OS's or the app's response, which
   JARVIS requested nothing of;
-* ⚠ cannot be assessed (`already active … when the press began`, `could not say whether it is active`, or no
-  bare-client press could be made) - a ⚠ is not a pass, and says what is missing;
+* ⚠ cannot be assessed (`could not say whether it is active`, or no bare-client press could be made, with the
+  reason) - a ⚠ is not a pass, and says what is missing;
 * ✗ `became active for JARVIS's press but not for the same AXPress from a bare client` - JARVIS's way of
   invoking the press adds an activation. This is the only foreground finding that fails the step, and it is
   followed by `evidence:` lines (the button with no action, Calculator's clear button, and the fixture's own log

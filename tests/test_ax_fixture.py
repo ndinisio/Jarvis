@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -49,6 +50,10 @@ class RecordingView:
     def probe(self):
         self.calls.append(("probe",))
         return {"active": False, "key": True}
+
+    def deactivate(self):
+        self.calls.append(("deactivate",))
+        return {"requested": True}
 
 
 @pytest.mark.parametrize("line, expected", [
@@ -141,6 +146,16 @@ def test_a_probe_answers_the_apps_own_state_and_changes_nothing(fx, tmp_path):
     path.write_text("1 probe\n")
     fx.CommandFile(path, fixture, log.append).poll()
     assert log[0].startswith("ack:1:") and json.loads(log[0].split(":", 2)[2])["active"] is False
+
+
+def test_a_deactivate_request_is_passed_to_the_view_and_is_not_a_build_either(fx, tmp_path):
+    view = RecordingView()
+    fixture = fx.Fixture(view)
+    first = fixture.apply("restore")
+    assert fixture.apply("deactivate") == {"generation": first["generation"], "requested": True}
+    assert fixture.apply("rebuild")["generation"] == first["generation"] + 1
+    assert [call[0] for call in view.calls] == ["build", "deactivate", "build"]
+    assert fx.parse_command("4 deactivate") == (4, "deactivate", "")
 
 
 def test_the_log_appends_lines(fx, tmp_path):
@@ -260,11 +275,46 @@ def test_the_cocoa_probe_reports_appkits_active_flag_and_the_key_window_and_neve
     application = appkit.NSApplication.sharedApplication.return_value
     application.isActive.return_value = False
     view.main.isKeyWindow.return_value = True
-    assert view.probe() == {"active": False, "key": True}
+    before = time.monotonic()
+    probed = view.probe()
+    assert probed["active"] is False and probed["key"] is True
+    assert before <= probed["t"] <= time.monotonic(), "the moment it looked, on the clock the log shares"
     application.isActive.return_value = True
     assert view.probe()["active"] is True
     appkit.NSApplication.sharedApplication.side_effect = RuntimeError("no application")
     assert view.probe() == {"active": None, "key": None, "why": "RuntimeError"}
+
+
+def test_the_cocoa_probe_gives_the_other_accounts_of_being_active_as_evidence_and_each_may_fail(fx):
+    appkit, foundation = stand_in_modules()
+    view = fx.CocoaView(appkit, foundation, [].append)
+    appkit.NSApplication.sharedApplication.return_value.isActive.return_value = True
+    appkit.NSApplication.sharedApplication.return_value.isHidden.return_value = False
+    appkit.NSRunningApplication.currentApplication.return_value.isActive.return_value = False
+    appkit.NSWorkspace.sharedWorkspace.return_value.frontmostApplication.return_value.processIdentifier.return_value = 202
+    appkit.NSBundle.mainBundle.return_value.bundleIdentifier.return_value = None
+    probed = view.probe()
+    assert (probed["hidden"], probed["ls_active"], probed["ls_front"], probed["bundled"]) == (False, False, 202, False)
+    assert probed["active"] is True, "LaunchServices disagreeing does not change the app's own answer"
+    json.dumps(probed)                                        # it goes into the log as JSON
+    appkit.NSWorkspace.sharedWorkspace.side_effect = RuntimeError("no workspace")
+    appkit.NSBundle.mainBundle.side_effect = RuntimeError("no bundle")
+    probed = view.probe()
+    assert probed["active"] is True and probed["ls_front"] is None and probed["bundled"] is None
+
+
+def test_the_cocoa_deactivate_calls_the_public_appkit_request_and_says_when_it_cannot(fx):
+    appkit, foundation = stand_in_modules()
+    view = fx.CocoaView(appkit, foundation, [].append)
+    application = appkit.NSApplication.sharedApplication.return_value
+    answered = view.deactivate()
+    application.deactivate.assert_called_once_with()
+    assert answered["requested"] is True and answered["t"] > 0
+    del application.deactivate                                # an OS without NSApplication.deactivate
+    answered = view.deactivate()
+    assert answered["requested"] is False and "macOS 14" in answered["why"]
+    appkit.NSApplication.sharedApplication.side_effect = RuntimeError("no application")
+    assert view.deactivate()["requested"] is False
 
 
 def test_a_notification_centre_that_refuses_is_noted_and_does_not_stop_the_window(fx):
