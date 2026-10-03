@@ -250,6 +250,11 @@ async def test_scroll_maps_directions_to_the_right_key_codes(app, ctx, monkeypat
         return ShellResult(0, "", "")
 
     monkeypatch.setattr(controller, "osascript", fake_osascript)
+    # This is the key-code path; with Quartz importable (a real Mac) the tool
+    # posts scroll-wheel events instead, which other tests cover.
+    from jarvis.tools.interaction import scroll_quartz
+
+    monkeypatch.setattr(scroll_quartz, "available", lambda: False)
     tool = ScrollTool(app.deps)
 
     await tool.run({"direction": "down", "amount": 3}, ctx)

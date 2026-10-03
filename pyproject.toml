@@ -62,6 +62,8 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
+    # The mock-site tests post HTML forms (starlette's request.form()).
+    "python-multipart>=0.0.9",
 ]
 
 [project.scripts]

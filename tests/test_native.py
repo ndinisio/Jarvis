@@ -1199,8 +1199,7 @@ def test_a_result_is_never_reported_for_a_tool_that_is_not_there(app):
 # reading text off a picture (Vision), against stand-in modules
 # ---------------------------------------------------------------------------
 class _CocoaDict:
-    """What +[NSMutableDictionary dictionary] gives: Cocoa semantics, where
-    removing a key that isn't there is quietly nothing."""
+    """What +[NSDictionary dictionary] gives: a real Cocoa dictionary."""
 
     def removeObjectForKey_(self, key):
         return None
@@ -1259,7 +1258,7 @@ def _vision_stand_ins(monkeypatch, seen):
 
     vision = SimpleNamespace(VNImageRequestHandler=Handler, VNRecognizeTextRequest=Request)
     foundation = SimpleNamespace(NSURL=SimpleNamespace(fileURLWithPath_=lambda path: ("url", path)),
-                                 NSMutableDictionary=SimpleNamespace(dictionary=lambda: _CocoaDict()))
+                                 NSDictionary=SimpleNamespace(dictionary=lambda: _CocoaDict()))
     monkeypatch.setitem(sys.modules, "Vision", vision)
     monkeypatch.setitem(sys.modules, "Foundation", foundation)
 

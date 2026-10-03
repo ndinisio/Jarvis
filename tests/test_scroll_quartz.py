@@ -48,7 +48,7 @@ def _clean_quartz_module():
 
 
 def test_available_is_false_when_quartz_cannot_be_imported():
-    sys.modules.pop("Quartz", None)
+    sys.modules["Quartz"] = None            # makes `import Quartz` raise ImportError — even on a Mac, where it exists
     assert scroll_quartz.available() is False
 
 
@@ -95,7 +95,7 @@ def test_scroll_rejects_an_unrecognised_direction_without_touching_quartz():
 
 
 def test_scroll_returns_false_without_raising_when_quartz_is_missing():
-    sys.modules.pop("Quartz", None)
+    sys.modules["Quartz"] = None            # as above: forced, not assumed
     assert scroll_quartz.scroll("down", 1) is False
 
 

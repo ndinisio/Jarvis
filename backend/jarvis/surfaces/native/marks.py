@@ -70,12 +70,14 @@ def _vision_options() -> Any:
     Not ``{}``: a Python dict crosses into Objective-C as PyObjC's
     ``OC_PythonDictionary``, whose ``-removeObjectForKey:`` raises
     ``NSInvalidArgumentException - key does not exist`` for a key that isn't
-    there (Cocoa's own dictionaries ignore it), and Vision removes keys it may
-    not find. Seen on a Mac as the "text on a screenshot" step of
-    ``scripts/check_native.py`` failing with exactly that message."""
-    from Foundation import NSMutableDictionary
+    there, and Vision removes option keys it may not find. Seen on a Mac as the
+    "text on a screenshot" step of ``scripts/check_native.py`` failing with that
+    message, and reported by others on macOS 27 with PyObjC 12.2.2, where
+    ``None`` and ``NSDictionary.dictionary()`` are the confirmed fixes
+    (ShawnPana/phone-harness#107, dgml-io/dgml#159)."""
+    from Foundation import NSDictionary
 
-    return NSMutableDictionary.dictionary()
+    return NSDictionary.dictionary()
 
 
 def recognize_text(path: str | Path, *, fast: bool = False) -> list[TextBox]:

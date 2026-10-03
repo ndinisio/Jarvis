@@ -20,6 +20,31 @@ from jarvis.models.base import ModelProvider
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_host(monkeypatch):
+    """Every test sees a host that is not a Mac — whatever it is run on.
+
+    This module's promise is that macOS automation is mocked. It was kept by
+    accident: CI is Linux, where there is no macOS to drive, so the tools say
+    "that only works on macOS" and the native surface is unavailable. Run on a
+    real Mac the same tests drove it — opened Safari and Calculator, took a
+    screenshot, clicked in whichever window was in front (a click into Terminal
+    is classed as consequential and asks first), posted real scroll events — and
+    failed or passed according to what was on screen. A test that wants Mac
+    behaviour says so (``is_macos = True``, ``hub_module.IS_MACOS``, a fake
+    backend), and that later patch wins over this one."""
+    import platform
+
+    from jarvis.surfaces.web import hub
+    from jarvis.tools import registry
+    from jarvis.tools.macos import controller
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    for module in (registry, controller, hub):
+        monkeypatch.setattr(module, "IS_MACOS", False)
+
+
+@pytest.fixture(autouse=True)
 def _no_dotenv(monkeypatch):
     """A developer's own .env (API keys, a different model) never leaks
     into the tests; the test of .env itself turns it back on."""

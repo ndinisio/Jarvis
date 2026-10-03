@@ -18,6 +18,15 @@ Desktop, and a small window of its own (`scripts/ax_fixture.py`).
 * Give the terminal you run this from **Accessibility** and **Screen Recording**
   (System Settings → Privacy & Security). Close anything you don't want read.
 
+## The unit suite on the Mac
+
+`pip install -e '.[dev,native,evals]'`, then `python -m pytest -q`. The tests treat every
+host as a non-Mac (conftest `_hermetic_host`), so running them never opens an app, clicks
+or posts input on your machine. Tests that skip are the live-browser ones, which need
+Playwright and its bundled Chromium (`pip install -e '.[browser]' && playwright install chromium`);
+that is a missing optional dependency, not a failure. Anything that fails here is a real
+finding: send `python -m pytest -q --tb=short` for just those tests.
+
 ## The order
 
 ```

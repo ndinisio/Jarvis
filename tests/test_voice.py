@@ -138,15 +138,15 @@ async def test_kokoro_reports_missing_model_files(monkeypatch):
 
 
 async def test_kokoro_reports_missing_sounddevice(monkeypatch):
-    """sounddevice genuinely isn't installed in this environment — confirms
-    available() catches it explicitly (with an actionable message) rather
-    than only failing later, deep inside _play_blocking() during a real
-    speak() call."""
+    """With sounddevice not installed, available() says so explicitly (with an
+    actionable message) rather than only failing later, deep inside
+    _play_blocking() during a real speak() call. Not installed is forced here —
+    a machine with the voice extras has it."""
     import sys
     import types
 
     monkeypatch.setitem(sys.modules, "kokoro_onnx", types.ModuleType("kokoro_onnx"))
-    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setitem(sys.modules, "sounddevice", None)      # `import sounddevice` raises ImportError
 
     engine = KokoroTTS(model_path=__file__, voices_path=__file__)
     ok, note = await engine.available()
