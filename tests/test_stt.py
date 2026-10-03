@@ -5,10 +5,7 @@ file; JARVIS only detects and reports it, never invents the flag."""
 
 from __future__ import annotations
 
-import pytest
 from jarvis.voice.stt import WhisperCppSTT, _coreml_encoder_path
-
-pytestmark = pytest.mark.asyncio
 
 
 def test_coreml_encoder_path_follows_whisper_cpps_own_naming():

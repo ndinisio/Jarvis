@@ -22,8 +22,6 @@ from jarvis.core.errors import Cancelled
 from jarvis.intelligence.schema import Objective
 from jarvis.tools.base import ToolResult
 
-pytestmark = pytest.mark.asyncio
-
 OPERATOR_MARKER = "You operate this Mac for the user"
 
 

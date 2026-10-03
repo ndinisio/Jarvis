@@ -38,6 +38,7 @@ and the surface only uses any of this when ``automation.native_observer`` is on.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import queue
 import threading
 import time
@@ -130,9 +131,21 @@ class Watch:
         self.close()
 
 
+#: Request numbers. Never ``id(request)``: an id is only unique among objects that are alive,
+#: and a request dies as soon as its caller lets go of the Watch, after which the next
+#: request can be given the same id — and take the place of a subscription still live.
+_numbers = itertools.count(1)
+_numbers_lock = threading.Lock()
+
+
+def _next_number() -> int:
+    with _numbers_lock:
+        return next(_numbers)
+
+
 class _Add:
     def __init__(self, pid: int, notifications: tuple[str, ...], wake: Wake):
-        self.id = id(self)
+        self.id = _next_number()
         self.pid, self.notifications, self.wake = pid, notifications, wake
         self.done = threading.Event()
         self.tokens: list[Any] = []

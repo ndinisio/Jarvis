@@ -36,8 +36,6 @@ from jarvis.surfaces.native.marks import (
 from jarvis.tools.base import ToolResult
 from jarvis.tools.native.tools import MarkScreenTool
 
-pytestmark = pytest.mark.asyncio
-
 
 # ---------------------------------------------------------------------------
 # a fake accessibility tree

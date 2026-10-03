@@ -388,3 +388,37 @@ async def test_startup_reconciles_a_stranded_task_without_replaying_anything(app
     assert not [e for e in app.bus.history if e.type == EventType.TOOL_CALL], "nothing was replayed"
     assert app.tasks.all() == [], "no task was started to 'resume' it"
     await app.shutdown()
+
+
+async def test_a_write_cancelled_before_it_starts_makes_no_coroutine_to_leave_unawaited(app, recwarn):
+    """The loop closing right after a task finishes cancels the memory writes that
+    haven't run yet. They used to be coroutines made up front, so each one cancelled
+    that way was reported as "coroutine … was never awaited"."""
+    import gc
+
+    manager, made = app.tasks, []
+
+    def write(*args):                      # a plain function that returns the coroutine, as a store method does
+        made.append(args)
+        return asyncio.sleep(0)
+
+    manager._write(write, 1, 2)
+    (pending,) = list(manager._writes)
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    gc.collect()
+    assert made == [], "no coroutine was made for a write that never ran"
+    assert not [w for w in recwarn if "never awaited" in str(w.message)]
+
+
+async def test_a_write_takes_its_arguments_when_it_is_scheduled_not_when_it_runs(app):
+    manager, seen = app.tasks, []
+
+    async def write(*args):
+        seen.append(args)
+
+    row = ["before"]
+    manager._write(write, tuple(row), "fixed")
+    row[0] = "after"
+    await manager.flush()
+    assert seen == [(("before",), "fixed")]

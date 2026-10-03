@@ -23,8 +23,6 @@ from jarvis.intelligence.schema import Objective
 from jarvis.models.base import ChatMessage, Completion, ModelProvider, ToolCall
 from jarvis.tools.base import ToolResult
 
-pytestmark = pytest.mark.asyncio
-
 MARKER = "You operate this Mac for the user"
 
 

@@ -28,8 +28,6 @@ from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED
 from test_native import El, FakeBackend, RecordingInput
 from test_observer import FakeDriver
 
-pytestmark = pytest.mark.asyncio
-
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_native.py"
 
 

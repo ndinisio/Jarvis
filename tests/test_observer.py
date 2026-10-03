@@ -265,6 +265,40 @@ def test_stop_unsubscribes_everything_and_refuses_new_watches(driver, observer):
     assert observer.watch(7, MENU_OPENED) is None
 
 
+def test_every_watch_is_unsubscribed_however_many_are_dropped_unclosed(driver, observer):
+    """On Python 3.14 this test's twin above failed, intermittently: a watch dropped
+    without being closed let its request be freed, the next request reused its ``id()``,
+    and the earlier subscription was overwritten in the thread's table — never unsubscribed."""
+    for number in range(150):
+        observer.watch(number, MENU_OPENED)             # the Watch is dropped, unclosed
+    observer.stop()
+    assert not driver.observed
+    assert driver.subscribed == 150
+
+
+def test_request_numbers_are_unique_even_when_the_requests_are_dropped_at_once():
+    from jarvis.surfaces.native.observer import _Add
+
+    numbers = [_Add(1, (MENU_OPENED,), Wake()).id for _ in range(2000)]    # each freed as the next is made
+    assert len(set(numbers)) == 2000
+
+
+def test_request_numbers_are_unique_across_threads():
+    from jarvis.surfaces.native.observer import _Add
+
+    seen: list[int] = []
+
+    def make():
+        seen.extend(_Add(1, (MENU_OPENED,), Wake()).id for _ in range(500))
+
+    threads = [threading.Thread(target=make) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(set(seen)) == 4000
+
+
 def test_watching_nothing_is_no_watch(observer):
     assert observer.watch(7) is None
 

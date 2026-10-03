@@ -21,13 +21,10 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 from jarvis.core.errors import ConfirmationDeclined
 from jarvis.tools.base import ToolResult
 from jarvis.tools.registry import build_registry
 from jarvis.vision.watcher import ScreenWatcher
-
-pytestmark = pytest.mark.asyncio
 
 
 class _FakeSignal:

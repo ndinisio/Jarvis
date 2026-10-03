@@ -34,9 +34,6 @@ from jarvis.tools.base import ToolResult
 from jarvis.tools.email.mail_app import AppleMailBackend, MailMessage
 from jarvis.tools.macos.controller import ShellResult
 
-pytestmark = pytest.mark.asyncio
-
-
 # ---------------------------------------------------------------------------
 # a scripted reasoning model
 # ---------------------------------------------------------------------------
@@ -2017,10 +2014,19 @@ async def test_a_multi_step_errand_is_never_short_circuited_to_a_single_command(
     assert "browse_to" not in _tool_calls(app)
 
 
-async def test_a_failed_interpreted_command_is_rescued_once_without_looping(app, brain):
+async def test_a_failed_interpreted_command_is_rescued_once_without_looping(app, brain, monkeypatch):
     """The restated command names no real app: the tool says it wasn't its
     to do, the agent reconsiders — and must not be offered the same fast
-    route again, or the turn would loop."""
+    route again, or the turn would loop.
+
+    "No real app" needs a list of the real ones. With none to be had the catalogue
+    trusts the spoken name and tries to launch it, which is a launch that failed, not
+    a command that wasn't an app — so the list is fixed here, not read from the host
+    (a Mac, a bare container and a CI runner all have different ones)."""
+    async def installed(refresh=False):
+        return ["Safari", "Mail", "Calendar", "Notes", "Terminal"]
+
+    monkeypatch.setattr(type(app.deps.apps), "apps", installed)
     brain.triage(mode="action", action_evidence=["get blorptastic going"],
                  normalized_command="open Blorptastic",
                  objective={"goal": "open Blorptastic", "kind": "open application",

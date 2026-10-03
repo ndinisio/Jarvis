@@ -9,6 +9,7 @@ same token the tools poll.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import time
 import uuid
@@ -135,10 +136,8 @@ class TaskManager:
                 # that lets the next startup notice a task that never got
                 # the chance to log its own finish (see
                 # MemoryStore.orphaned_tasks).
-                self._write(
-                    self._memory.log_task(task.id, task.kind, task.title, TaskStatus.RUNNING,
-                                          task.started, None, "")
-                )
+                self._write(self._memory.log_task, task.id, task.kind, task.title, TaskStatus.RUNNING,
+                            task.started, None, "")
             try:
                 task.result = await coro_factory(task)
                 status = TaskStatus.CANCELLED if task.cancel_event.is_set() else TaskStatus.SUCCEEDED
@@ -157,15 +156,11 @@ class TaskManager:
         task.progress = 1.0 if status == TaskStatus.SUCCEEDED else task.progress
         self._bus.publish(EventType.TASK_FINISHED, **task.as_dict())
         if self._memory is not None:
-            self._write(
-                self._memory.log_task(
-                    task.id, task.kind, task.title, status, task.started, task.finished,
-                    str(_summarise(task.result) or task.error or ""),
-                )
-            )
+            self._write(self._memory.log_task, task.id, task.kind, task.title, status, task.started,
+                        task.finished, str(_summarise(task.result) or task.error or ""))
             # Nothing left to reconcile for a task that finished one way or
             # another: its step checkpoints only matter if a crash strands it.
-            self._write(self._memory.discard_task_steps([task.id]))
+            self._write(self._memory.discard_task_steps, [task.id])
 
     # -- progress ----------------------------------------------------------
     def step(self, task: Task, message: str, progress: float | None = None,
@@ -202,14 +197,20 @@ class TaskManager:
         if len(args) > _STEP_ARGS_CHARS:
             args = json.dumps({"truncated": True})
         ok = entry.get("ok")
-        self._write(self._memory.log_task_step(
-            task.id, task.step_count, entry["ts"], str(entry.get("tool") or ""), args,
-            None if ok is None else bool(ok), str(entry["message"])[:STEP_SUMMARY_CHARS]))
+        self._write(self._memory.log_task_step, task.id, task.step_count, entry["ts"],
+                    str(entry.get("tool") or ""), args, None if ok is None else bool(ok),
+                    str(entry["message"])[:STEP_SUMMARY_CHARS])
 
-    def _write(self, coro: Awaitable[Any]) -> None:
+    def _write(self, write_fn: Callable[..., Awaitable[Any]], *args: Any) -> None:
         """Run a memory write in the background without letting a failed
-        write take a task down — and without losing track of it."""
-        write = asyncio.create_task(self._guarded(coro))
+        write take a task down — and without losing track of it.
+
+        Given the function and its arguments (taken now), not a coroutine made
+        from them: the coroutine is created only when the write starts. A write
+        cancelled before it ever ran — the loop closing right after a task
+        finished — then leaves nothing behind, instead of a coroutine that
+        was made and never awaited."""
+        write = asyncio.create_task(self._guarded(functools.partial(write_fn, *args)))
         self._writes.add(write)
         write.add_done_callback(self._writes.discard)
 
@@ -220,9 +221,9 @@ class TaskManager:
             await asyncio.gather(*list(self._writes), return_exceptions=True)
 
     @staticmethod
-    async def _guarded(coro: Awaitable[Any]) -> None:
+    async def _guarded(start: Callable[[], Awaitable[Any]]) -> None:
         try:
-            await coro
+            await start()
         except Exception as exc:
             log.warning("task memory write failed: %s", exc)
 
