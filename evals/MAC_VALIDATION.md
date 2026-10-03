@@ -43,6 +43,10 @@ Every run starts with a line like `code: v8.53 (3f2a9c1)`. Send it with the outp
 result is matched to the code that produced it (`git pull` first if it is older than expected;
 `+ uncommitted changes` means the checkout has been edited).
 
+Each check starts from the app you ran it in (`Starting point: Terminal …`), not from whichever
+app an earlier check left in front, so any of 1–5 can be run on its own, in any state. `--app NAME`
+starts somewhere else.
+
 Run 1 first. If it fails, stop and send it back: everything after rests on it. After
 1–5 each pass once, run 7 for repeatability and timings. Only then think about
 turning anything on.

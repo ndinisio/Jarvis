@@ -76,7 +76,8 @@ class Calculator:
     #: for the symbols is not what accessibility calls them.
     PRINTED = {"clear": "AC", "7": "7", "add": "+", "5": "5", "equals": "=", "9": "9"}
 
-    def __init__(self, names: dict[str, str] | None = None, display_as: str = "plain"):
+    def __init__(self, names: dict[str, str] | None = None, display_as: str = "plain",
+                 ax_frame: tuple | None = None):
         """*display_as* is how the display is exposed: ``plain`` (a static text whose value is the
         number — the shape every earlier version of this fake had, and the one real Calculator is
         not), ``described`` (the real shape, as far as a Mac's own dump has shown it: a static text
@@ -95,7 +96,7 @@ class Calculator:
                         for key, (x, y) in self.LAYOUT.items()}
         for key, button in self.buttons.items():
             button.on_perform = lambda _action, key=key: self.press(key)
-        window = El("AXWindow", "Calculator", actions=(), frame=self.WINDOW,
+        window = El("AXWindow", "Calculator", actions=(), frame=ax_frame or self.WINDOW,
                     children=[*([] if display_as == "plain" else [self.expression]), self.screen,
                               *self.buttons.values()])
         menus = El("AXMenuBar", actions=(), children=[El("AXMenuBarItem", "Apple"), El("AXMenuBarItem", "Calculator"),
@@ -341,6 +342,146 @@ async def test_a_sum_that_did_not_happen_is_a_failure_that_shows_the_display(cn,
     assert "the display copied as '7'" in capsys.readouterr().out
 
 
+class BoundsMac(FakeBackend):
+    """A Mac that can also say where the window server puts the window being photographed."""
+
+    def __init__(self, *args, bounds=None, others=(), **kw):
+        super().__init__(*args, **kw)
+        self.bounds, self.others = bounds, list(others)
+
+    def window_bounds(self, number):
+        return self.bounds
+
+    def window_list(self, pid):
+        return list(self.others)
+
+    def screens(self):
+        return [{"frame": (0.0, 0.0, 1512.0, 982.0), "scale": 2.0}]
+
+
+def _marks_surface(calculator, bounds, others=()):
+    backend = BoundsMac({"Calculator": (101, calculator.app)}, front="Calculator", bounds=bounds, others=others)
+    return NativeSurface(backend=backend, input=ClickingInput(calculator), sleep=lambda _s: None), backend
+
+
+#: The Accessibility frame of an inner rectangle, not of the window drawn: what an app can report when
+#: its window is hosted by something larger. Under it the reported Mac numbers are reproduced exactly —
+#: its keypad's pixels convert to a layout 0.48 as wide and 0.78 as tall as its buttons'.
+INNER = (110.0, 140.0, 96.0, 231.0)
+
+
+@pytest.fixture
+def shots(cn, monkeypatch, tmp_path):
+    """Screenshots of Calculator's real window at two pixels to the point, and OCR over them."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    async def capture(pid, number):
+        path = tmp_path / "window.png"
+        Image.new("RGB", (Calculator.WINDOW[2] * 2, Calculator.WINDOW[3] * 2), "white").save(path)
+        return path
+
+    monkeypatch.setattr(cn, "capture_window", capture)
+
+
+async def test_text_lands_on_its_controls_when_converted_against_the_window_server_rectangle(
+        cn, shots, monkeypatch, capsys):
+    """The picture is of the window the window server photographed. Accessibility's frame for the
+    window is something else (INNER); converting the pixels against it puts every digit in the wrong
+    place, converting against the window server's rectangle does not."""
+    calculator = Calculator(ax_frame=INNER)
+    monkeypatch.setattr(cn, "recognize_text", lambda path: calculator.ocr(2))
+    monkeypatch.setattr(cn, "read_clipboard", lambda: calculator.display)
+    surface, _ = _marks_surface(calculator, bounds=Calculator.WINDOW)
+    assert await cn.calculator_marks(surface) is True
+    out = capsys.readouterr().out
+    assert "3 of 3 agree" in out and "✗" not in out
+    assert calculator.display == "9", "and a click on the 9 mark pressed the 9 button"
+    assert surface.last_capture.source == "window server"
+    assert surface.last_capture.disagreement.startswith("Accessibility says the window is (110, 140, 96×231)")
+
+
+async def test_without_the_window_servers_rectangle_the_wrong_frame_fails_and_the_report_says_what_fits(
+        cn, shots, monkeypatch, capsys):
+    calculator = Calculator(ax_frame=INNER)
+    monkeypatch.setattr(cn, "recognize_text", lambda path: calculator.ocr(2))
+    surface, _ = _marks_surface(calculator, bounds=None)
+    assert await cn.calculator_marks(surface) is False
+    out = capsys.readouterr().out
+    assert re.search(r"✗ text read off the screenshot lands on the controls it names — [0-2] of 3 agree", out)
+    assert "converted against the accessibility's" in out
+    assert "the controls fit neither window rectangle" in out
+    assert "(100, 100, 200×300)" in out, "the rectangle the controls do fit: the window actually photographed"
+
+
+async def test_the_failure_lists_the_windows_and_displays_that_could_explain_it(cn, shots, monkeypatch, capsys):
+    calculator = Calculator(ax_frame=INNER)
+    monkeypatch.setattr(cn, "recognize_text", lambda path: calculator.ocr(2))
+    other = {"number": 7, "name": "History", "layer": 0, "on_screen": True, "bounds": (400.0, 100.0, 120.0, 200.0)}
+    surface, _ = _marks_surface(calculator, bounds=None, others=[other])
+    await cn.calculator_marks(surface)
+    out = capsys.readouterr().out
+    assert "window 7 “History” layer 0 on screen (400, 100, 120×200)" in out
+    assert "displays: (0, 0, 1512×982) at 2×" in out
+
+
+async def test_a_plain_mac_whose_two_descriptions_agree_is_unchanged(cn, shots, monkeypatch, capsys):
+    calculator = Calculator()
+    monkeypatch.setattr(cn, "recognize_text", lambda path: calculator.ocr(2))
+    monkeypatch.setattr(cn, "read_clipboard", lambda: calculator.display)
+    surface, _ = _marks_surface(calculator, bounds=Calculator.WINDOW)
+    assert await cn.calculator_marks(surface) is True
+    assert surface.last_capture.disagreement == "" and surface.last_capture.frame.w == 200
+
+
+def test_the_scale_the_controls_fit_is_measured_not_assumed(cn):
+    pairs = [((60.0, 40.0), (130.0, 120.0)), ((160.0, 40.0), (180.0, 120.0)), ((60.0, 240.0), (130.0, 220.0))]
+    across, down = cn.fit_axis([(p[0][0], p[1][0]) for p in pairs]), cn.fit_axis([(p[0][1], p[1][1]) for p in pairs])
+    assert across == pytest.approx((100.0, 0.5, 0.0)) and down == pytest.approx((100.0, 0.5, 0.0))
+    assert cn.fit_axis([(5.0, 1.0), (5.0, 9.0)]) is None, "one column says nothing about the scale across"
+    assert cn.fit_axis([(5.0, 1.0)]) is None
+    noisy = cn.fit_axis([(0.0, 0.0), (100.0, 50.0), (200.0, 102.0)])
+    assert noisy[1] == pytest.approx(0.51, abs=0.01) and 0 < noisy[2] < 2
+
+
+def _capture(ax, bounds, size=(400, 600)):
+    from jarvis.surfaces.native.ax import Frame
+    from jarvis.surfaces.native.marks import Capture
+
+    frame = Frame(*(bounds or ax))
+    return Capture(frame, "window server" if bounds else "accessibility", Frame(*ax) if ax else None,
+                   Frame(*bounds) if bounds else None, size)
+
+
+def test_the_report_names_the_rectangle_the_controls_fit(cn):
+    window = (100.0, 100.0, 200.0, 300.0)
+    pairs = [((60.0, 40.0), (130.0, 120.0)), ((160.0, 40.0), (180.0, 120.0)), ((60.0, 240.0), (130.0, 220.0))]
+    lines = cn.coordinate_report(_capture((110.0, 140.0, 96.0, 231.0), window), pairs)
+    text = "\n".join(lines)
+    assert "fitted to 3 pairs: 2.00 px/pt across, 2.00 down" in text
+    assert "put the picture at (100, 100, 200×300)" in text and "the controls fit the window server's rectangle" in text
+    assert "the two disagree: Accessibility says the window is (110, 140, 96×231)" in text
+    agree = cn.coordinate_report(_capture(window, None), pairs)
+    assert "the controls fit Accessibility's rectangle" in "\n".join(agree)
+
+
+def test_controls_laid_out_on_a_different_scale_than_the_picture_are_called_that(cn):
+    """Buttons are square, so a picture whose text spacing is 0.48 as wide and 0.78 as tall as the
+    buttons' cannot be explained by any window rectangle."""
+    window = (100.0, 100.0, 200.0, 300.0)
+    pairs = [((60.0, 40.0), (130.0, 120.0)), ((160.0, 40.0), (130 + 100 / 0.481, 120.0)),
+             ((60.0, 240.0), (130.0, 120 + 200 / 0.778))]
+    text = "\n".join(cn.coordinate_report(_capture(window, window), pairs))
+    assert "the scale across and down differ" in text and "no one window rectangle explains the controls" in text
+
+
+def test_too_few_pairs_to_fit_is_said_not_guessed_at(cn):
+    window = (100.0, 100.0, 200.0, 300.0)
+    one_row = [((60.0, 40.0), (130.0, 120.0)), ((160.0, 40.0), (180.0, 120.0))]
+    assert "too few, or all in one row or column" in "\n".join(cn.coordinate_report(_capture(window, window), one_row))
+    assert "0 text/control pair(s)" in "\n".join(cn.coordinate_report(_capture(window, window), []))
+
+
 async def test_text_read_at_the_wrong_scale_is_caught(cn, calc, monkeypatch, capsys):
     """If the screenshot's pixels-per-point were wrong, a click on text would
     land beside it; the agreement check is what would show that."""
@@ -383,7 +524,7 @@ class TextEdit:
               ("Downloads", True)]
 
     def __init__(self, *, desktop: bool = True, new: bool = True, where: str = "simple",
-                 menu: list[tuple[str, bool]] | None = None):
+                 menu: list[tuple[str, bool]] | None = None, identifiers: dict | None = None):
         self.log: list[str] = []
         self.chosen = ""
         self.popup_value = "Documents"
@@ -392,12 +533,15 @@ class TextEdit:
             titles = [(t, e) for t, e in (menu or self.ICLOUD) if desktop or "Desktop" not in t]
             entries = []
             for number, (title, enabled) in enumerate(titles, 1):
-                item = El("AXMenuItem", title, enabled=enabled)
+                item = El("AXMenuItem", title, enabled=enabled, frame=(300, 100 + 20 * number, 200, 20),
+                          **({"AXIdentifier": identifiers[number]} if identifiers and number in identifiers else {}))
                 item.on_perform = lambda _a, n=number, t=title: (self.pressed.append(f"{n}:{t}"), self._choose(t))
                 entries.append(item)
             self.popup = El("AXPopUpButton", "Where:", value="\u2068TextEdit\u2069 — iCloud",
                             frame=(120, 300, 200, 22))
             menu = El("AXMenu", actions=("AXCancel",), children=entries)
+            for entry in entries:
+                entry.attrs["AXParent"] = menu
             self.popup.on_perform = lambda _a: self.popup.children.append(menu) if not self.popup.children else None
         else:
             documents, desktop_item = El("AXMenuItem", "Documents"), El("AXMenuItem", "Desktop")
@@ -456,6 +600,28 @@ async def test_a_desktop_listed_twice_is_refused_then_chosen_by_number_and_the_p
     assert "✓ the pop-up now says Desktop" in out and "✗" not in out
     assert textedit.pressed == ["2:\u2068Desktop\u2069 — iCloud"], "exactly one item was pressed: the first match"
     assert textedit.log == ["New", "Save…", "Cancel", "Close"]
+
+
+async def test_the_refusal_shows_what_tells_the_two_candidates_apart(cn, capsys):
+    surface = surface_for({"TextEdit": (303, (textedit := TextEdit(where="icloud")).app)}, "TextEdit")
+    assert await cn.guarded("x", cn.textedit_dropdown(surface)) is True
+    out = capsys.readouterr().out
+    assert "candidate 1:" in out and "candidate 2:" in out
+    assert "parent='AXMenu with 12 children'" in out
+    assert "place in the menu='item 2, under “iCloud Library”'" in out and "item 10, under “Favourites”" in out
+    assert "they differ in: AXPosition, place in the menu — only where they sit; nothing about what they are or do tells them apart" in out
+    assert "\u2068" not in out and "Title='Desktop — iCloud'" in out
+    assert textedit.pressed == ["2:\u2068Desktop\u2069 — iCloud"]
+
+
+async def test_a_difference_in_identifier_is_what_the_evidence_points_at(cn, capsys):
+    textedit = TextEdit(where="icloud", identifiers={2: "icloud-desktop", 10: "favourite-desktop"})
+    surface = surface_for({"TextEdit": (303, textedit.app)}, "TextEdit")
+    assert await cn.guarded("x", cn.textedit_dropdown(surface)) is True
+    out = capsys.readouterr().out
+    assert "they differ in: AXIdentifier, AXPosition, place in the menu" in out
+    assert "only where they sit" not in out
+    assert "Identifier='icloud-desktop'" in out and "Identifier='favourite-desktop'" in out
 
 
 async def test_a_unique_qualified_desktop_is_chosen_without_asking(cn, capsys):
@@ -774,6 +940,88 @@ async def test_the_controls_flag_runs_the_controls_checks_and_only_then(cn, monk
     monkeypatch.setattr("sys.argv", ["check_native.py", *flag])
     assert await cn.main() == 0
     assert ran == expected
+
+
+def test_the_chain_of_parent_processes_is_followed_to_the_top_and_cannot_loop(cn):
+    parents = {900: 800, 800: 700, 700: 1}
+
+    def ps(command, **kwargs):
+        pid = int(command[-1])
+        return type("Done", (), {"stdout": f"{parents.get(pid, 'junk')}\n"})()
+
+    assert cn.ancestors(900, ps) == [800, 700]
+    assert cn.ancestors(555, ps) == [], "garbage from ps ends the walk"
+    loop = {10: 20, 20: 10}
+    answer = lambda c, **k: type("D", (), {"stdout": f"{loop[int(c[-1])]}\n"})()   # noqa: E731
+    assert cn.ancestors(10, answer) == [20, 10], "a cycle is walked once, not for ever"
+    itself = lambda c, **k: type("D", (), {"stdout": "5\n"})()                     # noqa: E731
+    assert cn.ancestors(5, itself) == [5]
+
+
+class HostMac(FakeBackend):
+    """Terminal (this script's home, with a window) and TextEdit (in front, every window closed)."""
+
+    def app_for_pid(self, pid):
+        return {50: (50, "Terminal"), 303: (303, "TextEdit")}.get(pid)
+
+
+def _host_world():
+    shell = El("AXTextArea", description="shell", value="hello world from the terminal", frame=(10, 30, 380, 200))
+    window = El("AXWindow", "Shell", actions=(), frame=(0, 0, 400, 300), children=[shell])
+    menubar = El("AXMenuBar", actions=(), children=[El("AXMenuBarItem", "Apple"), El("AXMenuBarItem", "Terminal")])
+    terminal = El("AXApplication", "Terminal", actions=(), AXWindows=[window], AXFocusedWindow=window, AXMenuBar=menubar)
+    textedit = El("AXApplication", "TextEdit", actions=(), AXWindows=[], AXFocusedWindow=None)
+    backend = HostMac({"Terminal": (50, terminal), "TextEdit": (303, textedit)}, front="TextEdit")
+    return backend, NativeSurface(backend=backend, input=RecordingInput(), sleep=lambda _s: None)
+
+
+def test_the_app_this_ran_from_is_the_nearest_ancestor_that_is_an_application(cn):
+    backend, _ = _host_world()
+    assert cn.host_app(backend, [7777, 6666, 50, 1]) == "Terminal", "a shell and a login process are not apps"
+    assert cn.host_app(backend, [7777, 6666]) == ""
+    assert cn.host_app(object(), [50]) == "", "a backend that can't say leaves the frontmost app as the default"
+
+
+async def test_the_opening_look_reads_the_app_it_was_run_from_not_whatever_an_earlier_check_left_in_front(
+        cn, monkeypatch, tmp_path, capsys):
+    """--controls straight after --act: TextEdit, with every window closed, is the app in front."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    async def capture(pid, number):
+        path = tmp_path / "window.png"
+        Image.new("RGB", (800, 600), "white").save(path)
+        return path
+
+    monkeypatch.setattr(cn, "capture_window", capture)
+    monkeypatch.setattr(cn, "recognize_text", lambda path: [TextBox("hello world from the terminal", x=40, y=80, w=300, h=24)])
+    backend, surface = _host_world()
+    assert await cn.look(surface, "") is False, "as it was: the frontmost app, TextEdit, has nothing to read"
+    assert "✗ read the window — TextEdit has no window open" in capsys.readouterr().out
+    assert await cn.look(surface, cn.host_app(backend, [50])) is True
+    assert "✓ read the window" in capsys.readouterr().out
+
+
+class _HostStub(_Stub):
+    def app_for_pid(self, pid):
+        return (pid, "Terminal") if pid == 50 else None
+
+
+@pytest.mark.parametrize("argv, expected", [([], "Terminal"), (["--app", "Notes"], "Notes")])
+async def test_main_starts_at_the_host_app_unless_told_otherwise(cn, monkeypatch, capsys, argv, expected):
+    seen = []
+
+    async def look(surface, app):
+        seen.append(app)
+        return True
+
+    monkeypatch.setattr(cn, "NativeSurface", lambda **kwargs: _HostStub(**kwargs))
+    monkeypatch.setattr(cn, "ancestors", lambda pid: [7, 50])
+    monkeypatch.setattr(cn, "look", look)
+    monkeypatch.setattr("sys.argv", ["check_native.py", *argv])
+    assert await cn.main() == 0
+    assert seen == [expected]
+    assert ("Starting point: Terminal" in capsys.readouterr().out) is (not argv)
 
 
 async def test_without_the_native_extras_it_says_so_and_does_nothing(cn, monkeypatch, capsys):

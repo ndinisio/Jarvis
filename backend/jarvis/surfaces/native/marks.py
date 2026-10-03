@@ -117,6 +117,56 @@ def from_normalised(text: str, confidence: float, box: tuple[float, float, float
                    w=bw * width, h=bh * height)
 
 
+@dataclass
+class Capture:
+    """What a screenshot of a window covers, in global points — the rectangle every pixel is
+    converted against."""
+
+    frame: Frame
+    #: "window server" (the rectangle ``screencapture -l`` photographed) or "accessibility".
+    source: str
+    ax: Frame | None
+    bounds: Frame | None
+    size: tuple[int, int]
+
+    @property
+    def disagreement(self) -> str:
+        """How the two descriptions of the window differ, if by more than a point and a half."""
+        if self.ax is None or self.bounds is None:
+            return ""
+        a, b = self.ax, self.bounds
+        if max(abs(a.x - b.x), abs(a.y - b.y), abs(a.w - b.w), abs(a.h - b.h)) <= 1.5:
+            return ""
+        return (f"Accessibility says the window is ({a.x:.0f}, {a.y:.0f}, {a.w:.0f}×{a.h:.0f}), "
+                f"the window server ({b.x:.0f}, {b.y:.0f}, {b.w:.0f}×{b.h:.0f})")
+
+
+def pixels_per_point(frame: Frame, size: tuple[int, int]) -> tuple[float, float]:
+    width, height = size
+    return (width / frame.w if frame.w else 0.0, height / frame.h if frame.h else 0.0)
+
+
+def _square(frame: Frame, size: tuple[int, int]) -> bool:
+    """Whether a picture of *size* could be a picture of *frame*: the same number of pixels to the
+    point across and down. A window's pixels are square, so a frame that needs 2.1 across and
+    1.3 down is not the window in the picture."""
+    sx, sy = pixels_per_point(frame, size)
+    return sx > 0 and sy > 0 and abs(sx / sy - 1.0) <= 0.02
+
+
+def capture_frame(ax: Frame | None, bounds: Frame | None, size: tuple[int, int]) -> Capture | None:
+    """The rectangle a window screenshot covers. The window server's bounds for the very window
+    that was photographed are what the picture is *of*, so they win when they fit the picture;
+    the Accessibility frame is the fallback (an app can describe its window to Accessibility
+    differently from how it is drawn). None when neither exists."""
+    if bounds is not None and not bounds.empty and _square(bounds, size):
+        return Capture(bounds, "window server", ax, bounds, size)
+    if ax is not None and not ax.empty and _square(ax, size):
+        return Capture(ax, "accessibility", ax, bounds, size)
+    chosen, source = (bounds, "window server") if bounds is not None and not bounds.empty else (ax, "accessibility")
+    return Capture(chosen, source, ax, bounds, size) if chosen is not None else None
+
+
 def to_points(box: TextBox, size: tuple[int, int], window: Frame) -> Frame:
     """Screenshot pixels → global screen points (the unit clicks use).
     A Retina screenshot has two pixels per point; the ratio is measured,

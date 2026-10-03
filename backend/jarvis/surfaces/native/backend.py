@@ -188,6 +188,70 @@ class MacAXBackend:
             mine = named or mine
         return int(mine[0]["kCGWindowNumber"]) if mine else None
 
+    def window_bounds(self, number: int) -> tuple[float, float, float, float] | None:
+        """Where the window server says window *number* is — ``(x, y, w, h)`` in global points,
+        the same space as Accessibility frames and mouse events. It is the rectangle
+        ``screencapture -l`` photographs, so it, not an Accessibility frame that may describe the
+        window differently, says what a screenshot of that window covers."""
+        try:
+            import Quartz
+
+            info = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionIncludingWindow, int(number)) or []
+        except Exception:
+            return None
+        for window in info:
+            if int(window.get("kCGWindowNumber", -1)) == int(number):
+                bounds = window.get("kCGWindowBounds") or {}
+                try:
+                    return (float(bounds["X"]), float(bounds["Y"]), float(bounds["Width"]), float(bounds["Height"]))
+                except (KeyError, TypeError, ValueError):
+                    return None
+        return None
+
+    def window_list(self, pid: int) -> list[dict[str, Any]]:
+        """Every window the window server lists for *pid*, front to back — number, title, layer and
+        bounds — for a validation run that must say which window was photographed."""
+        try:
+            import Quartz
+
+            windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID) or []
+        except Exception:
+            return []
+        found = []
+        for window in windows:
+            if int(window.get("kCGWindowOwnerPID", -1)) != pid:
+                continue
+            bounds = window.get("kCGWindowBounds") or {}
+            found.append({"number": int(window.get("kCGWindowNumber", 0)), "name": str(window.get("kCGWindowName") or ""),
+                          "layer": int(window.get("kCGWindowLayer", 0)),
+                          "on_screen": bool(window.get("kCGWindowIsOnscreen", False)),
+                          "bounds": (float(bounds.get("X", 0)), float(bounds.get("Y", 0)),
+                                     float(bounds.get("Width", 0)), float(bounds.get("Height", 0)))})
+        return found
+
+    def screens(self) -> list[dict[str, Any]]:
+        """Each display's frame (points) and how many pixels it has per point."""
+        try:
+            import AppKit
+
+            return [{"frame": (float(s.frame().origin.x), float(s.frame().origin.y),
+                               float(s.frame().size.width), float(s.frame().size.height)),
+                     "scale": float(s.backingScaleFactor())} for s in AppKit.NSScreen.screens()]
+        except Exception:
+            return []
+
+    def app_for_pid(self, pid: int) -> tuple[int, str] | None:
+        """*pid* as a regular, windowed application — (pid, name) — or None if it is a plain process."""
+        try:
+            import AppKit
+
+            running = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if running is None or running.activationPolicy() != 0:
+                return None
+            return int(running.processIdentifier()), str(running.localizedName() or "")
+        except Exception:
+            return None
+
     # -- attributes -------------------------------------------------------------------
     def attribute(self, element: Any, name: str) -> Any:
         if element is None:

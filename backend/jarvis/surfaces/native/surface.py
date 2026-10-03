@@ -29,7 +29,7 @@ from ...security import denylist
 from . import ax, options
 from .ax import Control, Frame, WindowSnapshot
 from .input import PASTE_THRESHOLD, Clipboard, Keystroke, NativeInput, resolve_key
-from .marks import Mark, build_marks, draw_overlay, image_size, render_marks
+from .marks import Capture, Mark, build_marks, capture_frame, draw_overlay, image_size, render_marks
 from .observer import ObserverThread, Wake
 
 log = get_logger("jarvis.surfaces.native")
@@ -104,6 +104,9 @@ class NativeSurface:
         #: Where the last drag took hold and let go (``ax.GrabPoint``s) and the two elements'
         #: frames — what a validation run prints when the app didn't take the drop.
         self.last_drag: dict[str, Any] | None = None
+        #: What the last mark_screen photograph covered (``marks.Capture``): the window server's
+        #: rectangle and Accessibility's, which one the pixels were converted against, and why.
+        self.last_capture: Capture | None = None
         self._backend = backend
         self._input = input
         self._clipboard = clipboard
@@ -483,21 +486,31 @@ class NativeSurface:
         snap, _ = await self.read(app)
         backend = self.backend
         window_number = await asyncio.to_thread(backend.window_number, snap.pid, snap.title)
-        if snap.frame is None or window_number is None:
+        bounds = await asyncio.to_thread(self._window_bounds, window_number) if window_number is not None else None
+        if window_number is None or (snap.frame is None and bounds is None):
             raise NativeError(f"I couldn't find {snap.app}'s window on screen to look at.")
         path = await capture(snap.pid, window_number)
         if recognize is None:
             from .marks import recognize_text as recognize
         texts = await asyncio.to_thread(recognize, str(path))
         size = await asyncio.to_thread(image_size, path)
-        marks = build_marks(texts, snap.controls, size, snap.frame)
+        covered = capture_frame(snap.frame, bounds, size)
+        self.last_capture = covered
+        if covered is None:  # pragma: no cover - guarded above
+            raise NativeError(f"I couldn't find {snap.app}'s window on screen to look at.")
+        marks = build_marks(texts, snap.controls, size, covered.frame)
         self._marks, self._marks_pid = marks, snap.pid
         overlay = None
         if overlay_dir is not None:
-            overlay = await asyncio.to_thread(draw_overlay, path, marks, snap.frame,
+            overlay = await asyncio.to_thread(draw_overlay, path, marks, covered.frame,
                                               Path(overlay_dir) / (Path(path).stem + "-marks.png"))
         self._overlay = overlay
         return marks, render_marks(marks, app=snap.app, title=snap.title), overlay
+
+    def _window_bounds(self, number: int) -> Frame | None:
+        found = getattr(self.backend, "window_bounds", None)
+        bounds = found(number) if found is not None else None
+        return Frame(*bounds) if bounds else None
 
     async def click_mark(self, number: int, *, clicks: int = 1, button: str = "left") -> Mark:
         mark = next((m for m in self._marks if m.number == number), None)

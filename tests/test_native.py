@@ -1305,6 +1305,53 @@ def test_screenshot_pixels_become_screen_points_on_a_retina_display():
     assert (flipped.x, flipped.y, flipped.w, flipped.h) == (0, pytest.approx(0), 200, pytest.approx(20))
 
 
+def test_a_screenshot_is_converted_against_the_rectangle_it_is_a_picture_of():
+    from jarvis.surfaces.native.marks import capture_frame, pixels_per_point
+
+    ax, bounds, size = axmod.Frame(110, 140, 96, 231), axmod.Frame(100, 100, 200, 300), (400, 600)
+    covered = capture_frame(ax, bounds, size)
+    assert covered.source == "window server" and covered.frame == bounds
+    assert pixels_per_point(covered.frame, size) == (2.0, 2.0)
+    assert "Accessibility says the window is (110, 140, 96×231), the window server (100, 100, 200×300)" \
+        in covered.disagreement
+
+
+def test_when_both_rectangles_fit_the_picture_the_window_servers_origin_is_the_one_used():
+    """Same size, different origin: only one of them is where the pixels were taken."""
+    from jarvis.surfaces.native.marks import capture_frame
+
+    covered = capture_frame(axmod.Frame(110, 140, 200, 300), axmod.Frame(100, 100, 200, 300), (400, 600))
+    assert covered.source == "window server" and (covered.frame.x, covered.frame.y) == (100, 100)
+    assert covered.disagreement.startswith("Accessibility says the window is (110, 140, 200×300)")
+
+
+def test_the_accessibility_frame_is_used_when_the_window_server_gives_none_or_does_not_fit():
+    from jarvis.surfaces.native.marks import capture_frame
+
+    ax, size = axmod.Frame(100, 100, 200, 300), (400, 600)
+    assert capture_frame(ax, None, size).source == "accessibility"
+    squashed = axmod.Frame(100, 100, 200, 150)                  # 2 px/pt across, 4 down: not this picture
+    assert capture_frame(ax, squashed, size).source == "accessibility"
+    assert capture_frame(ax, axmod.Frame(0, 0, 0, 0), size).source == "accessibility", "an empty rectangle fits nothing"
+
+
+def test_when_neither_rectangle_fits_the_window_servers_is_still_what_was_photographed():
+    from jarvis.surfaces.native.marks import capture_frame
+
+    odd = capture_frame(axmod.Frame(0, 0, 100, 100), axmod.Frame(0, 0, 200, 100), (400, 600))
+    assert odd.source == "window server"
+    assert capture_frame(None, None, (400, 600)) is None
+    only_ax = capture_frame(axmod.Frame(0, 0, 100, 100), None, (400, 600))
+    assert only_ax.source == "accessibility", "the best there is, even though it is not square to the picture"
+
+
+def test_agreeing_descriptions_are_not_reported_as_disagreeing():
+    from jarvis.surfaces.native.marks import capture_frame
+
+    covered = capture_frame(axmod.Frame(100, 100, 200, 300), axmod.Frame(100.5, 99.5, 200, 301), (400, 600))
+    assert covered.disagreement == ""
+
+
 def _control(label, frame, role="button"):
     return axmod.Control(ref=None, ax_role="AXButton", subrole="", role=role, label=label,
                          frame=axmod.Frame(*frame))

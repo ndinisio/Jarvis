@@ -173,6 +173,38 @@ async def diagnose_screenshot(surface: NativeSurface, snap, shots: list[Path]) -
     return lines
 
 
+def ancestors(pid: int, run=subprocess.run) -> list[int]:
+    """The processes *pid* was started from, nearest first (a shell, then the terminal app, …)."""
+    chain: list[int] = []
+    while pid > 1 and len(chain) < 16:
+        try:
+            parent = int(run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5).stdout.strip())
+        except (ValueError, OSError, subprocess.SubprocessError):
+            break
+        if parent <= 1 or parent in chain:
+            break
+        chain.append(parent)
+        pid = parent
+    return chain
+
+
+def host_app(backend, parents: list[int] | None = None) -> str:
+    """The app this script is running inside — Terminal, iTerm, an editor: the nearest ancestor
+    process that is a regular application. "" when it can't be told (then the frontmost app is looked
+    at, as before). This is what the opening ``look`` reads when no ``--app`` is given: a fixed,
+    always-present window, not whichever app an earlier check left in front (TextEdit with its
+    windows closed, after ``--act``)."""
+    named = getattr(backend, "app_for_pid", None)
+    if named is None:
+        return ""
+    for pid in (parents if parents is not None else ancestors(os.getpid())):
+        found = named(pid)
+        if found:
+            return found[1]
+    return ""
+
+
 async def look(surface: NativeSurface, app: str) -> bool:
     print(f"Looking at {app or 'the frontmost app'}")
     try:
@@ -682,6 +714,69 @@ async def calculator_click(surface: NativeSurface) -> bool:
     return ok
 
 
+def fit_axis(pairs: list[tuple[float, float]]) -> tuple[float, float, float] | None:
+    """Least-squares ``point = a + slope * pixel`` through (pixel, point) pairs: ``(a, slope, worst
+    miss)``; None when the pixels don't vary (one column of text says nothing about the scale across)."""
+    if len(pairs) < 2:
+        return None
+    mean_u, mean_v = sum(u for u, _ in pairs) / len(pairs), sum(v for _, v in pairs) / len(pairs)
+    spread = sum((u - mean_u) ** 2 for u, _ in pairs)
+    if spread < 1.0:
+        return None
+    slope = sum((u - mean_u) * (v - mean_v) for u, v in pairs) / spread
+    a = mean_v - slope * mean_u
+    return a, slope, max(abs(a + slope * u - v) for u, v in pairs)
+
+
+def coordinate_report(capture, pairs: list[tuple[tuple[float, float], tuple[float, float]]],
+                      windows: list | None = None, screens: list | None = None) -> list[str]:
+    """What relates the screenshot's pixels to the controls' points, measured: the rectangles the two
+    window descriptions give, the scale each implies, and the scale and origin the text and the
+    controls it names actually fit. *pairs* are ((pixel x, pixel y), (point x, point y)) for the
+    centre of each piece of text and the centre of the control called the same."""
+    from jarvis.surfaces.native.marks import pixels_per_point
+
+    def rect(frame) -> str:
+        return "none" if frame is None else f"({frame.x:.0f}, {frame.y:.0f}, {frame.w:.0f}×{frame.h:.0f})"
+
+    width, height = capture.size
+    lines = [f"Accessibility's window {rect(capture.ax)}; the window server's {rect(capture.bounds)}; "
+             f"the picture {width}×{height} px, converted against the {capture.source}'s "
+             + "{:.2f}×{:.2f} px/pt".format(*pixels_per_point(capture.frame, capture.size))]
+    if capture.disagreement:
+        lines.append("the two disagree: " + capture.disagreement)
+    across = fit_axis([(p[0][0], p[1][0]) for p in pairs])
+    down = fit_axis([(p[0][1], p[1][1]) for p in pairs])
+    if across is None or down is None:
+        lines.append(f"{len(pairs)} text/control pair(s): too few, or all in one row or column, to fit a scale")
+    else:
+        (left, slope_x, miss_x), (top, slope_y, miss_y) = across, down
+        covers_w, covers_h = width * slope_x, height * slope_y
+        lines.append(f"fitted to {len(pairs)} pairs: {1 / slope_x:.2f} px/pt across, {1 / slope_y:.2f} down; "
+                     f"the controls put the picture at ({left:.0f}, {top:.0f}, {covers_w:.0f}×{covers_h:.0f}) "
+                     f"(worst miss {max(miss_x, miss_y):.1f} pt)")
+        if abs(slope_x / slope_y - 1.0) > 0.02:
+            lines.append("the scale across and down differ, so no one window rectangle explains the controls: "
+                         "the controls and the picture are not the same layout (or the text read is not what it names)")
+        else:
+            fitted = (left, top, covers_w, covers_h)
+            for name, frame in (("the window server's", capture.bounds), ("Accessibility's", capture.ax)):
+                if frame is not None and max(abs(a - b) for a, b in zip(fitted, (frame.x, frame.y, frame.w, frame.h))) <= 3:
+                    lines.append(f"the controls fit {name} rectangle")
+                    break
+            else:
+                lines.append("the controls fit neither window rectangle: the picture is of something "
+                             "other than the window those rectangles describe")
+    for window in (windows or [])[:6]:
+        x, y, w, h = window["bounds"]
+        lines.append(f"window {window['number']} “{window['name']}” layer {window['layer']} "
+                     f"{'on screen' if window['on_screen'] else 'off screen'} ({x:.0f}, {y:.0f}, {w:.0f}×{h:.0f})")
+    if screens:
+        lines.append("displays: " + "; ".join(
+            "({:.0f}, {:.0f}, {:.0f}×{:.0f}) at {:g}×".format(*screen["frame"], screen["scale"]) for screen in screens))
+    return lines
+
+
 async def calculator_marks(surface: NativeSurface) -> bool:
     print("mark_screen / click_mark — Calculator")
     seen: list[tuple[Path, list]] = []
@@ -703,26 +798,37 @@ async def calculator_marks(surface: NativeSurface) -> bool:
     # A screenshot is in pixels and a click is in points; the ratio between them
     # is what has to be right for a click on text to land on the text. Compare:
     # each piece of text that's also a control's name should sit inside that control.
+    # (Against the rectangle mark_screen itself converted with — surface.last_capture.)
     snap, _ = await surface.read("Calculator")
     path, boxes = seen[-1]
     size = image_size(path)
-    compared, off = 0, []
+    covered = surface.last_capture
+    window = covered.frame if covered is not None else snap.frame
+    compared, off, pairs = 0, [], []
     for box in boxes:
         said = box.text.strip().lower()
         control = next((c for c in snap.controls if c.frame is not None
                         and c.label.strip().lower() == said), None)
-        if box.confidence < MIN_CONFIDENCE or control is None or snap.frame is None:
+        if box.confidence < MIN_CONFIDENCE or control is None or window is None:
             continue
         compared += 1
-        x, y = to_points(box, size, snap.frame).center
+        x, y = to_points(box, size, window).center
         f = control.frame
+        pairs.append(((box.x + box.w / 2, box.y + box.h / 2), f.center))
         if not (f.x - 2 <= x <= f.x + f.w + 2 and f.y - 2 <= y <= f.y + f.h + 2):
             off.append(f'“{box.text}” read at ({x:.0f}, {y:.0f}), the control is at '
                        f'({f.x:.0f}, {f.y:.0f}, {f.w:.0f}×{f.h:.0f})')
-    ok &= step("text read off the screenshot lands on the controls it names",
-               compared > 0 and not off,
-               f"{compared - len(off)} of {compared} agree" + (f"; {'; '.join(off[:3])}" if off else "")
-               if compared else f"no text matched a control's name ({len(boxes)} pieces of text read)")
+    agreed = step("text read off the screenshot lands on the controls it names",
+                  compared > 0 and not off,
+                  f"{compared - len(off)} of {compared} agree" + (f"; {'; '.join(off[:3])}" if off else "")
+                  if compared else f"no text matched a control's name ({len(boxes)} pieces of text read)")
+    ok &= agreed
+    if not agreed and covered is not None:
+        backend = surface.backend
+        windows = await asyncio.to_thread(getattr(backend, "window_list", lambda pid: []), snap.pid)
+        screens = await asyncio.to_thread(getattr(backend, "screens", lambda: []))
+        for line in coordinate_report(covered, pairs, windows, screens):
+            print("      evidence: " + line)
 
     nine = next((m for m in marks if m.label.strip() == "9"), None)
     if not step("found the 9 mark", nine is not None, "marks: " + ", ".join(m.line() for m in marks[:20])):
@@ -763,6 +869,41 @@ async def close_untitled_textedit(surface: NativeSurface) -> None:
         step("closed the document the check made", False, exc.message)
 
 
+def option_facts(backend, option) -> dict[str, str]:
+    """Everything Accessibility says about one menu item that can be said in a word — each scalar
+    attribute — plus where it hangs and where it sits in its menu."""
+    element = option.element
+    names = (getattr(backend, "attribute_names", lambda e: [])(element)) or list(DEFAULT_ATTRIBUTES)
+    is_element = getattr(backend, "is_element", lambda value: False)
+    facts: dict[str, str] = {}
+    for name, value in backend.attributes(element, tuple(names)).items():
+        if isinstance(value, (list, tuple)) and name not in {"AXPosition", "AXSize"}:
+            continue
+        if is_element(value) or value in (None, ""):
+            continue
+        facts[name] = plain_text(value) if not isinstance(value, tuple) else ",".join(f"{v:g}" for v in value)
+    parent = backend.attribute(element, "AXParent")
+    if parent is not None:
+        siblings = list(backend.attribute(parent, "AXChildren") or [])
+        facts["parent"] = f"{backend.attribute(parent, 'AXRole')} with {len(siblings)} children"
+    facts["place in the menu"] = f"item {option.index}" + (f", under “{option.section}”" if option.section else "")
+    return facts
+
+
+def option_evidence(backend, candidates) -> list[str]:
+    """Why two menu items that read the same are two: each one's attributes, and the ones that differ."""
+    facts = [option_facts(backend, option) for option in candidates]
+    lines = [f"candidate {n}: " + " ".join(f"{k.removeprefix('AX')}={v!r}" for k, v in fact.items())
+             for n, fact in enumerate(facts, 1)]
+    keys = sorted({k for fact in facts for k in fact})
+    apart = [k for k in keys if len({fact.get(k) for fact in facts}) > 1]
+    where = {"AXPosition", "AXSize", "AXFrame", "place in the menu"}
+    real = [k for k in apart if k not in where]
+    lines.append("they differ in: " + (", ".join(apart) if apart else "nothing at all")
+                 + ("" if real else " — only where they sit; nothing about what they are or do tells them apart"))
+    return lines
+
+
 async def textedit_dropdown(surface: NativeSurface) -> bool:
     print("choose_option — the Where pop-up on TextEdit's Save sheet")
     was_running, made = is_running("TextEdit"), False
@@ -788,6 +929,8 @@ async def textedit_dropdown(surface: NativeSurface) -> bool:
             # is unchanged — once one is named, the pop-up has to read Desktop.
             step("an option the menu lists twice is refused, not guessed",
                  len(exc.candidates) >= 2, exc.message)
+            for line in await asyncio.to_thread(option_evidence, surface.backend, exc.candidates):
+                print("      evidence: " + line)
             summary = await surface.choose_option(popup.handle, "Desktop", occurrence=1)
         await pause(0.8)
         snap, _ = await surface.read("TextEdit")
@@ -1464,6 +1607,10 @@ async def main() -> int:
     if not surface.available():
         print("The native extras aren't installed here: pip install -e '.[native]' (macOS only).")
         return 1
+    if not args.app:
+        args.app = host_app(surface.backend)       # the same window every time, whatever ran before
+        if args.app:
+            print(f"Starting point: {args.app}, the app this was run from (--app NAME to look at another).")
     if not step("Accessibility granted", surface.backend.trusted()):
         surface.backend.trusted(prompt=True)
         print("  Allow it in System Settings → Privacy & Security → Accessibility, then run again.")
