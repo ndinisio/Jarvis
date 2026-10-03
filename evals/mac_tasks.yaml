@@ -125,3 +125,35 @@ tasks:
       osascript -e 'tell application "Mail" to return subject of every outgoing message' | grep -q "JARVIS-bench"
       || osascript -e 'tell application "Mail" to return subject of every message of drafts mailbox' | grep -q "JARVIS-bench"
     cleanup: osascript -e 'tell application "Mail" to delete (every outgoing message whose subject contains "JARVIS-bench")' || true
+
+  # The three below reach for controls the tasks above mostly don't: a pop-up
+  # menu, a drag with the mouse, and a switch in System Settings. The utterances
+  # name the way in on purpose; a model that gets there another way (Format ▸
+  # Make Plain Text, a file tool, `defaults`) still passes the check, but then
+  # hasn't exercised choose_option / drag_control / the settings switch.
+  - id: textedit-save-plain-text
+    utterance: >-
+      open TextEdit, type "JARVIS bench plain", and save it as a plain text
+      document called bench-plain in the JARVIS-bench folder on my desktop
+    check: test -f "$BENCH/bench-plain.txt" && grep -q "JARVIS bench plain" "$BENCH/bench-plain.txt"
+    cleanup: osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: finder-drag-into-folder
+    setup: mkdir -p "$BENCH/Drafts" && printf 'draft\n' > "$BENCH/notes.txt"
+    utterance: >-
+      in Finder, open the JARVIS-bench folder on my desktop and drag notes.txt
+      onto the Drafts folder
+    check: test -f "$BENCH/Drafts/notes.txt" && ! test -f "$BENCH/notes.txt"
+    cleanup: osascript -e 'tell application "Finder" to close (every window whose name is "JARVIS-bench")' || true
+
+  - id: settings-dock-autohide
+    setup: >-
+      (defaults read com.apple.dock autohide > "$BENCH/.autohide" 2>/dev/null || echo 0 > "$BENCH/.autohide");
+      defaults write com.apple.dock autohide -bool false && killall Dock
+    utterance: in System Settings, turn on automatically hide and show the Dock
+    approve: [Dock]
+    check: sleep 1; [ "$(defaults read com.apple.dock autohide 2>/dev/null)" = "1" ]
+    cleanup: >-
+      if [ "$(cat "$BENCH/.autohide")" = "1" ]; then defaults write com.apple.dock autohide -bool true;
+      else defaults write com.apple.dock autohide -bool false; fi; killall Dock;
+      osascript -e 'tell application "System Settings" to quit' || true

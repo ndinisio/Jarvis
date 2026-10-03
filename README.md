@@ -1430,9 +1430,13 @@ buttons always ask — is tested in CI against a fake accessibility tree, and th
 PyObjC calls underneath follow Apple's documented API; but this repository's CI
 runs on Linux, so no test here has pressed a real button. On your Mac,
 `.venv/bin/python scripts/check_native.py` reads the front window, its menus
-and a screenshot's text for real, and `--act` runs a TextEdit round trip
-(type, bold from the Format menu, close without saving). Without the `native`
-extra the app tools fall back to the v2 AppleScript paths.
+and a screenshot's text for real, `--act` runs a TextEdit round trip
+(type, bold from the Format menu, close without saving), and `--controls`
+goes through the rest — pressing Calculator's buttons, choosing from the Save
+sheet's pop-up, dragging a file onto a folder in Finder, and clicking what a
+screenshot shows (it cleans up after itself). None of these checks has yet been run
+on a real Mac. Without the `native` extra the app tools fall back to the v2
+AppleScript paths.
 
 **Other current limits**
 

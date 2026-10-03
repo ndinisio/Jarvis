@@ -54,6 +54,33 @@ def test_mac_suite_loads():
     assert all(task.check for task in tasks)
 
 
+def test_mac_tasks_are_well_formed_shell():
+    """These only ever run on a Mac, so a typo in a setup, check or cleanup line
+    would otherwise first show up as a task that "fails" for no reason. This
+    can't say a command does what it should — only that bash can read it."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash here")
+    tasks = load_mac_tasks()
+    assert len({task.id for task in tasks}) == len(tasks), "duplicate task ids"
+    for task in tasks:
+        assert task.utterance.strip(), task.id
+        for field in ("setup", "check", "cleanup"):
+            command = getattr(task, field)
+            done = subprocess.run([bash, "-n", "-c", command], capture_output=True, text=True)
+            assert done.returncode == 0, f"{task.id}.{field}: {done.stderr.strip()}"
+
+
+def test_the_mac_suite_covers_a_pop_up_a_drag_and_a_settings_switch():
+    ids = {task.id for task in load_mac_tasks()}
+    assert {"textedit-save-plain-text", "finder-drag-into-folder", "settings-dock-autohide"} <= ids
+
+
 # ---------------------------------------------------------------------------- checks
 def _state(**amazon):
     base = {"cart": [], "orders": [], "checkout_reached": False, "signin_attempts": [],
