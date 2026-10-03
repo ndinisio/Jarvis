@@ -1309,3 +1309,190 @@ async def test_a_failure_is_described_by_its_type_and_the_innermost_line_of_this
         text = cn.describe_failure(exc)
     assert text.startswith("KeyError: 'missing' — at test_check_native.py:") and text.endswith(" in deep")
     assert cn.describe_failure(cn.NativeError("plain words")) == "plain words"
+
+
+# ---------------------------------------------------------------------------
+# step 2: the save sheet on closing an edited document
+# ---------------------------------------------------------------------------
+class ClosingTextEdit:
+    """TextEdit with an edited, unsaved document, whose File ▸ Close does what
+    *behaviour* says: "sheet" (a sheet with *buttons*), "late" (the same, a moment
+    after), "silent" (closes without asking), "nothing" (stays, no sheet), "dialog"
+    (a separate dialog window, not a sheet)."""
+
+    def __init__(self, behaviour: str = "sheet", buttons=("Delete", "Cancel", "Save…"), *,
+                 discard_closes: bool = True):
+        self.behaviour, self.log, self.discard_closes = behaviour, [], discard_closes
+        self.area = El("AXTextArea", description="document", value="", frame=(60, 80, 480, 300))
+        self.window = El("AXWindow", "Untitled", actions=(), frame=(50, 50, 500, 400), children=[self.area])
+        self.dialog = None
+        bold = El("AXMenuItem", "Bold")
+        bold.on_perform = lambda _a: self.log.append("Bold")
+        font = El("AXMenuItem", "Font", children=[El("AXMenu", actions=(), children=[bold])])
+        close, new = El("AXMenuItem", "Close"), El("AXMenuItem", "New")
+        close.on_perform = lambda _a: self._close()
+        new.on_perform = lambda _a: self.log.append("New")
+        menubar = El("AXMenuBar", actions=(), children=[
+            El("AXMenuBarItem", "Apple"), El("AXMenuBarItem", "TextEdit"),
+            El("AXMenuBarItem", "File", children=[El("AXMenu", actions=(), children=[new, close])]),
+            El("AXMenuBarItem", "Format", children=[El("AXMenu", actions=(), children=[font])])])
+        self.app = El("AXApplication", "TextEdit", actions=(), AXWindows=[self.window],
+                      AXFocusedWindow=self.window, AXMenuBar=menubar)
+        self.buttons = buttons
+
+    def _sheet(self):
+        controls = []
+        for title in self.buttons:
+            button = El("AXButton", title, frame=(300, 380, 80, 24))
+            kind = title.lower().replace("’", "'")
+            button.on_perform = (lambda _a: self._discard()) if kind in {"delete", "don't save"} else \
+                (lambda _a, t=title: self._back_out(t))
+            controls.append(button)
+        return El("AXSheet", actions=(), frame=(60, 200, 480, 200), children=[
+            El("AXStaticText", value="Do you want to keep this new document?", actions=()), *controls])
+
+    def _close(self):
+        self.log.append("Close")
+        if self.behaviour == "sheet":
+            self.window.children.append(self._sheet())
+        elif self.behaviour == "late":
+            threading.Timer(0.15, lambda: self.window.children.append(self._sheet())).start()
+        elif self.behaviour == "silent":
+            self.app.attrs["AXWindows"] = []
+            self.app.attrs["AXFocusedWindow"] = None
+        elif self.behaviour == "dialog":
+            self.dialog = El("AXWindow", "Save", subrole="AXDialog", actions=(), frame=(100, 100, 300, 150),
+                             children=[El("AXButton", "OK", frame=(200, 200, 60, 24))])
+            self.app.attrs["AXWindows"] = [self.window, self.dialog]
+
+    def _discard(self):
+        self.log.append("discard")
+        if self.discard_closes:
+            self.app.attrs["AXWindows"], self.app.attrs["AXFocusedWindow"] = [], None
+        else:
+            self.window.children = [c for c in self.window.children if c.attrs["AXRole"] != "AXSheet"]
+
+    def _back_out(self, title):
+        self.log.append(title)
+        self.window.children = [c for c in self.window.children if c.attrs["AXRole"] != "AXSheet"]
+
+
+def _closing(behaviour="sheet", **kwargs):
+    textedit = ClosingTextEdit(behaviour, **kwargs)
+    textedit.area.attrs["AXValue"] = "Hello from JARVIS — café, £5, 😀"
+    surface = surface_for({"TextEdit": (303, textedit.app)}, "TextEdit")
+    return textedit, surface
+
+
+@pytest.fixture
+def quick_sheet(cn, monkeypatch):
+    monkeypatch.setattr(cn, "SHEET_WAIT_S", 0.3)
+
+
+@pytest.mark.parametrize("buttons", [("Delete", "Cancel", "Save…"), ("Don’t Save", "Cancel", "Save"),
+                                     ("Don't Save", "Cancel", "Save")])
+async def test_whichever_way_a_macos_release_words_the_sheet_it_is_found_and_discarded(cn, quick_sheet, capsys,
+                                                                                    buttons):
+    textedit, surface = _closing(buttons=buttons)
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is True
+    out = capsys.readouterr().out
+    assert "✓ the save sheet appeared, listed first — blockers: ['sheet “Do you want to keep this new document?”']" in out
+    assert "✓ discarding closed the document without saving — TextEdit has no window left" in out
+    assert textedit.log == ["Close", "discard"], "the document was discarded, and nothing else was pressed"
+
+
+async def test_a_sheet_that_slides_down_a_moment_later_is_waited_for(cn, monkeypatch, capsys):
+    monkeypatch.setattr(cn, "SHEET_WAIT_S", 2.0)
+    textedit, surface = _closing("late")
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is True
+
+
+async def test_no_sheet_at_all_is_a_failure_and_the_tree_is_printed_as_the_evidence(cn, quick_sheet, capsys):
+    textedit, surface = _closing("nothing")
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is False
+    out = capsys.readouterr().out
+    assert "✗ the save sheet appeared, listed first — no sheet is open; blockers: none" in out
+    assert "evidence: 1 AX window(s): AXWindow title='Untitled'" in out
+    assert "evidence:     AXTextArea desc='document' value='Hello from JARVIS — café, £5, 😀'" in out
+    assert "discard" not in textedit.log, "nothing is discarded when the sheet isn't understood"
+
+
+async def test_a_document_closed_without_asking_is_called_that(cn, quick_sheet, capsys):
+    textedit, surface = _closing("silent")
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is False
+    assert "has no window to read after File ▸ Close, so it closed the document without asking" \
+        in capsys.readouterr().out
+
+
+async def test_labels_that_offer_no_way_to_discard_are_a_failure_that_lists_what_was_there(cn, quick_sheet, capsys):
+    textedit, surface = _closing(buttons=("Throw away", "Cancel", "Keep"))
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is False
+    out = capsys.readouterr().out
+    assert "the sheet has no save / discard button" in out
+    assert "button “Throw away”, button “Cancel”, button “Keep”" in out
+    assert textedit.log == ["Close", "Cancel"], "it backs out of the sheet rather than guess which button discards"
+    assert "close it and choose Delete" in out
+
+
+async def test_a_dialog_window_is_not_mistaken_for_a_sheet(cn, quick_sheet, capsys):
+    textedit, surface = _closing("dialog")
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is False
+    out = capsys.readouterr().out
+    assert "no sheet is open (only a dialog or popover)" in out
+    assert "evidence: 2 AX window(s)" in out and "AXWindow/AXDialog" in out
+
+
+async def test_a_discard_that_leaves_the_document_open_is_a_failure(cn, quick_sheet, capsys):
+    textedit, surface = _closing(discard_closes=False)
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is False
+    out = capsys.readouterr().out
+    assert "✓ the save sheet appeared, listed first" in out
+    assert "✗ discarding closed the document without saving — still open:" in out
+
+
+async def test_controls_listed_behind_the_windows_own_are_not_listed_first(cn, quick_sheet, monkeypatch, capsys):
+    textedit, surface = _closing()
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    real = surface.read
+
+    async def reversed_read(app="", *, offset=0):
+        snap, listing = await real(app, offset=offset)
+        snap.controls.reverse()              # the window's controls ahead of the sheet's
+        return snap, listing
+
+    monkeypatch.setattr(surface, "read", reversed_read)
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is False
+    assert "the sheet's controls are not listed ahead of the window's" in capsys.readouterr().out
+
+
+async def test_the_whole_round_trip_passes_with_the_modern_sheet(cn, quick_sheet, capsys):
+    textedit, surface = _closing()
+    textedit.area.attrs["AXValue"] = ""
+    assert await cn.act(surface) is True
+    out = capsys.readouterr().out
+    for line in ("✓ found the document's text area", "✓ typed Unicode text", "✓ chose Format › Font › Bold",
+                 "✓ the save sheet appeared, listed first", "✓ discarding closed the document without saving"):
+        assert line in out
+    assert "✗" not in out
+
+
+async def test_labels_are_compared_without_case_ellipsis_or_curly_apostrophes(cn):
+    assert cn.plain("Save…") == "save" and cn.plain("Don’t Save") == "don't save"
+    assert cn.plain("Cancel ") == "cancel" and cn.plain("Save...") == "save"
+
+
+async def test_the_tree_dump_is_bounded_and_says_when_there_is_no_window(cn):
+    textedit, surface = _closing()
+    for index in range(200):
+        textedit.window.children.append(El("AXButton", f"b{index}"))
+    lines = cn.ax_structure(surface.backend, 303, limit=20)
+    assert lines[0].startswith("1 AX window(s)") and len(lines) <= 23
+    textedit.app.attrs["AXWindows"], textedit.app.attrs["AXFocusedWindow"] = [], None
+    assert cn.ax_structure(surface.backend, 303) == ["0 AX window(s): ", "no front window"]

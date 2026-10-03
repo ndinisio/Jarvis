@@ -242,17 +242,143 @@ async def act(surface: NativeSurface) -> bool:
         summary = await surface.choose_menu(["Format", "Font", "Bold"], "TextEdit")
         ok &= step("chose Format › Font › Bold", True, summary)
         await surface.choose_menu(["File", "Close"], "TextEdit")
-        await pause(0.8)
-        snap, listing = await surface.read("TextEdit")
-        dont_save = next((c for c in snap.controls if "don" in c.label.lower() and "save" in c.label.lower()),
-                         None)
-        ok &= step("the save sheet appeared, listed first", dont_save is not None
-                   and snap.controls.index(dont_save) < 4)
-        if dont_save is not None:
-            await surface.press(dont_save.handle)
+        ok &= await save_sheet(surface, typed="Hello from JARVIS")
         return ok
     except NativeError as exc:
         return step("TextEdit round trip", False, exc.message)
+
+
+# --- the sheet TextEdit shows when an edited, unsaved document is closed ---------------------------
+#
+# What it says depends on the macOS release (older: "Don't Save", "Cancel", "Save"; newer: "Delete",
+# "Cancel", "Save…"), so the check does not name a label it expects to find. It asks what the
+# surface should always do: see the sheet as a sheet, list its controls ahead of the window's, and
+# offer the three ways out — save it, back out, or throw it away. When any of that fails it prints
+# what the Accessibility tree really held, so the cause can be read off rather than guessed.
+
+DISCARD_LABELS = ("don't save", "dont save", "delete", "discard")
+
+
+def plain(label: str) -> str:
+    return label.lower().replace("’", "'").replace("…", "").replace("...", "").strip()
+
+
+def ax_line(backend, element, depth: int) -> str:
+    attrs = backend.attributes(element, ("AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue",
+                                          "AXIdentifier", "AXModal"))
+    parts = [str(attrs.get("AXRole") or "?")]
+    if attrs.get("AXSubrole"):
+        parts[0] += "/" + str(attrs["AXSubrole"])
+    for key, mark in (("AXTitle", "title"), ("AXDescription", "desc"), ("AXValue", "value"), ("AXIdentifier", "id")):
+        value = attrs.get(key)
+        if value not in (None, "") and not isinstance(value, bool):
+            parts.append(f'{mark}={str(value)[:40]!r}')
+    if attrs.get("AXModal"):
+        parts.append("modal")
+    return "  " * depth + " ".join(parts)
+
+
+def ax_structure(backend, pid: int, *, depth: int = 4, limit: int = 60) -> list[str]:
+    """The app's windows and the front window's tree as Accessibility reports them —
+    what a failing check is judged against, not what the surface made of it."""
+    application = backend.application(pid)
+    windows = backend.windows(application)
+    lines = [f"{len(windows)} AX window(s): " + " | ".join(ax_line(backend, w, 0).strip() for w in windows)]
+    front = backend.front_window(application)
+    if front is None:
+        return lines + ["no front window"]
+    lines.append("front window tree:")
+    stack = [(front, 0)]
+    while stack and len(lines) < limit + 2:
+        element, level = stack.pop()
+        lines.append(ax_line(backend, element, level + 1))
+        if level < depth:
+            stack.extend((child, level + 1) for child in reversed(list(backend.attribute(element, "AXChildren") or [])))
+    return lines
+
+
+async def show_structure(surface: NativeSurface, app: str) -> None:
+    try:
+        found = surface.backend.find_app(app)
+        if found is None:
+            print(f"      evidence: {app} is not running")
+            return
+        for line in await asyncio.to_thread(ax_structure, surface.backend, found[0]):
+            print("      evidence: " + line)
+    except Exception as exc:
+        print("      evidence: couldn't dump the tree — " + describe_failure(exc))
+
+
+#: How long to wait for a sheet to slide down after the menu item that raises it.
+SHEET_WAIT_S = 3.0
+
+
+async def wait_for_sheet(surface: NativeSurface, app: str, timeout_s: float | None = None):
+    """Read the window until a sheet shows or *timeout_s* passes; the last reading
+    (raises NativeError if the app has no window at all)."""
+    deadline = time.monotonic() + (SHEET_WAIT_S if timeout_s is None else timeout_s)
+    while True:
+        snap, _ = await surface.read(app)
+        if any(b.startswith("sheet") for b in snap.blockers) or time.monotonic() >= deadline:
+            return snap
+        await pause(0.3)
+
+
+async def save_sheet(surface: NativeSurface, *, typed: str) -> bool:
+    """After File ▸ Close on a document with *typed* in it: the save sheet is up and
+    listed ahead of the window, offers save / cancel / discard; discarding it closes the document."""
+    label = "the save sheet appeared, listed first"
+    try:
+        snap = await wait_for_sheet(surface, "TextEdit")
+    except NativeError as exc:
+        step(label, False, f"TextEdit has no window to read after File ▸ Close, so it closed the document "
+                           f"without asking: {exc.message}")
+        return False
+    blocked = [c for c in snap.controls if c.in_blocker]
+    flags = [c.in_blocker for c in snap.controls]
+    listed_first = all(a >= b for a, b in zip(flags, flags[1:]))
+    sheets = [b for b in snap.blockers if b.startswith("sheet")]
+    cancel = next((c for c in blocked if plain(c.label) == "cancel"), None)
+    save = next((c for c in blocked if plain(c.label).startswith("save")), None)
+    discard = next((c for c in blocked if plain(c.label) in DISCARD_LABELS), None)
+    missing = [name for name, found in (("cancel", cancel), ("save", save), ("discard", discard)) if found is None]
+    seen = f"blockers: {snap.blockers or 'none'}; the sheet's controls, in listed order: " + \
+        (", ".join(f'{c.role} “{c.label}”' for c in blocked) or "none")
+    problems = []
+    if not sheets:
+        problems.append("no sheet is open" + ("" if not snap.blockers else " (only a dialog or popover)"))
+    elif not blocked:
+        problems.append("the sheet lists no controls")
+    if blocked and not listed_first:
+        problems.append("the sheet's controls are not listed ahead of the window's")
+    if sheets and blocked and missing:
+        problems.append("the sheet has no " + " / ".join(missing) + " button (discard is one of: "
+                        + ", ".join(f"“{d}”" for d in DISCARD_LABELS) + ")")
+    ok = step(label, not problems, "; ".join([*problems, seen]) if problems else seen)
+    if problems:
+        await show_structure(surface, "TextEdit")
+        if cancel is not None:                       # leave TextEdit as found: back out of the sheet
+            await surface.press(cancel.handle)
+            print("      the document is still open in TextEdit with the test text; close it and choose Delete")
+        else:
+            print("      the document may still be open in TextEdit with the test text; close it without saving")
+        return False
+    await surface.press(discard.handle)
+    await pause(0.8)
+    try:
+        after, _ = await surface.read("TextEdit")
+        still = [c for c in after.controls if typed in c.value or typed in c.label]
+        leftover = [b for b in after.blockers if b.startswith("sheet")]
+        gone = not still and not leftover
+        detail = ("no window holds the text and no sheet is left" if gone else
+                  f"still open: {', '.join(c.label or c.value[:30] for c in still) or 'a sheet'}"
+                  + (f"; sheet {leftover}" if leftover else ""))
+    except NativeError as exc:
+        gone, detail = True, "TextEdit has no window left (" + exc.message + ")"
+    ok &= step("discarding closed the document without saving", gone, detail)
+    if not gone:
+        await show_structure(surface, "TextEdit")
+    return ok
 
 
 # --- --controls: the rest of what JARVIS does to a window ---------------------------------

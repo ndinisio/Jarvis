@@ -241,7 +241,7 @@ CRITERIA = (
                "the file is inside the folder")),
     Criterion("Save sheet", "the real TextEdit save flow works",
               ("the Save sheet lists a pop-up button", "the pop-up now says Desktop",
-               "the save sheet appeared, listed first")),
+               "the save sheet appeared, listed first", "discarding closed the document without saving")),
     Criterion("Observer", "real notifications received, none missed, none raising",
               ("AXApplicationActivated arrives", "AXMenuOpened arrives", "no notification was missed",
                "no callback raised", "the observer costs next to no CPU", "no thread is left behind")),
