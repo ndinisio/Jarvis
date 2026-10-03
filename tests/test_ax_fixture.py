@@ -171,12 +171,94 @@ def test_a_press_is_logged_with_the_build_of_the_control_that_was_pressed(fx):
     sender.title.return_value, sender.identifier.return_value, sender.tag.return_value = "Save", "save", 5
     view.target.clicked_(sender)
     view.target.toggled_(sender)
-    assert log == ["click:Save:save:born=5", "toggle:Save:save:born=5"]
+    assert [line for line in log if line.startswith(("click:", "toggle:"))] == [
+        "click:Save:save:born=5", "toggle:Save:save:born=5"]
     polled = []
     view.start(lambda: polled.append(1))
     view.target.tick_(None)
     assert polled == [1]
     foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once()
+
+
+def _handler(line: str) -> dict[str, str]:
+    kind, *fields = line.split(":")
+    return dict(field.split("=", 1) for field in fields if "=" in field)
+
+
+def test_each_press_is_preceded_by_whether_the_app_was_already_active(fx):
+    """So a check of background presses can tell activation that came *before* the fixture's own
+    code from activation that came after it. The fixture's action only ever writes lines."""
+    appkit, foundation = stand_in_modules()
+    log = []
+    view = fx.CocoaView(appkit, foundation, log.append)
+    application = appkit.NSApplication.sharedApplication.return_value
+    application.isActive.return_value, application.currentEvent.return_value = False, None
+    view.main.isKeyWindow.return_value, view.main.isMainWindow.return_value = True, False
+    sender = MagicMock()
+    sender.title.return_value, sender.identifier.return_value, sender.tag.return_value = "Save", "save", 5
+    view.target.clicked_(sender)
+    assert log[-2].startswith("handler:click:") and log[-1] == "click:Save:save:born=5", "the state first"
+    fields = _handler(log[-2])
+    assert (fields["active"], fields["key"], fields["main"], fields["event"]) == ("0", "1", "0", "none")
+    assert float(fields["t"]) > 0
+    application.isActive.return_value = True
+    application.currentEvent.return_value = MagicMock(**{"type.return_value": 1})
+    view.target.toggled_(sender)
+    assert _handler(log[-2])["active"] == "1" and _handler(log[-2])["event"] == "1"
+    assert log[-2].startswith("handler:toggle:")
+
+
+def test_a_fixture_that_cannot_read_its_state_says_so_and_still_logs_the_press(fx):
+    appkit, foundation = stand_in_modules()
+    log = []
+    view = fx.CocoaView(appkit, foundation, log.append)
+    appkit.NSApplication.sharedApplication.side_effect = RuntimeError("no application")
+    sender = MagicMock()
+    sender.title.return_value, sender.identifier.return_value, sender.tag.return_value = "Save", "save", 1
+    view.target.clicked_(sender)
+    assert log[-2].startswith("handler:click:unavailable=RuntimeError:t=") and log[-1] == "click:Save:save:born=1"
+
+
+def test_the_app_logs_when_it_becomes_active_and_when_it_stops_being(fx):
+    appkit, foundation = stand_in_modules()
+    log = []
+    view = fx.CocoaView(appkit, foundation, log.append)
+    centre = foundation.NSNotificationCenter.defaultCenter.return_value
+    registered = {call.args[1]: call.args[2] for call in centre.addObserver_selector_name_object_.call_args_list}
+    assert registered == {"activated:": appkit.NSApplicationDidBecomeActiveNotification,
+                          "resigned:": appkit.NSApplicationDidResignActiveNotification}
+    view.target.activated_(None)
+    view.target.resigned_(None)
+    assert [line.split(":t=")[0] for line in log[-2:]] == ["activation:became", "activation:resigned"]
+    assert float(log[-1].split(":t=")[1]) >= float(log[-2].split(":t=")[1]), "one monotonic clock"
+
+
+def test_a_notification_centre_that_refuses_is_noted_and_does_not_stop_the_window(fx):
+    appkit, foundation = stand_in_modules()
+    foundation.NSNotificationCenter.defaultCenter.side_effect = RuntimeError("no centre")
+    log = []
+    view = fx.CocoaView(appkit, foundation, log.append)
+    assert "note:no activation log: RuntimeError" in log and view.state()["saves"] == 1
+
+
+def test_the_inert_button_has_nothing_to_run_when_it_is_pressed(fx):
+    """A button with no target and no action: pressing it by Accessibility runs none of the fixture's code."""
+    appkit, foundation = stand_in_modules()
+    buttons = []
+
+    def new_button():
+        button = MagicMock()
+        buttons.append(button)
+        return button
+
+    appkit.NSButton.alloc.return_value.initWithFrame_.side_effect = lambda frame: new_button()
+    fx.CocoaView(appkit, foundation, [].append)
+    inert = next(b for b in buttons if b.setIdentifier_.call_args == (("inert",),))
+    inert.setTitle_.assert_called_once_with("Inert")
+    inert.setTarget_.assert_not_called()
+    inert.setAction_.assert_not_called()
+    assert all(b.setAction_.called for b in buttons if b is not inert and b.setIdentifier_.call_args
+               and b.setIdentifier_.call_args[0][0] in {"cancel", "save"})
 
 
 def test_running_it_announces_itself_and_starts_the_app(fx, tmp_path, monkeypatch):

@@ -1307,7 +1307,9 @@ def press_verdict(trace: PressTrace, summary: str, error: str, pressed: int, beh
 async def background_press(surface: NativeSurface, fixture: FixtureProcess) -> bool:
     """A press by Accessibility needs no focus: with Finder in front, pressing the fixture's button does
     it without taking the front. Activation is a failure, and so is any other way of getting the press
-    done: the verdict names the mechanism (see :func:`press_verdict`)."""
+    done: the verdict names the mechanism (see :func:`press_verdict`). When the press worked and the app
+    came forward anyway, the controlled trials of :func:`localise_activation` say whose doing that is;
+    they add evidence, they never change the verdict."""
     label = "a press works with another app in front"
     backend = surface.backend
     finder = backend.find_app("Finder")
@@ -1317,20 +1319,265 @@ async def background_press(surface: NativeSurface, fixture: FixtureProcess) -> b
     handle, seen = await fixture_handle(surface)
     if handle is None:
         return step(label, False, "the window showed: " + seen)
-    await asyncio.to_thread(backend.activate, finder[0])
-    await asyncio.to_thread(wait_front, backend, finder[0])
-    before = len(fixture.events())
-    summary, error = "", ""
+    trace, summary, error, came_forward, lines, started = await front_and_press(
+        surface, finder[0], lambda: try_press(surface, handle), fixture)
+    pressed = sum(1 for line in lines if line.startswith(("click:", "toggle:")))
+    ok, detail = press_verdict(trace, summary, error, pressed, not came_forward, "Finder")
+    result = step(label, ok, detail)
+    if not ok and trace.axpress is True and not trace.clicks and pressed and came_forward:
+        primary = Trial("the Save button, pressed by JARVIS", accepted=True, recorded=True, came_forward=True,
+                        **activation_facts(lines, started))
+        target = backend.find_app(FIXTURE)
+        for line in (await localise_activation(surface, fixture, finder[0], target[0] if target else 0, primary)):
+            print("      evidence: " + line)
+    return result
+
+
+# --- who activates the app on a press: the trials behind the --stale evidence ---------------------------
+#: The same press made by a client with nothing of JARVIS in it: a bare AXUIElementPerformAction in a
+#: process of its own, on the fixture's button whose identifier is argv[2].
+RAW_PRESS = """
+import sys
+import ApplicationServices as AS
+pid, identifier = int(sys.argv[1]), sys.argv[2]
+
+
+def get(element, name):
+    error, value = AS.AXUIElementCopyAttributeValue(element, name, None)
+    return value if error == 0 else None
+
+
+stack = list(get(AS.AXUIElementCreateApplication(pid), "AXWindows") or [])
+while stack:
+    element = stack.pop()
+    if get(element, "AXIdentifier") == identifier:
+        error = AS.AXUIElementPerformAction(element, "AXPress")
+        print("AXUIElementPerformAction ->", error)
+        sys.exit(0 if error == 0 else 3)
+    stack.extend(get(element, "AXChildren") or [])
+print("no element with identifier", identifier)
+sys.exit(4)
+"""
+
+
+class Trial:
+    """One controlled press with Finder in front, and what it did."""
+
+    def __init__(self, name: str, *, accepted: bool | None = None, recorded: bool | None = None,
+                 came_forward: bool | None = None, handler: dict[str, str] | None = None,
+                 delay_s: float | None = None, note: str = ""):
+        self.name = name
+        self.accepted = accepted           # the app accepted the press (AXPress returned success)
+        self.recorded = recorded           # the app's own log shows its action ran (None: it has none)
+        self.came_forward = came_forward   # something other than Finder was in front afterwards
+        self.handler = handler             # the fixture's state when its action began
+        self.delay_s = delay_s             # press start -> the fixture logging that it became active
+        self.note = note                   # why the trial could not be run or is not to be trusted
+        self.watching = True               # the fixture could register for its own activation notices
+
+    @property
+    def self_reported(self) -> bool | None:
+        """Whether the app itself said it became active (its own didBecomeActive, which does not come
+        from Accessibility): True/False for the fixture's trials, None where there is no such witness."""
+        if self.recorded is None or not self.watching:
+            return None
+        return self.delay_s is not None
+
+    @property
+    def usable(self) -> bool:
+        return self.accepted is True and not self.note
+
+    def describe(self) -> str:
+        if self.note:
+            return f"{self.name}: not measured — {self.note}"
+        parts = ["accepted" if self.accepted else "not accepted"]
+        if self.recorded is not None:
+            parts.append("action ran" if self.recorded else "action did not run")
+        if self.handler:
+            parts.append("app already active when its action began" if self.handler.get("active") == "1"
+                         else "app not yet active when its action began")
+        if self.delay_s is not None:
+            parts.append(f"became active {self.delay_s * 1000:.0f} ms after the press began")
+        elif self.self_reported is False and self.came_forward:
+            parts.append("the app itself logged no activation")
+        parts.append("the app came forward" if self.came_forward else "the app stayed behind")
+        return f"{self.name}: " + ", ".join(parts)
+
+
+def log_fields(line: str) -> dict[str, str]:
+    """``handler:click:active=0:key=1:t=12.5`` -> {"active": "0", "key": "1", "t": "12.5"}."""
+    return {key: value for key, _, value in (field.partition("=") for field in line.split(":")[1:]) if value}
+
+
+def activation_facts(lines: list[str], started: float) -> dict:
+    """What the fixture's own log says about a press that began at monotonic time *started*: the state
+    its action found, and how soon after the press began it logged becoming active."""
+    handlers = [log_fields(line) for line in lines if line.startswith("handler:")]
+    became = [float(log_fields(line)["t"]) - started for line in lines
+              if line.startswith("activation:became") and "t" in log_fields(line)]
+    return {"handler": handlers[-1] if handlers and "active" in handlers[-1] else None,
+            "delay_s": min((d for d in became if d >= 0), default=None)}
+
+
+async def try_press(surface: NativeSurface, handle: str) -> tuple[str, str]:
+    try:
+        return await surface.press(handle), ""
+    except NativeError as exc:
+        return "", exc.message
+
+
+async def front_and_press(surface: NativeSurface, finder_pid: int, press, fixture=None):
+    """Put Finder in front, make the press, and see who is in front half a second later. Returns the
+    trace of what the surface did, what it returned, any error, whether something other than Finder came
+    forward, the fixture's new log lines, and when the press began (``time.monotonic()``)."""
+    backend = surface.backend
+    await asyncio.to_thread(backend.activate, finder_pid)
+    await asyncio.to_thread(wait_front, backend, finder_pid)
+    before = len(await asyncio.to_thread(fixture.lines)) if fixture is not None else 0
+    started = time.monotonic()
     with PressTrace(surface) as trace:
-        try:
-            summary = await surface.press(handle)
-        except NativeError as exc:
-            error = exc.message
+        summary, error = await press()
     await pause(0.5)
     with RUN.verifying():
-        pressed = len(fixture.events()[before:])
-    ok, detail = press_verdict(trace, summary, error, pressed, front_pid(backend) == finder[0], "Finder")
-    return step(label, ok, detail)
+        came_forward = front_pid(backend) != finder_pid
+        lines = (await asyncio.to_thread(fixture.lines))[before:] if fixture is not None else []
+    return trace, summary, error, came_forward, lines, started
+
+
+def trial_from(name: str, trace: PressTrace, summary: str, error: str, came_forward: bool, lines: list[str],
+               started: float, *, logs: bool) -> Trial:
+    """A trial's result, unless the surface did something other than a plain AXPress - then it is not a
+    measurement of AXPress and says so."""
+    note = ""
+    if error:
+        note = f"the press raised: {error}"
+    elif trace.clicks:
+        note = "AXPress did not do it; the surface fell back to a click"
+    elif trace.axpress is not True:
+        note = "AXPress was not accepted"
+    pressed = any(line.startswith(("click:", "toggle:")) for line in lines)
+    return Trial(name, accepted=trace.axpress is True and not trace.clicks and not error,
+                 recorded=pressed if logs else None, came_forward=came_forward, note=note,
+                 **(activation_facts(lines, started) if logs else {}))
+
+
+async def jarvis_trial(surface: NativeSurface, fixture, finder_pid: int, label: str, name: str, *, logs: bool) -> Trial:
+    snap, _ = await surface.read(FIXTURE)
+    control = next((c for c in snap.controls if c.label == label), None)
+    if control is None:
+        return Trial(name, note=f"the window has no “{label}” button: " + names(snap.controls))
+    return trial_from(name, *await front_and_press(surface, finder_pid, lambda: try_press(surface, control.handle),
+                                                   fixture if logs else None), logs=logs)
+
+
+def raw_press_process(pid: int, identifier: str) -> tuple[str, str]:
+    """RAW_PRESS in a process of its own: (what it printed, an error or "")."""
+    done = subprocess.run([sys.executable, "-c", RAW_PRESS, str(pid), identifier], capture_output=True, text=True,
+                          timeout=20)
+    said = (done.stdout + done.stderr).strip()
+    return said, "" if done.returncode == 0 else said or f"exit {done.returncode}"
+
+
+async def raw_trial(surface: NativeSurface, fixture, finder_pid: int, target_pid: int) -> Trial:
+    name = "the Save button, pressed by a bare AXUIElementPerformAction in another process"
+
+    async def press():
+        return await asyncio.to_thread(raw_press_process, target_pid, "save")
+
+    trace, summary, error, came_forward, lines, started = await front_and_press(surface, finder_pid, press, fixture)
+    pressed = any(line.startswith(("click:", "toggle:")) for line in lines)
+    return Trial(name, accepted=not error, recorded=pressed, came_forward=came_forward,
+                 note=f"the other process could not press it: {error}" if error else "",
+                 **activation_facts(lines, started))
+
+
+async def calculator_trial(surface: NativeSurface, finder_pid: int) -> Trial:
+    """A standard app's control, pressed the same way: Calculator's clear button, which changes nothing
+    that matters. Launched here if it was not running, and quit again."""
+    name = "Calculator's clear button, pressed by JARVIS"
+    was_running = is_running("Calculator")
+    try:
+        launch("Calculator")
+        await pause(1.5)
+        snap, _ = await surface.read("Calculator")
+        control = pick(snap.controls, *CALC_CLEAR)
+        if control is None:
+            return Trial(name, note="no clear button: " + names(snap.controls, 12))
+        return trial_from(name, *await front_and_press(surface, finder_pid, lambda: try_press(surface, control.handle)),
+                          logs=False)
+    except Exception as exc:
+        return Trial(name, note=describe_failure(exc))
+    finally:
+        if not was_running:
+            quit_app("Calculator")
+
+
+def diagnose_activation(trials: dict[str, Trial]) -> list[str]:
+    """What the controlled trials say about who brings the app forward. *trials* holds up to four, by key:
+    ``save`` (the press that did it), ``raw`` (the same press by a client with nothing of JARVIS in it),
+    ``inert`` (a button with no action, pressed by JARVIS), ``calculator`` (a standard app's button).
+    The reading is the one most consistent with them, not a proof."""
+    lines = [trial.describe() for key in ("save", "raw", "inert", "calculator") if (trial := trials.get(key))]
+
+    def forward(key: str) -> bool | None:
+        trial = trials.get(key)
+        return trial.came_forward if trial is not None and trial.usable else None
+
+    save = trials.get("save")
+    if save is not None and save.handler:
+        if save.handler.get("active") == "1":
+            lines.append("when the button's action began the app was already active: the activation came before any "
+                         "fixture code ran, from AppKit or the accessibility server")
+        else:
+            lines.append("when the button's action began the app was not yet active: it became active afterwards "
+                         "(the action itself only writes a log line)")
+    raw, inert, calculator = forward("raw"), forward("inert"), forward("calculator")
+    if save is not None and save.came_forward and save.self_reported is False:
+        lines.append("most consistent with the measurement (cause 5): Accessibility names the fixture as the focused "
+                     "application, but the app itself never logged becoming active - nothing was brought forward, and "
+                     "AXFocusedApplication is what moved (a press can change that without activating the app)")
+        return lines
+    if raw is None:
+        lines.append("undecided: the press from a client with nothing of JARVIS in it could not be made, so JARVIS's "
+                     "own part is not separated from macOS's")
+    elif raw is False:
+        lines.append("most consistent with JARVIS's invocation (cause 4): the same press from a bare client leaves "
+                     "the app behind, so something JARVIS does around the press, not the action itself, brings it forward")
+    elif inert is False:
+        lines.append("most consistent with the fixture's handling of the press (cause 1): a button with no action is "
+                     "pressed without the app coming forward, so it is running the action that does it")
+    elif inert is None:
+        lines.append("narrowed to the app or macOS, not JARVIS (a bare client does it too); the no-action button was "
+                     "not measured, so the fixture's own handler is not ruled in or out")
+    elif calculator is False:
+        lines.append("most consistent with this fixture and its host process (causes 1/5), not AXPress in general: "
+                     "a bare client brings it forward, a button with no action does too, and a standard app's button "
+                     "does not")
+    elif calculator is True:
+        lines.append("most consistent with macOS/AppKit (cause 3): a bare client, a button with no action and a "
+                     "standard app's button all bring their app forward on AXPress")
+    else:
+        lines.append("narrowed to the app or macOS, not JARVIS or the fixture's handler; Calculator was not "
+                     "measured, so a fixture-only cause is not ruled out")
+    return lines
+
+
+async def localise_activation(surface: NativeSurface, fixture, finder_pid: int, target_pid: int,
+                              primary: Trial) -> list[str]:
+    """Run the controlled trials that follow a press which activated the app, and read them."""
+    trials = {"save": primary}
+    watching = not any(line.startswith("note:no activation log") for line in await asyncio.to_thread(fixture.lines))
+    primary.watching = watching
+    for key, trial in (("raw", lambda: raw_trial(surface, fixture, finder_pid, target_pid)),
+                       ("inert", lambda: jarvis_trial(surface, fixture, finder_pid, "Inert",
+                                                      "the Inert button (no action), pressed by JARVIS", logs=False)),
+                       ("calculator", lambda: calculator_trial(surface, finder_pid))):
+        try:
+            trials[key] = await trial()
+            trials[key].watching = watching
+        except Exception as exc:
+            trials[key] = Trial(key, note=describe_failure(exc))
+    return diagnose_activation(trials)
 
 
 async def stale_checks(surface: NativeSurface, fixture: FixtureProcess) -> bool:

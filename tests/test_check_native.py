@@ -21,6 +21,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1506,17 +1507,42 @@ class FakeFixtureView:
 
     def __init__(self, backend: FakeBackend, log: list[str], *, keep_references: bool = False,
                  process_name: str = "JARVIS Fixture", steals_focus: bool = False, axpress: str = "works",
-                 enabled: bool = True):
+                 enabled: bool = True, inert_activates: bool = False, activation_first: bool = False,
+                 logs_activation: bool = True):
         """*axpress*: ``works``; ``absent`` (the button offers no AXPress); ``silent`` (the app accepts
-        AXPress and records nothing). Refusing AXPress is the backend's doing (``StaleMac``)."""
+        AXPress and records nothing). Refusing AXPress is the backend's doing (``StaleMac``).
+        *steals_focus*: the app activates when a control's action runs (*activation_first*: just before
+        its handler, so the handler finds it active); *inert_activates*: pressing the button that has
+        no action activates it too - the app doing it whatever it is asked to run."""
         self.backend, self.log, self.keep, self.steals_focus = backend, log, keep_references, steals_focus
         self.axpress, self.enabled = axpress, enabled
+        self.inert_activates, self.activation_first = inert_activates, activation_first
+        self.logs_activation = logs_activation       # False: Accessibility says "front", the app says nothing
+        self.process_name = process_name
+        #: Everything the fixture's log would hold, in order (``log`` keeps only the presses).
+        self.raw: list[str] = []
         self.window = El("AXWindow", "JARVIS Fixture", actions=(), frame=(0, 0, 420, 300))
         self.other = El("AXWindow", "JARVIS Fixture (other)", actions=(), frame=(500, 0, 420, 300))
         self.app = El("AXApplication", "JARVIS Fixture", actions=(), AXWindows=[self.window],
                       AXFocusedWindow=self.window, AXMenuBar=El("AXMenuBar", actions=()))
         backend.apps[process_name] = (303, self.app)
         self.saves: list[El] = []
+        inert = El("AXButton", "Inert", frame=(320, 240, 90, 28), AXIdentifier="inert")
+        inert.on_perform = lambda _a: self._activate() if self.inert_activates else None
+        self.window.children.append(inert)
+
+    def _activate(self):
+        self.backend.activate(303)
+        self.log_activation()
+
+    def log_activation(self):
+        """The app's own didBecomeActive, which fires whoever activated it."""
+        if self.logs_activation:
+            self.raw.append(f"activation:became:t={time.monotonic():.4f}")
+
+    def _press_line(self, line):
+        self.log.append(line)
+        self.raw.append(line)
 
     def _control(self, title, identifier, kind, born, x):
         control = El("AXButton" if kind == "button" else "AXCheckBox", title, frame=(x, 240, 90, 28),
@@ -1526,9 +1552,13 @@ class FakeFixtureView:
         def performed(action):
             if self.axpress == "silent" and action == "AXPress":
                 return
-            self.log.append(f"{verb}:{control.attrs['AXTitle']}:{identifier}:born={born}")
-            if self.steals_focus:
-                self.backend.activate(303)
+            if self.steals_focus and self.activation_first:
+                self._activate()
+            active = int(self.backend.front == self.process_name)
+            self.raw.append(f"handler:{verb}:active={active}:key=1:main=1:event=none:t={time.monotonic():.4f}")
+            self._press_line(f"{verb}:{control.attrs['AXTitle']}:{identifier}:born={born}")
+            if self.steals_focus and not self.activation_first:
+                self._activate()
 
         control.on_perform = performed
         return control
@@ -1576,7 +1606,10 @@ class FakeFixtureProcess:
         return self.fixture.apply(name, argument)
 
     def events(self):
-        return list(self.log)
+        return [line for line in self.log if line.startswith(("click:", "toggle:"))]
+
+    def lines(self):
+        return list(self.fixture.view.raw)
 
 
 class StaleMac(FakeBackend):
@@ -1584,11 +1617,18 @@ class StaleMac(FakeBackend):
 
     refuse_axpress = False
     activation_works = True
+    #: Pressing through *this* backend (JARVIS's) activates the fixture, whatever the app does - the
+    #: cause the bare-client trial is there to rule in or out.
+    jarvis_activates = False
 
     def perform(self, element, action):
         if action == "AXPress" and self.refuse_axpress:
             return False
-        return super().perform(element, action)
+        done = super().perform(element, action)
+        if done and self.jarvis_activates and element.attrs.get("AXIdentifier") in {"save", "inert"}:
+            self.activate(303)
+            self.view.log_activation()
+        return done
 
     def activate(self, pid):
         if pid == 303 and not self.activation_works:      # the fixture refuses to come forward
@@ -1612,17 +1652,30 @@ class PressingInput(RecordingInput):
 
 
 def _stale_setup(fx, *, keep_references=False, steals_focus=False, axpress="works", refuse_axpress=False,
-                 activation_works=True, enabled=True):
-    backend = StaleMac({"Finder": (202, El("AXApplication", "Finder", actions=(), AXWindows=[],
-                                           AXMenuBar=El("AXMenuBar", actions=()))),
-                        "Notes": (101, El("AXApplication", "Notes", actions=(), AXWindows=[],
-                                          AXMenuBar=El("AXMenuBar", actions=()))), }, front="Notes")
+                 activation_works=True, enabled=True, inert_activates=False, activation_first=False,
+                 jarvis_activates=False, calculator=None, logs_activation=True):
+    """*calculator*: None (not installed), ``"behind"`` or ``"forward"`` (its clear button's press
+    leaves it behind / brings it forward)."""
+    apps = {"Finder": (202, El("AXApplication", "Finder", actions=(), AXWindows=[],
+                                AXMenuBar=El("AXMenuBar", actions=()))),
+            "Notes": (101, El("AXApplication", "Notes", actions=(), AXWindows=[],
+                              AXMenuBar=El("AXMenuBar", actions=())))}
+    backend = StaleMac(apps, front="Notes")
+    if calculator:
+        clear = El("AXButton", "All Clear", frame=(10, 10, 40, 40))
+        clear.on_perform = lambda _a: backend.activate(404) if calculator == "forward" else None
+        window = El("AXWindow", "Calculator", actions=(), frame=(0, 0, 200, 300), children=[clear])
+        backend.apps["Calculator"] = (404, El("AXApplication", "Calculator", actions=(), AXWindows=[window],
+                                              AXFocusedWindow=window, AXMenuBar=El("AXMenuBar", actions=())))
     backend.refuse_axpress, backend.activation_works = refuse_axpress, activation_works
+    backend.jarvis_activates = jarvis_activates
+    backend.view = None
     log: list[str] = []
     view = FakeFixtureView(backend, log, keep_references=keep_references, steals_focus=steals_focus,
-                           axpress=axpress, enabled=enabled)
+                           axpress=axpress, enabled=enabled, inert_activates=inert_activates,
+                           activation_first=activation_first, logs_activation=logs_activation)
     device = PressingInput()
-    device.view = view
+    device.view = backend.view = view
     surface = NativeSurface(backend=backend, input=device, sleep=lambda _s: None)
     return surface, FakeFixtureProcess(view, log, fx), view, log
 
@@ -1711,6 +1764,224 @@ async def test_a_press_that_activates_the_app_stays_a_failure_in_the_whole_stale
     assert await cn.stale_checks(surface, fixture) is False
     out = capsys.readouterr().out
     assert "✗ a press works with another app in front" in out and "⚠ a press works" not in out
+
+
+def _raw_stub(view, error=""):
+    """raw_press_process, with the fake app on the other end: the app runs whatever its action does and
+    nothing of JARVIS (no backend, no trace) is in between."""
+    def press(pid, identifier):
+        assert pid == 303
+        if error:
+            return "", error
+        control = next(c for c in view.window.children if c.attrs.get("AXIdentifier") == identifier)
+        control.on_perform("AXPress")
+        return "AXUIElementPerformAction -> 0", ""
+    return press
+
+
+@pytest.mark.parametrize("setup, raw_error, expected", [
+    # the app comes forward whatever it is pressed with, and so does a standard app: macOS/AppKit
+    (dict(steals_focus=True, inert_activates=True, calculator="forward"), "",
+     ["the Save button, pressed by a bare AXUIElementPerformAction in another process: accepted, action ran",
+      "the Inert button (no action), pressed by JARVIS: accepted, the app came forward",
+      "Calculator's clear button, pressed by JARVIS: accepted, the app came forward",
+      "most consistent with macOS/AppKit (cause 3)"]),
+    # ...but a standard app's button stays behind: this fixture and its host
+    (dict(steals_focus=True, inert_activates=True, calculator="behind"), "",
+     ["Calculator's clear button, pressed by JARVIS: accepted, the app stayed behind",
+      "most consistent with this fixture and its host process (causes 1/5), not AXPress in general"]),
+    # only the button that runs the fixture's action brings it forward
+    (dict(steals_focus=True, calculator="behind"), "",
+     ["the Inert button (no action), pressed by JARVIS: accepted, the app stayed behind",
+      "most consistent with the fixture's handling of the press (cause 1)"]),
+    # pressing through JARVIS's backend is what activates it; a bare client does not
+    (dict(jarvis_activates=True, calculator="forward"), "",
+     ["the Save button, pressed by a bare AXUIElementPerformAction in another process: accepted, action ran, "
+      "app not yet active when its action began, the app stayed behind",
+      "most consistent with JARVIS's invocation (cause 4)"]),
+    # the independent client cannot be run: undecided, said so
+    (dict(steals_focus=True, inert_activates=True, calculator="forward"), "no permission",
+     ["the other process could not press it: no permission",
+      "undecided: the press from a client with nothing of JARVIS in it could not be made"]),
+    # Calculator is not installed: the Calculator-less reading
+    (dict(steals_focus=True, inert_activates=True), "",
+     ["Calculator's clear button, pressed by JARVIS: not measured",
+      "Calculator was not measured, so a fixture-only cause is not ruled out"]),
+], ids=["macos-appkit", "fixture-host", "fixture-handler", "jarvis", "undecided", "no-calculator"])
+async def test_an_activating_press_is_followed_by_trials_that_say_whose_doing_it_is(
+        cn, fx, capsys, monkeypatch, setup, raw_error, expected):
+    surface, fixture, view, _ = _stale_setup(fx, **setup)
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view, raw_error))
+    assert await cn.background_press(surface, fixture) is False
+    out = capsys.readouterr().out
+    assert "✗ a press works with another app in front — AXPress succeeded, JARVIS posted no click and activated " \
+        "nothing, and the app still came forward" in out, "the verdict is the same whatever the trials say"
+    for fragment in expected:
+        assert fragment in out, (fragment, out)
+    assert out.count("evidence: ") >= 4
+
+
+async def test_when_accessibility_says_front_but_the_app_never_says_it_became_active_the_measurement_is_blamed(
+        cn, fx, capsys, monkeypatch):
+    """Cause 5: the check reads AXFocusedApplication. If the fixture's own didBecomeActive never fired, nothing
+    was activated, and the verdict is still a failure - but the evidence says what is really being measured."""
+    surface, fixture, view, _ = _stale_setup(fx, steals_focus=True, inert_activates=True, calculator="forward",
+                                             logs_activation=False)
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view))
+    assert await cn.background_press(surface, fixture) is False
+    out = capsys.readouterr().out
+    assert "the app itself logged no activation, the app came forward" in out
+    assert "most consistent with the measurement (cause 5)" in out and "most consistent with macOS" not in out
+    assert out.count("✗ a press works") == 1, "the verdict is a failure all the same"
+
+
+async def test_a_fixture_that_could_not_listen_for_its_own_activation_is_no_witness(cn, fx, capsys, monkeypatch):
+    surface, fixture, view, _ = _stale_setup(fx, steals_focus=True, inert_activates=True, calculator="forward",
+                                             logs_activation=False)
+    view.raw.insert(0, "note:no activation log: RuntimeError")
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view))
+    await cn.background_press(surface, fixture)
+    out = capsys.readouterr().out
+    assert "cause 5" not in out and "most consistent with macOS/AppKit (cause 3)" in out
+
+
+@pytest.mark.parametrize("first, fragment", [
+    (True, "when the button's action began the app was already active: the activation came before any fixture code ran"),
+    (False, "when the button's action began the app was not yet active: it became active afterwards"),
+])
+async def test_the_evidence_says_whether_the_app_was_active_before_the_fixtures_own_code_ran(
+        cn, fx, capsys, monkeypatch, first, fragment):
+    surface, fixture, view, _ = _stale_setup(fx, steals_focus=True, activation_first=first)
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view))
+    await cn.background_press(surface, fixture)
+    out = capsys.readouterr().out
+    assert fragment in out
+    assert re.search(r"the Save button, pressed by JARVIS: accepted, action ran, app (already active|not yet active) "
+                     r"when its action began, became active \d+ ms after the press began, the app came forward", out)
+
+
+async def test_every_trial_starts_with_finder_in_front_so_one_cannot_carry_over_into_the_next(
+        cn, fx, capsys, monkeypatch):
+    surface, fixture, view, _ = _stale_setup(fx, steals_focus=True, calculator="behind")
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view))
+    await cn.background_press(surface, fixture)
+    out = capsys.readouterr().out
+    assert "the Inert button (no action), pressed by JARVIS: accepted, the app stayed behind" in out, \
+        "the fixture was in front when the Save trials ended; the Inert trial still began with Finder"
+    assert surface.backend.activations.count(202) >= 4, "Finder was brought forward before each press"
+
+
+async def test_no_trial_is_run_when_the_press_passes_or_fails_for_any_other_reason(cn, fx, capsys, monkeypatch):
+    ran = []
+    monkeypatch.setattr(cn, "raw_press_process", lambda *a: ran.append("raw") or ("", ""))
+    for setup in ({}, {"refuse_axpress": True}, {"axpress": "absent"}, {"axpress": "silent"}, {"enabled": False}):
+        surface, fixture, _, _ = _stale_setup(fx, **setup)
+        await cn.background_press(surface, fixture)
+    assert ran == [] and ("launch", "Calculator") not in cn.calls
+    assert "evidence: " not in capsys.readouterr().out
+
+
+async def test_calculator_is_launched_for_its_trial_and_quit_again_unless_it_was_already_open(cn, fx, monkeypatch):
+    surface, fixture, view, _ = _stale_setup(fx, steals_focus=True, calculator="behind")
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view))
+    await cn.background_press(surface, fixture)
+    assert cn.calls.count(("launch", "Calculator")) == 1 and cn.calls.count(("quit", "Calculator")) == 1
+    cn.calls.clear()
+    monkeypatch.setattr(cn, "is_running", lambda app: True)
+    surface, fixture, view, _ = _stale_setup(fx, steals_focus=True, calculator="behind")
+    monkeypatch.setattr(cn, "raw_press_process", _raw_stub(view))
+    await cn.background_press(surface, fixture)
+    assert ("quit", "Calculator") not in cn.calls, "the person's own Calculator is left open"
+
+
+async def test_a_trial_that_raises_is_reported_as_not_measured_and_the_others_still_run(cn, fx, capsys, monkeypatch):
+    surface, fixture, view, _ = _stale_setup(fx, steals_focus=True, inert_activates=True, calculator="forward")
+
+    def explodes(pid, identifier):
+        raise RuntimeError("no permission to run a second process")
+
+    monkeypatch.setattr(cn, "raw_press_process", explodes)
+    await cn.background_press(surface, fixture)
+    out = capsys.readouterr().out
+    assert "raw: not measured — RuntimeError: no permission to run a second process" in out
+    assert "Calculator's clear button, pressed by JARVIS: accepted, the app came forward" in out
+    assert "undecided" in out
+
+
+def test_the_reading_for_every_combination_of_what_the_trials_found(cn):
+    def trial(name, forward, **kw):
+        return cn.Trial(name, accepted=True, came_forward=forward, **kw)
+
+    def reading(raw=None, inert=None, calculator=None):
+        trials = {"save": trial("save", True)}
+        for key, value in (("raw", raw), ("inert", inert), ("calculator", calculator)):
+            if value is not None:
+                trials[key] = trial(key, value)
+        return cn.diagnose_activation(trials)[-1]
+
+    assert "cause 4" in reading(raw=False, inert=True, calculator=True), "a bare client behind: JARVIS"
+    assert "undecided" in reading(inert=True, calculator=True)
+    assert "cause 1)" in reading(raw=True, inert=False, calculator=True)
+    assert "causes 1/5" in reading(raw=True, inert=True, calculator=False)
+    assert "cause 3" in reading(raw=True, inert=True, calculator=True)
+    assert "no-action button was not measured" in reading(raw=True, calculator=True)
+    assert "Calculator was not measured" in reading(raw=True, inert=True)
+    silent = cn.Trial("save", accepted=True, recorded=True, came_forward=True, delay_s=None)
+    assert "cause 5" in cn.diagnose_activation({"save": silent, "raw": trial("raw", True)})[-1]
+    silent.watching = False
+    assert "cause 5" not in cn.diagnose_activation({"save": silent, "raw": trial("raw", True)})[-1]
+    heard = cn.Trial("save", accepted=True, recorded=True, came_forward=True, delay_s=0.01)
+    assert "cause 5" not in cn.diagnose_activation({"save": heard, "raw": trial("raw", True)})[-1]
+    broken = cn.Trial("raw", accepted=True, came_forward=False, note="could not run")
+    assert "undecided" in cn.diagnose_activation({"save": trial("save", True), "raw": broken})[-1], \
+        "a trial with a note is not evidence"
+
+
+def test_the_fixtures_own_lines_are_read_for_the_state_its_action_found_and_when_it_became_active(cn):
+    lines = ["activation:became:t=98.0000", "handler:click:active=1:key=0:main=0:event=none:t=100.5000",
+             "click:Save:save:born=3", "activation:resigned:t=99.0000", "activation:became:t=100.4000",
+             "activation:became:t=105.0000"]
+    facts = cn.activation_facts(lines, started=100.0)
+    assert facts["handler"] == {"active": "1", "key": "0", "main": "0", "event": "none", "t": "100.5000"}
+    assert facts["delay_s"] == pytest.approx(0.4), "the first activation after the press began, not an earlier one"
+    assert cn.activation_facts([], 1.0) == {"handler": None, "delay_s": None}
+    assert cn.activation_facts(["handler:click:unavailable=RuntimeError:t=5.0"], 1.0)["handler"] is None
+    assert cn.log_fields("handler:click:active=0:t=1.5") == {"active": "0", "t": "1.5"}
+
+
+@pytest.mark.parametrize("performed, clicks, error, accepted, note", [
+    ([("AXPress", True)], [], "", True, ""),
+    ([("AXPress", False)], [((1, 2), {})], "", False, "AXPress did not do it; the surface fell back to a click"),
+    ([], [], "", False, "AXPress was not accepted"),
+    ([], [], "greyed out", False, "the press raised: greyed out"),
+])
+def test_a_trial_is_only_a_measurement_of_axpress_when_the_surface_did_a_plain_axpress(
+        cn, performed, clicks, error, accepted, note):
+    trace = cn.PressTrace.__new__(cn.PressTrace)
+    trace.performed, trace.offered, trace.clicks = performed, [["AXPress"]], clicks
+    trial = cn.trial_from("t", trace, "Pressed.", error, True, [], 0.0, logs=False)
+    assert trial.accepted is accepted and trial.note == note and trial.usable is (accepted and not note)
+
+
+def test_the_independent_client_is_a_bare_accessibility_script_and_is_run_as_one(cn, monkeypatch):
+    compile(cn.RAW_PRESS, "raw_press", "exec")
+    assert "AXUIElementPerformAction" in cn.RAW_PRESS and "jarvis" not in cn.RAW_PRESS.lower(), \
+        "nothing of this repository is in the client that rules JARVIS in or out"
+    seen = []
+
+    def run(command, **kwargs):
+        seen.append(command)
+        return type("Done", (), {"stdout": "AXUIElementPerformAction -> 0\n", "stderr": "", "returncode": 0})()
+
+    monkeypatch.setattr(cn.subprocess, "run", run)
+    assert cn.raw_press_process(303, "save") == ("AXUIElementPerformAction -> 0", "")
+    assert seen[0][1] == "-c" and seen[0][3:] == ["303", "save"]
+
+    def fails(command, **kwargs):
+        return type("Done", (), {"stdout": "no element with identifier save\n", "stderr": "", "returncode": 4})()
+
+    monkeypatch.setattr(cn.subprocess, "run", fails)
+    assert cn.raw_press_process(303, "save") == ("no element with identifier save", "no element with identifier save")
 
 
 async def test_a_fallback_click_is_a_failure_even_when_it_does_the_press_and_nothing_comes_forward(cn, fx, capsys):

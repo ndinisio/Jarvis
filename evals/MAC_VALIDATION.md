@@ -68,6 +68,19 @@ the app recorded it, and Finder stayed in front. Its ✗ says which way it went 
 * `AXPress succeeded but the app recorded no press`, `the press raised …`, `not an AXPress: …` - the
   mechanism is named in the line.
 
+When the verdict is "AXPress succeeded … and the app still came forward", `--stale` then runs controlled
+trials (Finder put in front before each) and prints `evidence:` lines that say whose doing it is:
+
+* the Save button pressed by a bare `AXUIElementPerformAction` in a process of its own (nothing of JARVIS in it);
+* the fixture's `Inert` button, which has no action, pressed by JARVIS;
+* Calculator's clear button pressed by JARVIS (Calculator is launched for it and quit again);
+* from the fixture's own log: whether the app was already active when its action began, and whether the app
+  itself ever reported becoming active (its own `didBecomeActive`, not Accessibility's focus).
+
+The last line names the cause most consistent with them: JARVIS's invocation, the fixture's handling, this fixture
+and its host process, macOS/AppKit itself, or the measurement (Accessibility names the fixture as focused but the app
+never became active). It is a reading, not a proof, and the step's verdict is unchanged: activation stays a failure.
+
 Each line ends with what the surface returned (`'Pressed “Save”.'` is AXPress; `'Clicked …'` is the click)
 and what the window recorded.
 

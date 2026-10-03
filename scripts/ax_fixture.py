@@ -32,6 +32,14 @@ Log lines: ``ready:<pid>``, ``ack:<number>:<json state>``, ``error:<number>:<why
 and for every press ``click:<name>:<identifier>:born=<generation>`` (a button) or
 ``toggle:…`` (a checkbox). ``born`` says which build of the control was pressed.
 
+Two kinds of line exist only to say *when the app became active*, which a check of background
+presses needs to attribute (the fixture's action itself only writes a line; it never activates,
+orders a window or asks for focus): ``handler:<click|toggle>:active=<0|1>:key=<0|1>:main=<0|1>:
+event=<none|type>:t=<seconds>`` just before a press is logged - whether the app was already active
+when its action ran - and ``activation:<became|resigned>:t=<seconds>`` whenever it changes. ``t`` is
+``time.monotonic()``, the same clock in every process on the machine. The window also has an
+``Inert`` button with no action, to press without any fixture code running at all.
+
 Needs the ``native`` extra (PyObjC). The command and log handling is plain
 Python and tested in CI; the AppKit half is only checked there for typos, and
 runs for real only on a Mac.
@@ -43,6 +51,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -147,6 +156,7 @@ class CocoaView:
         self._fill_main()
         self.build(0, saves=1, kind="button", title="Save")
         self.main.makeKeyAndOrderFront_(None)
+        self._watch_activation()
 
     # -- the commands' effects --------------------------------------------------------------
     def build(self, generation: int, *, saves: int, kind: str, title: str,
@@ -189,15 +199,46 @@ class CocoaView:
         self.F.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             interval_s, self.target, "tick:", None, True)
 
+    def state_line(self, kind: str) -> str:
+        """The ``handler:`` line: was the app already active, and was its window key, when this
+        control's action started to run? Never raises - a fixture that can't say says so."""
+        try:
+            app = self.AK.NSApplication.sharedApplication()
+            event = app.currentEvent()
+            return (f"handler:{kind}:active={int(bool(app.isActive()))}:key={int(bool(self.main.isKeyWindow()))}:"
+                    f"main={int(bool(self.main.isMainWindow()))}:"
+                    f"event={event.type() if event is not None else 'none'}:t={time.monotonic():.4f}")
+        except Exception as exc:
+            return f"handler:{kind}:unavailable={type(exc).__name__}:t={time.monotonic():.4f}"
+
+    def _watch_activation(self) -> None:
+        """Log when the app becomes active or stops being (see the module docstring). Best effort."""
+        try:
+            centre = self.F.NSNotificationCenter.defaultCenter()
+            centre.addObserver_selector_name_object_(self.target, "activated:",
+                                                     self.AK.NSApplicationDidBecomeActiveNotification, None)
+            centre.addObserver_selector_name_object_(self.target, "resigned:",
+                                                     self.AK.NSApplicationDidResignActiveNotification, None)
+        except Exception as exc:
+            self.log(f"note:no activation log: {type(exc).__name__}")
+
     def _make_target(self) -> Any:
         view = self
 
         class Target(self.F.NSObject):
             def clicked_(self, sender):
+                view.log(view.state_line("click"))
                 view.log(f"click:{sender.title()}:{sender.identifier()}:born={sender.tag()}")
 
             def toggled_(self, sender):
+                view.log(view.state_line("toggle"))
                 view.log(f"toggle:{sender.title()}:{sender.identifier()}:born={sender.tag()}")
+
+            def activated_(self, _note):
+                view.log(f"activation:became:t={time.monotonic():.4f}")
+
+            def resigned_(self, _note):
+                view.log(f"activation:resigned:t={time.monotonic():.4f}")
 
             def tick_(self, _timer):
                 view.tick()
@@ -243,7 +284,11 @@ class CocoaView:
         fmt = AK.NSPopUpButton.alloc().initWithFrame_pullsDown_(((20, 120), (200, 26)), False)
         fmt.addItemsWithTitles_(["PDF", "Plain Text", "Rich Text"])
         fmt.setIdentifier_("format")
-        for control in (cancel, remember, name, fmt):
+        inert = AK.NSButton.alloc().initWithFrame_(((320, 240), (90, 28)))   # no target, no action
+        inert.setTitle_("Inert")
+        inert.setBezelStyle_(self._ROUNDED)
+        inert.setIdentifier_("inert")
+        for control in (cancel, remember, name, fmt, inert):
             content.addSubview_(control)
 
 
