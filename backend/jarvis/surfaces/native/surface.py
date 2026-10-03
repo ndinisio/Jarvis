@@ -15,9 +15,11 @@ refused outright — JARVIS never types credentials.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import platform
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ from . import ax
 from .ax import Control, Frame, WindowSnapshot
 from .input import PASTE_THRESHOLD, Clipboard, Keystroke, NativeInput, resolve_key
 from .marks import Mark, build_marks, draw_overlay, image_size, render_marks
+from .observer import ObserverThread, Wake
 
 log = get_logger("jarvis.surfaces.native")
 
@@ -37,6 +40,10 @@ PERMISSION_HINT = (
 )
 #: Handles kept before the registry starts again from ax1.
 MAX_HANDLES = 4000
+#: What an app posts when it comes to the front, and when a menu opens — the
+#: two events the surface waits on (see ``NativeSurface.watch``).
+ACTIVATED = "AXApplicationActivated"
+MENU_OPENED = "AXMenuOpened"
 #: Controls looked at when re-finding a stale handle — the same ceiling
 #: ``find()`` uses for a whole-window search.
 RELOCATE_MAX_LISTED = 1000
@@ -68,8 +75,14 @@ class NativeError(Exception):
 
 class NativeSurface:
     def __init__(self, deps=None, *, backend: Any = None, input: Any = None,
-                 clipboard: Any = None, sleep: Callable[[float], None] = time.sleep):
+                 clipboard: Any = None, sleep: Callable[[float], None] = time.sleep,
+                 observe: bool | None = None):
         self._deps = deps
+        #: Wake waits early on the app's own notifications — None follows
+        #: ``automation.native_observer`` in the configuration.
+        self._observe = observe
+        self._observer: ObserverThread | None = None
+        self._observer_lock = threading.Lock()
         self._backend = backend
         self._input = input
         self._clipboard = clipboard
@@ -307,9 +320,10 @@ class NativeSurface:
         items = self._menu_items(element)
         opened = False
         if not items:
-            backend.perform(element, "AXPress")
-            opened = True
-            self._poll(lambda: bool(self._menu_items(element)), timeout_s=1.5)
+            with self.watch(pid, MENU_OPENED) as wake:
+                backend.perform(element, "AXPress")
+                opened = True
+                self._poll(lambda: bool(self._menu_items(element)), timeout_s=1.5, wake=wake)
             items = self._menu_items(element)
         chosen = _match(items, option, backend)
         if chosen is None:
@@ -343,9 +357,10 @@ class NativeSurface:
             items = self._menu_items(current)
             chosen = _match(items, step, backend)
             if chosen is None and opened_root is None:
-                backend.perform(current, "AXPress")        # some menus fill in when opened
-                opened_root = current
-                self._poll(lambda: bool(self._menu_items(current)), timeout_s=1.5)
+                with self.watch(pid, MENU_OPENED) as wake:
+                    backend.perform(current, "AXPress")    # some menus fill in when opened
+                    opened_root = current
+                    self._poll(lambda: bool(self._menu_items(current)), timeout_s=1.5, wake=wake)
                 items = self._menu_items(current)
                 chosen = _match(items, step, backend)
             if chosen is None:
@@ -428,6 +443,46 @@ class NativeSurface:
         """The latest marked screenshot, for a vision model to pick from."""
         return self._overlay if self._overlay is not None and self._overlay.exists() else None
 
+    # -- notifications ------------------------------------------------------------------------------
+    def _observing(self) -> bool:
+        if self._observe is not None:
+            return self._observe
+        automation = getattr(getattr(self._deps, "config", None), "automation", None)
+        return bool(getattr(automation, "native_observer", False))
+
+    @contextlib.contextmanager
+    def watch(self, pid: int, *notifications: str) -> Iterator[Wake | None]:
+        """Listen for *notifications* from *pid*'s application while the block
+        runs, yielding what to sleep on between polls — or None when there is
+        nothing to listen with (observing is off, the backend can't, the
+        subscription didn't take). Never raises, and None is not an error: the
+        wait just polls, as it always did."""
+        watch = None
+        with contextlib.suppress(Exception):
+            observer = self._observer_thread()
+            if observer is not None:
+                watch = observer.watch(pid, *notifications)
+        try:
+            yield watch.wake if watch is not None else None
+        finally:
+            if watch is not None:
+                watch.close()
+
+    def _observer_thread(self) -> ObserverThread | None:
+        if not self._observing():
+            return None
+        with self._observer_lock:            # waits run on worker threads: make only one
+            if self._observer is None:
+                make = getattr(self.backend, "observer_driver", None)
+                if make is not None:
+                    self._observer = ObserverThread(make())
+            return self._observer
+
+    def close(self) -> None:
+        """Stop the observer thread, if one was started. Idempotent."""
+        if self._observer is not None:
+            self._observer.stop()
+
     # -- plumbing --------------------------------------------------------------------------------
     def _target(self, app: str) -> tuple[int, str]:
         backend = self.backend
@@ -449,24 +504,37 @@ class NativeSurface:
     def _front(self, pid: int) -> None:
         front = self.backend.frontmost()
         if front is None or front[0] != pid:
-            self.backend.activate(pid)
-            self._poll(lambda: (self.backend.frontmost() or (None,))[0] == pid, timeout_s=1.5)
+            with self.watch(pid, ACTIVATED) as wake:         # subscribed first: the event can't be missed
+                self.backend.activate(pid)
+                self._poll(lambda: (self.backend.frontmost() or (None,))[0] == pid, timeout_s=1.5,
+                           wake=wake)
 
-    def _poll(self, ready: Callable[[], bool], *, timeout_s: float, interval_s: float = 0.05) -> bool:
+    def _poll(self, ready: Callable[[], bool], *, timeout_s: float, interval_s: float = 0.05,
+              wake: Wake | None = None) -> bool:
         """Check *ready* repeatedly rather than a flat sleep — a slow app
         activation or menu populate under load (more likely exactly when a
         long background errand is sharing the machine with other work) gets
         however long it actually needs, up to *timeout_s*, instead of a
         fixed guess that's indistinguishable from "it will never be ready".
         Mirrors the web surface's own poll-until-settled pattern
-        (tools/browser/observe.py)."""
+        (tools/browser/observe.py).
+
+        *wake*, if given, ends the pause between two checks the moment the
+        app posts the event being waited for — and only that: *ready* still
+        decides, the pause is no longer than it would have been, and the wait
+        ends at the same deadline either way."""
         deadline = time.monotonic() + timeout_s
         while True:
+            if wake is not None:
+                wake.clear()                # before the check, so an event during it isn't lost
             if ready():
                 return True
             if time.monotonic() >= deadline:
                 return False
-            self._sleep(interval_s)
+            if wake is not None:
+                wake.wait(min(interval_s, max(0.0, deadline - time.monotonic())))
+            else:
+                self._sleep(interval_s)
 
     def _app_name(self, pid: int) -> str:
         snap = self._last.get(pid)

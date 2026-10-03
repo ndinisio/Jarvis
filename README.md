@@ -965,7 +965,8 @@ file) override the file — see [`.env.example`](.env.example).
   "automation": {
     "max_steps": 50,          // actions in one background errand
     "max_wall_s": 600,        // …and minutes of wall clock, in seconds
-    "max_model_calls": 80
+    "max_model_calls": 80,
+    "native_observer": false  // wake Mac-app waits on the app's own notifications; see below
   },
   "skills": {
     "enabled": true,          // recipes for common errands (0 model calls when they fit)
@@ -1434,9 +1435,27 @@ and a screenshot's text for real, `--act` runs a TextEdit round trip
 (type, bold from the Format menu, close without saving), and `--controls`
 goes through the rest — pressing Calculator's buttons, choosing from the Save
 sheet's pop-up, dragging a file onto a folder in Finder, and clicking what a
-screenshot shows (it cleans up after itself). None of these checks has yet been run
-on a real Mac. Without the `native` extra the app tools fall back to the v2
-AppleScript paths.
+screenshot shows (it cleans up after itself); `--observe` measures the optional
+observer below. None of these checks has yet been run on a real Mac. Without
+the `native` extra the app tools fall back to the v2 AppleScript paths.
+
+**Optional: wake Mac-app waits on the app's own notifications
+(`automation.native_observer`, off by default).** When JARVIS waits for an app
+to come to the front or for a menu to fill in, it polls every 50 ms. With this
+on, a dedicated thread also subscribes to the app's Accessibility notifications
+(`AXApplicationActivated`, `AXMenuOpened`) and wakes the wait the moment one
+arrives. It only ever ends a pause early: the poll still decides whether the
+thing happened and the wait still gives up at its own deadline, so a
+notification that never comes, a subscription that can't be made, or a thread
+that fails leaves the wait as it is without it (making a subscription is
+bounded at a quarter of a second, and skipped while an unresponsive app is
+holding the thread). It is off because it is new native
+plumbing that no test here has run against macOS (the logic around it is tested
+against a fake run loop; whether macOS posts those notifications to a Python
+callback on a second thread, and keeps the event loop responsive meanwhile, is
+not). Run `scripts/check_native.py --observe` on your Mac first; it reports
+whether each notification arrives and how much sooner than polling, and fails
+if the thread slows the event loop or the wait.
 
 **Other current limits**
 

@@ -224,6 +224,7 @@ class JarvisApp:
             await self.voice.stop()
         await self.screen_watcher.stop()
         await self.tasks.shutdown()
+        await asyncio.to_thread(self.deps.native.close)
         await self.deps.browsers.close()
         await self.models.close()
         self.memory.close()

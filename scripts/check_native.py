@@ -16,6 +16,13 @@ Save sheet and a throwaway folder on the Desktop.
     .venv/bin/python scripts/check_native.py --app Notes
     .venv/bin/python scripts/check_native.py --act      # the TextEdit round trip
     .venv/bin/python scripts/check_native.py --controls # click, pop-up, drag, marks
+    .venv/bin/python scripts/check_native.py --observe  # do AXObserver notifications fire?
+
+--observe is the check for the optional Accessibility observer thread
+(automation.native_observer): whether macOS posts the notifications JARVIS
+would wake on, how much sooner than polling, what happens when a subscription
+can't be made, and that the thread leaves the event loop alone. Run it before
+turning that setting on.
 
 find_on_screen is the one native tool not exercised here: it asks a vision
 model which mark is which, so it needs a configured model (evals/run_mac.py
@@ -36,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -45,6 +53,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from jarvis.surfaces.native import NativeError, NativeSurface  # noqa: E402
 from jarvis.surfaces.native.input import resolve_key  # noqa: E402
 from jarvis.surfaces.native.marks import MIN_CONFIDENCE, image_size, recognize_text, to_points  # noqa: E402
+from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED  # noqa: E402
 
 
 def step(label: str, ok: bool, detail: str = "") -> bool:
@@ -377,10 +386,198 @@ async def controls(surface: NativeSurface) -> bool:
     return ok
 
 
+# --- --observe: the Accessibility observer thread ----------------------------------------------
+#
+# automation.native_observer lets a wait on an app (it coming to the front, a menu
+# opening) end the moment the app posts the matching notification instead of on the
+# next 50 ms poll. The polling underneath is unchanged either way, so this is about
+# whether the extra is real: do the notifications arrive, how much sooner, and does
+# the thread stay out of the event loop's way. Nothing here changes any setting.
+
+#: How much longer than the baseline the event loop may stall while the observer
+#: thread is spinning before that counts as the thread holding things up.
+LOOP_LAG_ALLOWED_S = 0.025
+#: How much slower than polling alone bringing an app to the front may get.
+FRONT_SLOWER_ALLOWED_S = 0.05
+
+
+def front_pid(backend) -> int | None:
+    front = backend.frontmost()
+    return front[0] if front else None
+
+
+def wait_front(backend, pid: int, timeout_s: float = 2.0) -> float | None:
+    """Seconds until *pid* is the frontmost app, polling every 5 ms; None if it never is."""
+    start = time.monotonic()
+    while time.monotonic() - start < timeout_s:
+        if front_pid(backend) == pid:
+            return time.monotonic() - start
+        time.sleep(0.005)
+    return None
+
+
+def time_activation(surface: NativeSurface, away: int, to: int) -> dict:
+    """Bring *to* to the front from *away*, and say when the notification
+    arrived and when polling noticed the change (seconds after asking)."""
+    backend = surface.backend
+    backend.activate(away)
+    wait_front(backend, away)
+    with surface.watch(to, ACTIVATED) as wake:
+        if wake is None:
+            return {"watched": False}
+        start = time.monotonic()
+        backend.activate(to)
+        seen = wait_front(backend, to)
+        wake.wait(0.5)                                  # a moment for the notification to catch up
+        fired = None if wake.fired_at is None else wake.fired_at - start
+    return {"watched": True, "fired": fired, "seen": seen}
+
+
+def time_menu(surface: NativeSurface, pid: int, title: str) -> dict:
+    """Open the *title* menu of *pid*'s menu bar and say when the notification
+    arrived and when its items showed up (seconds after pressing)."""
+    backend = surface.backend
+    bar = backend.attribute(backend.application(pid), "AXMenuBar")
+    item = next((i for i in backend.attribute(bar, "AXChildren") or []
+                 if backend.attribute(i, "AXTitle") == title), None)
+    if item is None:
+        return {"watched": True, "missing": title}
+
+    def filled() -> bool:
+        return any(backend.attribute(menu, "AXChildren")
+                   for menu in backend.attribute(item, "AXChildren") or [])
+
+    with surface.watch(pid, MENU_OPENED) as wake:
+        if wake is None:
+            return {"watched": False}
+        start = time.monotonic()
+        backend.perform(item, "AXPress")
+        seen = None
+        while time.monotonic() - start < 2.0 and seen is None:
+            if filled():
+                seen = time.monotonic() - start
+            else:
+                time.sleep(0.005)
+        wake.wait(0.5)
+        fired = None if wake.fired_at is None else wake.fired_at - start
+    surface.input.press(resolve_key("escape"))
+    return {"watched": True, "fired": fired, "seen": seen}
+
+
+def cycle_watches(surface: NativeSurface, pid: int, count: int = 25) -> tuple[int, int, float]:
+    """Subscribe and unsubscribe *count* times; (made, threads before, seconds)."""
+    threads = threading.active_count()
+    start = time.monotonic()
+    made = 0
+    for _ in range(count):
+        with surface.watch(pid, ACTIVATED) as wake:
+            made += wake is not None
+    return made, threads, time.monotonic() - start
+
+
+def average_front(surface: NativeSurface, away: int, to: int, count: int = 5) -> float:
+    """Mean seconds for the surface's own wait on an app coming to the front."""
+    backend, total = surface.backend, 0.0
+    for _ in range(count):
+        backend.activate(away)
+        wait_front(backend, away)
+        start = time.monotonic()
+        surface._front(to)
+        total += time.monotonic() - start
+    return total / count
+
+
+async def event_loop_lag(seconds: float) -> float:
+    """The longest the event loop was kept from a 10 ms tick over *seconds*."""
+    worst, end = 0.0, time.monotonic() + seconds
+    while time.monotonic() < end:
+        before = time.monotonic()
+        await asyncio.sleep(0.01)
+        worst = max(worst, time.monotonic() - before - 0.01)
+    return worst
+
+
+def ms(seconds: float | None) -> str:
+    return "never" if seconds is None else f"{seconds * 1000:.0f} ms"
+
+
+async def observe(on: NativeSurface, off: NativeSurface) -> bool:
+    """*on* has the observer enabled; *off* is the same surface without it."""
+    print("AXObserver — what this Mac does")
+    was_running = is_running("Calculator")
+    launch("Calculator")
+    await pause(1.5)
+    try:
+        backend = on.backend
+        calc, finder = backend.find_app("Calculator"), backend.find_app("Finder")
+        if not step("found Calculator and Finder", calc is not None and finder is not None):
+            return False
+        calc_pid, finder_pid = calc[0], finder[0]
+        ok = True
+
+        found = await asyncio.to_thread(time_activation, on, finder_pid, calc_pid)
+        if found["watched"]:
+            ok &= step("AXApplicationActivated arrives", found["fired"] is not None,
+                       f"notification at {ms(found['fired'])}; polling saw the app in front at {ms(found['seen'])}")
+        else:
+            ok &= step("subscribed to AXApplicationActivated", False,
+                       "no subscription was made — the observer thread or the call failed (JARVIS would just poll)")
+
+        found = await asyncio.to_thread(time_menu, on, calc_pid, "View")
+        if found.get("missing"):
+            ok &= step("Calculator has a View menu", False, f"no “{found['missing']}” in its menu bar")
+        elif found["watched"]:
+            ok &= step("AXMenuOpened arrives", found["fired"] is not None,
+                       f"notification at {ms(found['fired'])}; polling saw the items at {ms(found['seen'])}")
+        else:
+            ok &= step("subscribed to AXMenuOpened", False, "no subscription was made (JARVIS would just poll)")
+
+        def bogus():
+            start = time.monotonic()
+            with on.watch(calc_pid, "AXNoSuchNotification") as wake:
+                return wake is not None, time.monotonic() - start
+        accepted, took = await asyncio.to_thread(bogus)
+        ok &= step("an unsupported notification is handled", took < 1.0,
+                   ("macOS accepted it, so it just never fires" if accepted else "refused, so JARVIS polls")
+                   + f" ({ms(took)})")
+
+        made, threads, took = await asyncio.to_thread(cycle_watches, on, calc_pid)
+        ok &= step("25 subscribe/unsubscribe cycles leave nothing behind",
+                   made == 25 and threading.active_count() <= threads + 1,
+                   f"{made} of 25 subscribed in {ms(took)}; threads {threads} → {threading.active_count()}")
+
+        baseline = await event_loop_lag(1.0)
+        entered = on.watch(calc_pid, ACTIVATED)
+        wake = await asyncio.to_thread(entered.__enter__)
+        try:
+            spinning = await event_loop_lag(2.0)
+        finally:
+            await asyncio.to_thread(entered.__exit__, None, None, None)
+        if wake is None:
+            ok &= step("the event loop stays free while the observer spins", False,
+                       "no subscription, so nothing was spinning to measure")
+        else:
+            ok &= step("the event loop stays free while the observer spins",
+                       spinning <= baseline + LOOP_LAG_ALLOWED_S,
+                       f"worst stall {ms(spinning)} with it, {ms(baseline)} without")
+
+        with_it = await asyncio.to_thread(average_front, on, finder_pid, calc_pid)
+        without = await asyncio.to_thread(average_front, off, finder_pid, calc_pid)
+        ok &= step("bringing an app to the front is no slower with it", with_it <= without + FRONT_SLOWER_ALLOWED_S,
+                   f"{ms(with_it)} with, {ms(without)} without, mean of 5")
+        return ok
+    finally:
+        on.close()
+        if not was_running:
+            quit_app("Calculator")
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--app", default="", help="an app to look at (default: the frontmost)")
     parser.add_argument("--act", action="store_true", help="also run the TextEdit round trip")
+    parser.add_argument("--observe", action="store_true",
+                        help="also measure the Accessibility observer thread (automation.native_observer)")
     parser.add_argument("--controls", action="store_true",
                         help="also click, choose from a pop-up, drag and click marks (Calculator, "
                              "TextEdit's Save sheet, a throwaway Desktop folder)")
@@ -398,6 +595,8 @@ async def main() -> int:
         ok &= await act(surface)
     if args.controls:
         ok &= await controls(surface)
+    if args.observe:
+        ok &= await observe(NativeSurface(observe=True), NativeSurface(observe=False))
     print("\nAll good." if ok else "\nSomething didn't work — the lines marked ✗ say what.")
     return 0 if ok else 1
 

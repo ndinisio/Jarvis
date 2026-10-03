@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import threading
 from pathlib import Path
 
 import pytest
 from jarvis.surfaces.native import NativeSurface
 from jarvis.surfaces.native.marks import TextBox
+from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED
 from test_native import El, FakeBackend, RecordingInput
+from test_observer import FakeDriver
 
 pytestmark = pytest.mark.asyncio
 
@@ -394,8 +397,9 @@ async def test_one_check_crashing_does_not_stop_the_others(cn, monkeypatch, caps
 
 
 class _Stub:
-    def __init__(self, available=True):
+    def __init__(self, available=True, **kwargs):
         self._available = available
+        self.kwargs = kwargs
         self.backend = self
 
     def available(self):
@@ -416,7 +420,7 @@ async def test_the_controls_flag_runs_the_controls_checks_and_only_then(cn, monk
         ran.append("controls")
         return True
 
-    monkeypatch.setattr(cn, "NativeSurface", lambda: _Stub())
+    monkeypatch.setattr(cn, "NativeSurface", lambda **kwargs: _Stub(**kwargs))
     monkeypatch.setattr(cn, "look", look)
     monkeypatch.setattr(cn, "controls", controls)
     monkeypatch.setattr("sys.argv", ["check_native.py", *flag])
@@ -425,7 +429,7 @@ async def test_the_controls_flag_runs_the_controls_checks_and_only_then(cn, monk
 
 
 async def test_without_the_native_extras_it_says_so_and_does_nothing(cn, monkeypatch, capsys):
-    monkeypatch.setattr(cn, "NativeSurface", lambda: _Stub(available=False))
+    monkeypatch.setattr(cn, "NativeSurface", lambda **kwargs: _Stub(available=False, **kwargs))
     monkeypatch.setattr("sys.argv", ["check_native.py", "--controls"])
     assert await cn.main() == 1
     assert "native extras aren't installed" in capsys.readouterr().out
@@ -448,3 +452,146 @@ async def test_picking_and_reading_helpers(cn):
     assert cn.shows(Snap, "12"), "direction marks around the number don't hide it"
     assert cn.shows(Snap, "5") and not cn.shows(Snap, "1"), "whole texts only, never part of one"
     assert cn.names([C("OK"), C("")], limit=1).endswith("… (2 in all)")
+
+
+# ---------------------------------------------------------------------------
+# --observe
+# ---------------------------------------------------------------------------
+class ObservingMac(FakeBackend):
+    """Calculator and Finder, where bringing an app to the front and opening
+    Calculator's View menu each make the app post its notification — unless
+    told to stay silent."""
+
+    def __init__(self, driver: FakeDriver, *, silent: bool = False, can_observe: bool = True):
+        self.driver, self.silent, self.can_observe = driver, silent, can_observe
+        zoom_menu = El("AXMenu", actions=())
+        view = El("AXMenuBarItem", "View", children=[zoom_menu])
+
+        def opened(_action):
+            zoom_menu.children.append(El("AXMenuItem", "Zoom In"))
+            self._post(101, MENU_OPENED)
+
+        view.on_perform = opened
+        calculator = El("AXApplication", "Calculator", actions=(), AXWindows=[],
+                        AXMenuBar=El("AXMenuBar", actions=(), children=[El("AXMenuBarItem", "Calculator"), view]))
+        finder = El("AXApplication", "Finder", actions=(), AXWindows=[], AXMenuBar=El("AXMenuBar", actions=()))
+        super().__init__({"Calculator": (101, calculator), "Finder": (202, finder)}, front="Finder")
+
+    def _post(self, pid, notification):
+        if not self.silent:
+            self.driver.post(pid, notification)
+
+    def activate(self, pid):
+        result = super().activate(pid)
+        threading.Timer(0.02, self._post, args=(pid, ACTIVATED)).start()
+        return result
+
+    def __getattr__(self, name):
+        if name == "observer_driver" and self.can_observe:
+            return lambda: self.driver
+        raise AttributeError(name)
+
+
+def _observed_surfaces(**backend_kwargs):
+    driver = FakeDriver()
+    backend = ObservingMac(driver, **backend_kwargs)
+    make = lambda observe: NativeSurface(backend=backend, input=RecordingInput(),   # noqa: E731
+                                         sleep=lambda _s: None, observe=observe)
+    return make(True), make(False), driver
+
+
+@pytest.fixture
+def quick_loop(cn, monkeypatch):
+    """The event-loop stall measurement without its three real seconds; the
+    numbers it returns are whatever the test says, baseline first."""
+    readings = []
+
+    async def lag(_seconds):
+        return readings.pop(0)
+
+    monkeypatch.setattr(cn, "event_loop_lag", lag)
+    return readings
+
+
+async def test_the_observer_check_passes_when_the_notifications_arrive(cn, quick_loop, capsys):
+    on, off, driver = _observed_surfaces()
+    quick_loop.extend([0.002, 0.004])
+    assert await cn.observe(on, off) is True
+    out = capsys.readouterr().out
+    assert "✗" not in out
+    assert "✓ AXApplicationActivated arrives — notification at" in out
+    assert "✓ AXMenuOpened arrives — notification at" in out
+    assert "25 of 25 subscribed" in out
+    assert ("quit", "Calculator") in cn.calls
+    assert ("key", "escape", 1) in on.input.events, "the menu the check opened is closed again"
+    assert not driver.observed, "everything subscribed was unsubscribed"
+
+
+async def test_notifications_that_never_arrive_are_a_failure_the_output_shows(cn, quick_loop, capsys):
+    on, off, _ = _observed_surfaces(silent=True)
+    quick_loop.extend([0.002, 0.002])
+    assert await cn.observe(on, off) is False
+    out = capsys.readouterr().out
+    assert "✗ AXApplicationActivated arrives — notification at never; polling saw the app in front at" in out
+    assert "✗ AXMenuOpened arrives — notification at never" in out
+
+
+async def test_an_observer_that_cannot_subscribe_is_reported_not_crashed_on(cn, quick_loop, capsys):
+    on, off, _ = _observed_surfaces(can_observe=False)
+    quick_loop.extend([0.002, 0.002])
+    assert await cn.observe(on, off) is False
+    out = capsys.readouterr().out
+    assert "✗ subscribed to AXApplicationActivated — no subscription was made" in out
+    assert "✗ subscribed to AXMenuOpened" in out
+
+
+async def test_a_thread_that_stalls_the_event_loop_is_a_failure(cn, quick_loop, capsys):
+    on, off, _ = _observed_surfaces()
+    quick_loop.extend([0.003, 0.2])                    # 200 ms stalls while it spins, 3 ms without
+    assert await cn.observe(on, off) is False
+    assert "✗ the event loop stays free while the observer spins — worst stall 200 ms with it, 3 ms without" \
+        in capsys.readouterr().out
+
+
+async def test_an_observer_that_makes_the_wait_slower_is_a_failure(cn, quick_loop, monkeypatch, capsys):
+    on, off, _ = _observed_surfaces()
+    quick_loop.extend([0.002, 0.002])
+    monkeypatch.setattr(cn, "average_front", lambda surface, away, to, count=5: 0.3 if surface is on else 0.1)
+    assert await cn.observe(on, off) is False
+    assert "✗ bringing an app to the front is no slower with it — 300 ms with, 100 ms without" \
+        in capsys.readouterr().out
+
+
+async def test_the_event_loop_lag_measure_reports_a_real_stall(cn):
+    import time
+
+    async def stalls():
+        await cn.asyncio.sleep(0.02)
+        time.sleep(0.15)                              # something blocking the loop
+
+    task = cn.asyncio.ensure_future(stalls())
+    assert await cn.event_loop_lag(0.3) >= 0.1
+    await task
+
+
+@pytest.mark.parametrize("flag, expected", [([], []), (["--observe"], [{"observe": True}, {"observe": False}])])
+async def test_the_observe_flag_runs_the_observer_check_with_one_surface_each_way(cn, monkeypatch, flag, expected):
+    made = []
+
+    class Recording(_Stub):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            made.append(kwargs)
+
+    async def look(surface, app):
+        return True
+
+    async def observe(on, off):
+        return True
+
+    monkeypatch.setattr(cn, "NativeSurface", Recording)
+    monkeypatch.setattr(cn, "look", look)
+    monkeypatch.setattr(cn, "observe", observe)
+    monkeypatch.setattr("sys.argv", ["check_native.py", *flag])
+    assert await cn.main() == 0
+    assert made == [{}, *expected]

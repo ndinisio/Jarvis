@@ -465,6 +465,12 @@ class AutomationConfig(BaseModel):
     narration_min_gap_s: float = 4.0
     #: Hard cap on a single download's size.
     max_download_mb: int = 2048
+    #: Let a wait on a Mac app (it coming to the front, a menu filling in) end
+    #: the moment the app says so, through an Accessibility observer thread,
+    #: instead of only on the next 50 ms poll. Off until
+    #: ``scripts/check_native.py --observe`` has been run on your Mac: the
+    #: polling it adds to is unchanged either way.
+    native_observer: bool = False
 
 
 class SkillsConfig(BaseModel):

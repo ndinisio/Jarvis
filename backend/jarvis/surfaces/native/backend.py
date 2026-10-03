@@ -21,6 +21,8 @@ failed", never as a crash, and the AppleScript tools remain as a fallback.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 #: AXValue types (HIServices AXValue.h); constant names differ across SDKs.
@@ -232,6 +234,11 @@ class MacAXBackend:
         except Exception:
             return a is b
 
+    # -- notifications ---------------------------------------------------------------------------
+    def observer_driver(self) -> MacObserverDriver:
+        """The AXObserver half of the platform, for ``observer.ObserverThread``."""
+        return MacObserverDriver(self.AS, self.CF)
+
     # -- values -------------------------------------------------------------------------------
     def _convert(self, value: Any) -> Any:
         """AXValue points/sizes become tuples; error placeholders become None;
@@ -262,3 +269,79 @@ class MacAXBackend:
         if kind == _RANGE:
             return (int(data.location), int(data.length))
         return None
+
+
+@dataclass
+class _Observation:
+    """One live subscription. Holds everything the platform needs kept alive for
+    as long as notifications should keep coming: PyObjC does not retain the
+    callback, and the observer, element and run-loop source are what get
+    torn down again."""
+
+    observer: Any
+    element: Any
+    notification: str
+    source: Any
+    callback: Callable[..., None]
+
+
+class MacObserverDriver:
+    """``AXObserver`` through PyObjC, for ``observer.ObserverThread``.
+
+    Every method but :meth:`interrupt` must be called on the one thread that
+    also calls :meth:`spin`: the observer's run-loop source is added to *that*
+    thread's run loop, and its callbacks fire inside ``spin``.
+
+    **Not exercised on a Mac by this repository's tests** (see this module's
+    note): the call sequence below follows Apple's documented C API as PyObjC
+    exposes it (an out-parameter becomes an extra ``None`` argument and a
+    tuple return), and ``tests/test_observer.py`` pins that sequence against a
+    stand-in — which shows it is the sequence written, not that macOS answers
+    it. Every failure reads as "couldn't subscribe", and the caller goes on
+    polling. ``scripts/check_native.py --observe`` is the check that matters.
+    """
+
+    def __init__(self, AS: Any, CF: Any) -> None:
+        self.AS = AS
+        self.CF = CF
+        self._loop: Any = None
+
+    def prepare(self) -> None:
+        self._loop = self.CF.CFRunLoopGetCurrent()
+
+    def observe(self, pid: int, notification: str, fire: Callable[[], None]) -> _Observation | None:
+        def callback(_observer: Any, _element: Any, _notification: Any, _refcon: Any) -> None:
+            with contextlib.suppress(Exception):
+                fire()
+
+        try:
+            error, observer = self.AS.AXObserverCreate(pid, callback, None)
+            if error != 0 or observer is None:
+                return None
+            element = self.AS.AXUIElementCreateApplication(pid)
+            if self.AS.AXObserverAddNotification(observer, element, notification, None) != 0:
+                return None
+            source = self.AS.AXObserverGetRunLoopSource(observer)
+            self.CF.CFRunLoopAddSource(self.CF.CFRunLoopGetCurrent(), source, self.CF.kCFRunLoopDefaultMode)
+        except Exception:
+            return None
+        return _Observation(observer, element, notification, source, callback)
+
+    def unobserve(self, token: _Observation) -> None:
+        with contextlib.suppress(Exception):
+            self.AS.AXObserverRemoveNotification(token.observer, token.element, token.notification)
+        with contextlib.suppress(Exception):
+            self.CF.CFRunLoopRemoveSource(self.CF.CFRunLoopGetCurrent(), token.source,
+                                          self.CF.kCFRunLoopDefaultMode)
+
+    def spin(self, timeout_s: float) -> bool:
+        """Run this thread's loop for up to *timeout_s*, returning early after a
+        notification is delivered or when :meth:`interrupt` is called. False if
+        the loop had nothing to run (kCFRunLoopRunFinished)."""
+        result = self.CF.CFRunLoopRunInMode(self.CF.kCFRunLoopDefaultMode, timeout_s, True)
+        return result != 1
+
+    def interrupt(self) -> None:
+        """Make a ``spin`` in progress return now. Safe from any thread."""
+        if self._loop is not None:
+            self.CF.CFRunLoopStop(self._loop)
