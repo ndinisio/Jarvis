@@ -83,6 +83,11 @@ class NativeSurface:
         self._observe = observe
         self._observer: ObserverThread | None = None
         self._observer_lock = threading.Lock()
+        #: How many stale handles were re-found, and how many were refused
+        #: (nothing matched, or more than one did) — what a validation run
+        #: reads to tell "the reference survived" from "it was re-found".
+        self.relocations = 0
+        self.relocations_refused = 0
         self._backend = backend
         self._input = input
         self._clipboard = clipboard
@@ -614,7 +619,9 @@ class NativeSurface:
         if problem:
             found = self._relocate(cleaned)
             if found is None:
+                self.relocations_refused += 1
                 raise NativeError(problem)
+            self.relocations += 1
             element, attrs = found
         pid = self._handle_app.get(cleaned, 0)
         window = self.backend.attribute(element, "AXWindow")

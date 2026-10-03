@@ -412,11 +412,19 @@ async def test_a_stale_handle_is_refound_when_the_same_control_is_still_there(no
     parts["new_note"].alive = False
     assert await surface.press(handle) == "Pressed “New Note”."
     assert rebuilt.performed == ["AXPress"] and parts["new_note"].performed == []
+    assert (surface.relocations, surface.relocations_refused) == (1, 0)
     # The handle now means the rebuilt control: a second press, and a fresh
-    # look at the window, both agree.
+    # look at the window, both agree — and the second needs no re-find.
     await surface.press(handle)
     assert rebuilt.performed == ["AXPress", "AXPress"]
     assert await _handle(surface, "New Note") == handle
+    assert surface.relocations == 1
+
+
+async def test_a_handle_that_never_went_stale_counts_no_relocation(notes):
+    surface, _, _, parts = notes
+    await surface.press(await _handle(surface, "New Note"))
+    assert (surface.relocations, surface.relocations_refused) == (0, 0)
 
 
 async def test_a_recycled_row_is_refound_where_its_content_went(notes):
@@ -440,6 +448,7 @@ async def test_an_ambiguous_refind_is_refused_rather_than_guessed(notes):
     with pytest.raises(NativeError, match="now shows"):
         await surface.press(handle)
     assert backend.sets == []
+    assert (surface.relocations, surface.relocations_refused) == (0, 1)
 
 
 async def test_refinding_one_handle_does_not_vouch_for_the_others(notes):

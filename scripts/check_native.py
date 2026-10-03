@@ -16,7 +16,14 @@ Save sheet and a throwaway folder on the Desktop.
     .venv/bin/python scripts/check_native.py --app Notes
     .venv/bin/python scripts/check_native.py --act      # the TextEdit round trip
     .venv/bin/python scripts/check_native.py --controls # click, pop-up, drag, marks
+    .venv/bin/python scripts/check_native.py --stale    # re-finding a rebuilt control, for real
     .venv/bin/python scripts/check_native.py --observe  # do AXObserver notifications fire?
+
+--stale opens a small window of its own (scripts/ax_fixture.py) whose button can
+be rebuilt, duplicated, replaced by a look-alike, renamed or moved on command,
+and checks JARVIS re-finds the one it should and refuses every other case —
+against the window's own log of what was clicked. ⚠ means the check couldn't
+tell (macOS kept the old reference valid, so there was nothing to re-find).
 
 --observe is the check for the optional Accessibility observer thread
 (automation.native_observer): whether macOS posts the notifications JARVIS
@@ -38,6 +45,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -56,9 +64,12 @@ from jarvis.surfaces.native.marks import MIN_CONFIDENCE, image_size, recognize_t
 from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED  # noqa: E402
 
 
-def step(label: str, ok: bool, detail: str = "") -> bool:
-    print(f"  {'✓' if ok else '✗'} {label}" + (f" — {detail}" if detail else ""))
-    return ok
+def step(label: str, ok: bool, detail: str = "", *, inconclusive: bool = False) -> bool:
+    """Print one result. *inconclusive* (⚠) is for a check that couldn't tell:
+    it is not a pass, and the run isn't "all good" with one in it."""
+    mark = "⚠" if inconclusive else ("✓" if ok else "✗")
+    print(f"  {mark} {label}" + (f" — {detail}" if detail else ""))
+    return ok and not inconclusive
 
 
 async def capture_window(pid: int, number: int) -> Path:
@@ -386,6 +397,213 @@ async def controls(surface: NativeSurface) -> bool:
     return ok
 
 
+# --- --stale: re-finding a control that has gone stale, on a real Mac ----------------------------
+#
+# The surface re-finds a stale handle only when exactly one control of the same
+# kind, name and place is left (NativeSurface._relocate). Whether macOS hands back
+# a stale reference when an app rebuilds a control — and what the rebuilt one looks
+# like — is the open question, so these use a window (scripts/ax_fixture.py) that
+# rebuilds on command and keeps its own record of what was pressed. The failure that
+# matters is not "couldn't find Save"; it is "found the wrong Save and pressed it".
+
+FIXTURE = "JARVIS Fixture"
+
+
+class FixtureProcess:
+    """scripts/ax_fixture.py in a process of its own, driven through two files."""
+
+    def __init__(self, directory: Path):
+        self.directory = Path(directory)
+        self.log_path, self.commands_path = self.directory / "fixture.log", self.directory / "fixture.cmd"
+        self.commands_path.write_text("")
+        self.process: subprocess.Popen | None = None
+        self.pid = 0
+        self._sequence = 0
+
+    def lines(self) -> list[str]:
+        try:
+            return self.log_path.read_text().splitlines()
+        except OSError:
+            return []
+
+    def start(self, timeout_s: float = 15.0) -> int:
+        errors = (self.directory / "fixture.err").open("w")
+        self.process = subprocess.Popen(
+            [sys.executable, str(ROOT / "scripts" / "ax_fixture.py"), "--log", str(self.log_path),
+             "--commands", str(self.commands_path)], stdout=subprocess.DEVNULL, stderr=errors)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            ready = next((line for line in self.lines() if line.startswith("ready:")), None)
+            if ready:
+                self.pid = int(ready.split(":")[1])
+                return self.pid
+            if self.process.poll() is not None:
+                raise RuntimeError("the fixture exited: " + (self.directory / "fixture.err").read_text()[-300:])
+            time.sleep(0.1)
+        raise RuntimeError(f"the fixture window didn't appear within {timeout_s:.0f} s")
+
+    def send(self, command: str, timeout_s: float = 5.0) -> dict:
+        self._sequence += 1
+        with self.commands_path.open("a") as handle:
+            handle.write(f"{self._sequence} {command}\n")
+        ack, failed = f"ack:{self._sequence}:", f"error:{self._sequence}:"
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            for line in self.lines():
+                if line.startswith(ack):
+                    time.sleep(0.2)                   # a moment for Accessibility to see the change
+                    return json.loads(line[len(ack):])
+                if line.startswith(failed):
+                    raise RuntimeError(f"“{command}” failed: {line[len(failed):]}")
+            time.sleep(0.02)
+        raise RuntimeError(f"the fixture didn't answer “{command}” within {timeout_s:.0f} s")
+
+    def events(self) -> list[str]:
+        return [line for line in self.lines() if line.startswith(("click:", "toggle:"))]
+
+    def stop(self) -> None:
+        with contextlib.suppress(Exception):
+            self.send("quit", timeout_s=1.0)
+        if self.process is not None:
+            try:
+                self.process.wait(2)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+
+
+def parse_event(line: str) -> dict:
+    """``click:Save:save:born=3`` → what was pressed, and which build of it."""
+    kind, name, identifier, born = line.split(":", 3)
+    return {"kind": kind, "name": name, "identifier": identifier, "born": int(born.split("=")[1])}
+
+
+def describe_events(events: list[dict]) -> str:
+    return ", ".join(f"{e['kind']} “{e['name']}” ({e['identifier']}, build {e['born']})" for e in events) or "nothing"
+
+
+def judge(scenario: str, outcome: dict) -> tuple[str, str]:
+    """Whether a stale-handle scenario went as it must: ("ok" | "inconclusive" |
+    "fail", why). *outcome* has the error JARVIS raised (or None), the presses the
+    window itself recorded, how many handles were re-found or refused during the
+    press, and the builds of the control before and after the change."""
+    events, error = outcome["events"], outcome["error"]
+    builds = {event["born"] for event in events}
+    survived = bool(events) and builds == {outcome["original"]}
+    if scenario in {"rebuild", "twin"}:
+        if error:
+            return "fail", f"refused although exactly one Save is the same one: {error}"
+        if survived:
+            return "inconclusive", "macOS kept the old reference valid, so there was nothing to re-find"
+        if (len(events) == 1 and builds == {outcome["changed"]} and outcome["relocated"] == 1
+                and events[0]["identifier"] == "save"):
+            return "ok", "the stale handle was re-found and the rebuilt button pressed"
+        return "fail", f"pressed {describe_events(events)}; re-found {outcome['relocated']} handle(s)"
+    if not events:                                  # every other scenario must press nothing
+        if error and outcome["refused"] >= 1:
+            return "ok", f"refused, and nothing was pressed: {error}"
+        if error:
+            return "inconclusive", f"nothing pressed, but not by re-finding failing: {error}"
+        return "fail", "no error, and no press either"
+    if survived:
+        return "inconclusive", "macOS kept the old reference valid, so the press went to the original"
+    return "fail", (f"PRESSED {describe_events(events)} — a control it could not be sure was the one "
+                    "that was meant")
+
+
+async def fixture_handle(surface: NativeSurface) -> tuple[str | None, str]:
+    snap, _ = await surface.read(FIXTURE)
+    control = next((c for c in snap.controls if c.label == "Save"), None)
+    return (control.handle if control else None), names(snap.controls)
+
+
+async def stale_scenario(surface: NativeSurface, fixture: FixtureProcess, command: str) -> dict | str:
+    """Start from one Save, take a handle to it, make the app change it as
+    *command* says, press the handle. Returns what happened, or why it couldn't run."""
+    original = (await asyncio.to_thread(fixture.send, "restore"))["generation"]
+    handle, seen = await fixture_handle(surface)
+    if handle is None:
+        return "no Save button to take a handle to; the window showed: " + seen
+    before = len(fixture.events())
+    relocated, refused = surface.relocations, surface.relocations_refused
+    changed = (await asyncio.to_thread(fixture.send, command))["generation"]
+    error = None
+    try:
+        await surface.press(handle)
+    except NativeError as exc:
+        error = exc.message
+    await pause(0.5)
+    return {"original": original, "changed": changed, "error": error,
+            "events": [parse_event(line) for line in fixture.events()[before:]],
+            "relocated": surface.relocations - relocated, "refused": surface.relocations_refused - refused}
+
+
+STALE_SCENARIOS = (
+    ("rebuild", "rebuild", "a rebuilt button is re-found and pressed"),
+    ("twin", "twin", "two buttons told apart by identifier: the right one is pressed"),
+    ("duplicate", "duplicate", "two identical buttons: none is guessed"),
+    ("impostor", "impostor", "a look-alike of another kind is not pressed"),
+    ("rename", "rename Delete", "a button renamed in place is not pressed"),
+    ("move", "move", "the same name in another window is not pressed"),
+)
+
+
+async def background_press(surface: NativeSurface, fixture: FixtureProcess) -> bool:
+    """A press by Accessibility needs no focus: with Finder in front, pressing
+    the fixture's button does it without taking the front."""
+    backend = surface.backend
+    finder = backend.find_app("Finder")
+    if finder is None:
+        return step("a press works with another app in front", False, "no Finder to put in front")
+    await asyncio.to_thread(fixture.send, "restore")
+    handle, seen = await fixture_handle(surface)
+    if handle is None:
+        return step("a press works with another app in front", False, "the window showed: " + seen)
+    await asyncio.to_thread(backend.activate, finder[0])
+    await asyncio.to_thread(wait_front, backend, finder[0])
+    before = len(fixture.events())
+    await surface.press(handle)
+    await pause(0.5)
+    pressed = fixture.events()[before:]
+    still_behind = front_pid(backend) == finder[0]
+    return step("a press works with another app in front", bool(pressed) and still_behind,
+                f"the window recorded {len(pressed)} press(es); Finder "
+                + ("stayed in front" if still_behind else "was no longer in front — the press brought the app forward"),
+                inconclusive=bool(pressed) and not still_behind)
+
+
+async def stale_checks(surface: NativeSurface, fixture: FixtureProcess) -> bool:
+    ok = await guarded("press without focus", background_press(surface, fixture))
+    for scenario, command, label in STALE_SCENARIOS:
+        outcome = await guarded(label, stale_scenario(surface, fixture, command))
+        if outcome is False:
+            ok = False
+        elif isinstance(outcome, str):
+            ok &= step(label, False, outcome)
+        else:
+            status, why = judge(scenario, outcome)
+            ok &= step(label, status == "ok", why, inconclusive=status == "inconclusive")
+    return ok
+
+
+async def stale(surface: NativeSurface) -> bool:
+    print("Stale handles — a window that rebuilds its controls on command")
+    with tempfile.TemporaryDirectory(prefix="jarvis-fixture-") as directory:
+        fixture = FixtureProcess(Path(directory))
+        try:
+            pid = await asyncio.to_thread(fixture.start)
+        except RuntimeError as exc:
+            return step("the fixture window opened", False, str(exc))
+        backend = surface.backend
+        original = backend.find_app
+        # The window belongs to a Python process, whose name is no use for finding it.
+        backend.find_app = lambda name: (pid, FIXTURE) if name.strip().lower() == FIXTURE.lower() else original(name)
+        try:
+            return await stale_checks(surface, fixture)
+        finally:
+            backend.find_app = original
+            await asyncio.to_thread(fixture.stop)
+
+
 # --- --observe: the Accessibility observer thread ----------------------------------------------
 #
 # automation.native_observer lets a wait on an app (it coming to the front, a menu
@@ -576,6 +794,9 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--app", default="", help="an app to look at (default: the frontmost)")
     parser.add_argument("--act", action="store_true", help="also run the TextEdit round trip")
+    parser.add_argument("--stale", action="store_true",
+                        help="also check re-finding a rebuilt control, and refusing look-alikes, "
+                             "in a window of its own (scripts/ax_fixture.py)")
     parser.add_argument("--observe", action="store_true",
                         help="also measure the Accessibility observer thread (automation.native_observer)")
     parser.add_argument("--controls", action="store_true",
@@ -595,6 +816,8 @@ async def main() -> int:
         ok &= await act(surface)
     if args.controls:
         ok &= await controls(surface)
+    if args.stale:
+        ok &= await stale(surface)
     if args.observe:
         ok &= await observe(NativeSurface(observe=True), NativeSurface(observe=False))
     print("\nAll good." if ok else "\nSomething didn't work — the lines marked ✗ say what.")

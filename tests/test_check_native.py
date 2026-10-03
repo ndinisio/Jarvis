@@ -595,3 +595,330 @@ async def test_the_observe_flag_runs_the_observer_check_with_one_surface_each_wa
     monkeypatch.setattr("sys.argv", ["check_native.py", *flag])
     assert await cn.main() == 0
     assert made == [{}, *expected]
+
+
+# ---------------------------------------------------------------------------
+# --stale
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def fx():
+    spec = importlib.util.spec_from_file_location("ax_fixture_script", SCRIPT.parent / "ax_fixture.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeFixtureView:
+    """ax_fixture.Fixture's view, drawn on the fake accessibility tree. With
+    *keep_references*, a removed control stays valid — as if macOS handed back
+    the same reference after a rebuild."""
+
+    def __init__(self, backend: FakeBackend, log: list[str], *, keep_references: bool = False,
+                 process_name: str = "JARVIS Fixture", steals_focus: bool = False):
+        self.backend, self.log, self.keep, self.steals_focus = backend, log, keep_references, steals_focus
+        self.window = El("AXWindow", "JARVIS Fixture", actions=(), frame=(0, 0, 420, 300))
+        self.other = El("AXWindow", "JARVIS Fixture (other)", actions=(), frame=(500, 0, 420, 300))
+        self.app = El("AXApplication", "JARVIS Fixture", actions=(), AXWindows=[self.window],
+                      AXFocusedWindow=self.window, AXMenuBar=El("AXMenuBar", actions=()))
+        backend.apps[process_name] = (303, self.app)
+        self.saves: list[El] = []
+
+    def _control(self, title, identifier, kind, born, x):
+        control = El("AXButton" if kind == "button" else "AXCheckBox", title, frame=(x, 240, 90, 28),
+                     AXIdentifier=identifier)
+        verb = "click" if kind == "button" else "toggle"
+        def performed(_action):
+            self.log.append(f"{verb}:{control.attrs['AXTitle']}:{identifier}:born={born}")
+            if self.steals_focus:
+                self.backend.activate(303)
+
+        control.on_perform = performed
+        return control
+
+    def _drop(self, controls, window):
+        for control in controls:
+            if control in window.children:
+                window.children.remove(control)
+            control.alive = self.keep
+
+    def build(self, generation, *, saves, kind, title, distinct_ids=False):
+        self._drop(self.saves, self.window)
+        self.app.attrs["AXWindows"] = [self.window]
+        self.saves = [self._control(title, f"save{i + 1}" if distinct_ids and i else "save", kind, generation,
+                                    20 + 100 * i) for i in range(saves)]
+        self.window.children.extend(self.saves)
+
+    def rename(self, title):
+        for control in self.saves:
+            control.attrs["AXTitle"] = title
+
+    def move(self, generation):
+        self._drop(self.saves, self.window)
+        moved = self._control("Save", "save", "button", generation, 20)
+        self.other.children[:] = [moved]
+        self.app.attrs["AXWindows"] = [self.window, self.other]
+        self.saves = [moved]
+
+    def quit(self):
+        pass
+
+    def state(self):
+        return {"saves": len(self.saves)}
+
+
+class FakeFixtureProcess:
+    """check_native.FixtureProcess, in place of a second process: the real
+    command dispatcher, over the fake tree."""
+
+    def __init__(self, view: FakeFixtureView, log: list[str], fx):
+        self.fixture, self.log = fx.Fixture(view), log
+
+    def send(self, command, timeout_s=5.0):
+        name, _, argument = command.partition(" ")
+        return self.fixture.apply(name, argument)
+
+    def events(self):
+        return list(self.log)
+
+
+def _stale_setup(fx, *, keep_references=False, steals_focus=False):
+    backend = FakeBackend({"Finder": (202, El("AXApplication", "Finder", actions=(), AXWindows=[],
+                                              AXMenuBar=El("AXMenuBar", actions=()))),
+                           "Notes": (101, El("AXApplication", "Notes", actions=(), AXWindows=[],
+                                             AXMenuBar=El("AXMenuBar", actions=()))), }, front="Notes")
+    log: list[str] = []
+    view = FakeFixtureView(backend, log, keep_references=keep_references, steals_focus=steals_focus)
+    surface = NativeSurface(backend=backend, input=RecordingInput(), sleep=lambda _s: None)
+    return surface, FakeFixtureProcess(view, log, fx), view, log
+
+
+async def test_every_stale_scenario_goes_as_it_must_on_a_surface_that_behaves(cn, fx, capsys):
+    surface, fixture, _, log = _stale_setup(fx)
+    assert await cn.stale_checks(surface, fixture) is True
+    out = capsys.readouterr().out
+    assert "✗" not in out and "⚠" not in out
+    for label in ("a press works with another app in front", "a rebuilt button is re-found and pressed",
+                  "two buttons told apart by identifier: the right one is pressed",
+                  "two identical buttons: none is guessed", "a look-alike of another kind is not pressed",
+                  "a button renamed in place is not pressed",
+                  "the same name in another window is not pressed"):
+        assert f"✓ {label}" in out
+    assert (surface.relocations, surface.relocations_refused) == (2, 4)
+    assert len(log) == 3, "the background press, the re-found rebuild and the identifier-matched twin — nothing else"
+
+
+async def test_a_surface_that_guesses_between_identical_buttons_is_caught_pressing_the_wrong_one(cn, fx, capsys):
+    from jarvis.surfaces.native import ax as axmod
+
+    surface, fixture, view, log = _stale_setup(fx)
+    original = surface._relocate
+
+    def guesses(handle):
+        # A "relocate" that takes the first Save when there are several.
+        saves = [c for c in view.window.children if c.attrs["AXTitle"] == "Save"]
+        if len(saves) > 1:
+            return saves[0], surface.backend.attributes(saves[0], axmod.ATTRIBUTES)
+        return original(handle)
+
+    surface._relocate = guesses
+    assert await cn.stale_checks(surface, fixture) is False
+    out = capsys.readouterr().out
+    assert "✗ two identical buttons: none is guessed — PRESSED click “Save” (save, build" in out
+    assert any(line.startswith("click:Save:save:") for line in log)
+
+
+async def test_references_macos_keeps_valid_make_the_rebuild_checks_inconclusive_not_passes(cn, fx, capsys):
+    surface, fixture, _, _ = _stale_setup(fx, keep_references=True)
+    assert await cn.stale_checks(surface, fixture) is False
+    out = capsys.readouterr().out
+    assert "⚠ a rebuilt button is re-found and pressed — macOS kept the old reference valid" in out
+    assert "⚠ two identical buttons: none is guessed" in out
+    assert "✗ a rebuilt button" not in out
+
+
+async def test_a_press_that_brings_the_app_forward_is_not_reported_as_working_in_the_background(cn, fx, capsys):
+    surface, fixture, _, _ = _stale_setup(fx, steals_focus=True)
+    assert await cn.background_press(surface, fixture) is False
+    assert "⚠ a press works with another app in front — the window recorded 1 press(es); Finder was no longer in front" \
+        in capsys.readouterr().out
+
+
+async def test_a_twin_pressed_by_the_wrong_identifier_is_a_failure(cn):
+    outcome = dict(error=None, original=1, changed=2, relocated=1, refused=0,
+                   events=[{"kind": "click", "name": "Save", "identifier": "save2", "born": 2}])
+    assert cn.judge("twin", outcome)[0] == "fail"
+    outcome["events"][0]["identifier"] = "save"
+    assert cn.judge("twin", outcome)[0] == "ok"
+
+
+async def test_a_page_with_no_save_button_says_what_it_did_show(cn, fx, capsys):
+    surface, fixture, view, _ = _stale_setup(fx)
+    original = fixture.send
+
+    def send(command, timeout_s=5.0):
+        state = original(command)
+        if command == "restore":
+            view.window.children.clear()
+        return state
+
+    fixture.send = send
+    assert await cn.stale_checks(surface, fixture) is False
+    assert "no Save button to take a handle to; the window showed:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("scenario, outcome, expected", [
+    ("rebuild", dict(error=None, events=[("click", 2)], original=1, changed=2, relocated=1, refused=0), "ok"),
+    ("rebuild", dict(error=None, events=[("click", 1)], original=1, changed=2, relocated=0, refused=0), "inconclusive"),
+    ("rebuild", dict(error="gone", events=[], original=1, changed=2, relocated=0, refused=1), "fail"),
+    ("rebuild", dict(error=None, events=[("click", 2)], original=1, changed=2, relocated=0, refused=0), "fail"),
+    ("twin", dict(error=None, events=[("click", 2)], original=1, changed=2, relocated=1, refused=0), "ok"),
+    ("duplicate", dict(error="gone", events=[], original=1, changed=2, relocated=0, refused=1), "ok"),
+    ("duplicate", dict(error="other", events=[], original=1, changed=2, relocated=0, refused=0), "inconclusive"),
+    ("duplicate", dict(error=None, events=[], original=1, changed=2, relocated=0, refused=0), "fail"),
+    ("duplicate", dict(error=None, events=[("click", 2)], original=1, changed=2, relocated=0, refused=0), "fail"),
+    ("duplicate", dict(error=None, events=[("click", 1)], original=1, changed=2, relocated=0, refused=0), "inconclusive"),
+    ("impostor", dict(error=None, events=[("toggle", 2)], original=1, changed=2, relocated=0, refused=0), "fail"),
+])
+async def test_the_verdict_for_each_outcome(cn, scenario, outcome, expected):
+    outcome = {**outcome, "events": [{"kind": kind, "name": "Save", "identifier": "save", "born": born}
+                                     for kind, born in outcome["events"]]}
+    assert cn.judge(scenario, outcome)[0] == expected
+
+
+async def test_events_are_read_back_from_the_fixtures_own_log(cn):
+    assert cn.parse_event("click:Save:save:born=3") == {"kind": "click", "name": "Save",
+                                                         "identifier": "save", "born": 3}
+    assert cn.parse_event("toggle:Save:save2:born=12")["kind"] == "toggle"
+
+
+# --- the client's file protocol, against the real command handling ----------------------------
+class _Child:
+    def __init__(self, exits_with=None):
+        self.exits_with = exits_with
+        self.terminated = False
+
+    def poll(self):
+        return self.exits_with
+
+    def wait(self, timeout=None):
+        return 0
+
+    def terminate(self):
+        self.terminated = True
+
+
+async def test_the_client_starts_the_window_sends_commands_and_reads_the_presses(cn, fx, tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(cn.subprocess, "Popen", lambda *a, **k: _Child())
+    process = cn.FixtureProcess(tmp_path)
+    log = fx.Log(process.log_path)
+    log("ready:4242")
+
+    class Plain:                                   # a view that only needs to answer the dispatcher
+        def build(self, generation, **kw): pass
+        def rename(self, title): pass
+        def move(self, generation): pass
+        def quit(self): pass
+        def state(self): return {"saves": 1}
+
+    commands = fx.CommandFile(process.commands_path, fx.Fixture(Plain()), log)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            commands.poll()
+            stop.wait(0.01)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        assert process.start() == 4242
+        assert process.send("rebuild") == {"generation": 1, "saves": 1}
+        assert process.send("rename Delete") == {"generation": 2, "saves": 1}
+        log("click:Save:save:born=1")
+        log("something else")
+        assert process.events() == ["click:Save:save:born=1"]
+        process.stop()
+    finally:
+        stop.set()
+        thread.join()
+
+
+async def test_a_fixture_that_dies_on_start_says_why(cn, tmp_path, monkeypatch):
+    def dies(*args, **kwargs):
+        kwargs["stderr"].write("ModuleNotFoundError: No module named 'AppKit'")
+        kwargs["stderr"].flush()
+        return _Child(exits_with=1)
+
+    monkeypatch.setattr(cn.subprocess, "Popen", dies)
+    with pytest.raises(RuntimeError, match="exited.*AppKit"):
+        cn.FixtureProcess(tmp_path).start(timeout_s=2.0)
+
+
+async def test_a_command_nobody_answers_is_an_error_not_a_hang(cn, tmp_path):
+    process = cn.FixtureProcess(tmp_path)
+    with pytest.raises(RuntimeError, match="didn't answer"):
+        process.send("rebuild", timeout_s=0.1)
+
+
+async def test_a_command_the_window_reports_failing_is_an_error(cn, fx, tmp_path):
+    process = cn.FixtureProcess(tmp_path)
+    fx.Log(process.log_path)("error:1:RuntimeError: no such control")
+    with pytest.raises(RuntimeError, match="failed: RuntimeError: no such control"):
+        process.send("rename X", timeout_s=0.5)
+
+
+async def test_the_fixture_is_found_by_its_process_id_when_its_name_is_just_python(cn, fx, monkeypatch, capsys):
+    backend = FakeBackend({"Finder": (202, El("AXApplication", "Finder", actions=(), AXWindows=[],
+                                              AXMenuBar=El("AXMenuBar", actions=())))}, front="Finder")
+    log: list[str] = []
+    view = FakeFixtureView(backend, log, process_name="Python")       # not "JARVIS Fixture"
+    surface = NativeSurface(backend=backend, input=RecordingInput(), sleep=lambda _s: None)
+    process = FakeFixtureProcess(view, log, fx)
+    process.start = lambda: 303
+    process.stop = lambda: None
+    monkeypatch.setattr(cn, "FixtureProcess", lambda directory: process)
+    original = backend.find_app
+    assert backend.find_app("JARVIS Fixture") is None
+    assert await cn.stale(surface) is True
+    assert "✗" not in capsys.readouterr().out
+    assert backend.find_app == original, "the lookup is put back"
+    assert backend.find_app("JARVIS Fixture") is None
+
+
+async def test_a_window_that_cannot_be_opened_fails_the_stale_check_with_the_reason(cn, monkeypatch, capsys):
+    def start(self, timeout_s=15.0):
+        raise RuntimeError("the fixture exited: No module named 'AppKit'")
+
+    monkeypatch.setattr(cn.FixtureProcess, "start", start)
+    surface = surface_for({"Finder": (202, El("AXApplication", "Finder", actions=(), AXWindows=[],
+                                              AXMenuBar=El("AXMenuBar", actions=())))}, "Finder")
+    assert await cn.stale(surface) is False
+    assert "✗ the fixture window opened — the fixture exited: No module named 'AppKit'" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flag, expected", [([], []), (["--stale"], ["stale"])])
+async def test_the_stale_flag_runs_the_stale_checks_and_only_then(cn, monkeypatch, flag, expected):
+    ran = []
+
+    async def look(surface, app):
+        return True
+
+    async def stale(surface):
+        ran.append("stale")
+        return True
+
+    monkeypatch.setattr(cn, "NativeSurface", lambda **kwargs: _Stub(**kwargs))
+    monkeypatch.setattr(cn, "look", look)
+    monkeypatch.setattr(cn, "stale", stale)
+    monkeypatch.setattr("sys.argv", ["check_native.py", *flag])
+    assert await cn.main() == 0
+    assert ran == expected
+
+
+async def test_an_inconclusive_step_is_not_a_pass(cn, capsys):
+    assert cn.step("a thing", True, "it could not tell", inconclusive=True) is False
+    assert cn.step("another", True) is True
+    out = capsys.readouterr().out
+    assert "⚠ a thing" in out and "✓ another" in out

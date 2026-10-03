@@ -1435,8 +1435,11 @@ and a screenshot's text for real, `--act` runs a TextEdit round trip
 (type, bold from the Format menu, close without saving), and `--controls`
 goes through the rest — pressing Calculator's buttons, choosing from the Save
 sheet's pop-up, dragging a file onto a folder in Finder, and clicking what a
-screenshot shows (it cleans up after itself); `--observe` measures the optional
-observer below. None of these checks has yet been run on a real Mac. Without
+screenshot shows (it cleans up after itself); `--stale` opens a small window of
+its own (`scripts/ax_fixture.py`) that rebuilds, duplicates, renames or moves
+its button on command, and checks a stale handle is re-found only when it is
+certain which control was meant — against the window's own log of what was
+pressed; `--observe` measures the optional observer below. None of these checks has yet been run on a real Mac. Without
 the `native` extra the app tools fall back to the v2 AppleScript paths.
 
 **Optional: wake Mac-app waits on the app's own notifications
