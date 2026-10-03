@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from jarvis.tasks.manager import TaskManager, TaskStatus
 
@@ -177,4 +178,213 @@ async def test_startup_reports_and_clears_a_task_orphaned_by_a_previous_crash(ap
     notices = [e for e in app.bus.history if e.type == EventType.NOTICE]
     assert any("Investigate warranty options" in e.payload.get("message", "") for e in notices)
     assert not app.memory.orphaned_tasks()
+    await app.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# durable step checkpoints (reconcile, never replay)
+# ---------------------------------------------------------------------------
+# Simulated: these exercise JARVIS's own SQLite and task bookkeeping. A real
+# crash and relaunch of the app on a Mac is not simulated here.
+async def _running_task(manager, body):
+    """Spawn a task, run *body(task)* inside it, and hold it open at the end."""
+    release = asyncio.Event()
+    reached = asyncio.Event()
+
+    async def work(task):
+        body(task)
+        reached.set()
+        await release.wait()
+        return "done"
+
+    task = manager.spawn("test", "Reorganise the desktop", work)
+    await reached.wait()
+    await manager.flush()
+    return task, release
+
+
+async def test_each_step_of_a_running_task_is_checkpointed_as_it_happens(app):
+    manager = app.tasks
+
+    def body(task):
+        manager.step(task, "Opened Finder.", tool="open_application", ok=True)
+        manager.step(task, "Pressed “Save”.", tool="click_control", ok=True,
+                     checklist=[{"text": "file saved", "done": True},
+                                {"text": "folder tidy", "done": False}])
+        manager.step(task, "Carrying on.")
+
+    task, release = await _running_task(manager, body)
+    rows = app.memory.task_steps(task.id)
+    assert [r["seq"] for r in rows] == [1, 2, 3]
+    assert (rows[0]["tool"], rows[0]["ok"], rows[0]["summary"]) == ("open_application", 1, "Opened Finder.")
+    assert json.loads(rows[1]["args_redacted"]) == {"proven": ["file saved"]}
+    assert (rows[2]["tool"], rows[2]["ok"]) == ("", None), "a step with no tool result has no verdict"
+    release.set()
+
+
+async def test_step_arguments_go_through_the_same_redaction_as_the_audit_log(app):
+    manager = app.tasks
+
+    def body(task):
+        manager.step(task, "Signed in.", tool="fill_page_field", ok=True,
+                     password="hunter2", token="abc123", phase="login")
+
+    task, release = await _running_task(manager, body)
+    stored = app.memory.task_steps(task.id)[0]["args_redacted"]
+    assert "hunter2" not in stored and "abc123" not in stored
+    assert json.loads(stored) == {"password": "••••", "token": "••••", "phase": "login"}
+    release.set()
+
+
+async def test_the_step_record_is_a_ring_not_an_ever_growing_log(app, monkeypatch):
+    from jarvis.memory import store
+
+    monkeypatch.setattr(store, "TASK_STEPS_KEPT", 5)
+    manager = app.tasks
+
+    def body(task):
+        for i in range(12):
+            manager.step(task, f"step {i}", tool="press_key", ok=True)
+
+    task, release = await _running_task(manager, body)
+    assert [r["seq"] for r in app.memory.task_steps(task.id)] == [8, 9, 10, 11, 12]
+    release.set()
+
+
+async def test_a_task_that_finishes_leaves_no_checkpoints_behind(app):
+    manager = app.tasks
+
+    def body(task):
+        manager.step(task, "Opened Finder.", tool="open_application", ok=True)
+
+    task, release = await _running_task(manager, body)
+    assert app.memory.task_steps(task.id)
+    release.set()
+    await task._runner
+    await manager.flush()
+    assert app.memory.task_steps(task.id) == []
+    assert not any(row["id"] == task.id for row in app.memory.orphaned_tasks())
+
+
+async def test_a_task_that_fails_leaves_no_checkpoints_behind_either(app):
+    manager = app.tasks
+
+    async def work(task):
+        manager.step(task, "Opened Finder.", tool="open_application", ok=True)
+        raise RuntimeError("boom")
+
+    task = manager.spawn("test", "Doomed", work)
+    await task._runner
+    await manager.flush()
+    assert task.status == TaskStatus.FAILED
+    assert app.memory.task_steps(task.id) == []
+
+
+async def test_steps_outside_a_running_task_are_not_checkpointed(app):
+    """The step rows belong to the "running" row startup looks for: a task
+    not yet running (or already finished) has neither."""
+    manager = app.tasks
+    task = manager.create("test", "Not started")
+    manager.step(task, "Queued.", tool="press_key", ok=True)
+    await manager.flush()
+    assert app.memory.task_steps(task.id) == []
+    assert task.step_count == 1, "it is still counted for the UI"
+
+
+async def test_a_failed_checkpoint_write_never_takes_the_task_down(app, monkeypatch, caplog):
+    """The task carries on — and the lost checkpoint is logged, not silently
+    dropped, since a gap in the record is worth knowing about."""
+    import logging
+
+    async def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(app.memory, "log_task_step", broken)
+    manager = app.tasks
+
+    async def work(task):
+        manager.step(task, "Opened Finder.", tool="open_application", ok=True)
+        return "still fine"
+
+    with caplog.at_level(logging.WARNING, logger="jarvis.tasks"):
+        task = manager.spawn("test", "Resilient", work)
+        await task._runner
+        await manager.flush()
+    assert task.status == TaskStatus.SUCCEEDED and task.result == "still fine"
+    assert any("task memory write failed" in r.getMessage() and "disk full" in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_checkpoints_survive_a_restart_of_the_store(tmp_path):
+    """The SQLite layer: reopening the database file (what a relaunch does)
+    still shows the task as running and its steps."""
+    from jarvis.memory.store import MemoryStore
+
+    path = tmp_path / "jarvis.db"
+    first = MemoryStore(path)
+    await first.log_task("t1", "automation", "Tidy the desktop", "running", 1.0, None, "")
+    await first.log_task_step("t1", 1, 2.0, "open_application", "{}", True, "Opened Finder.")
+    await first.log_task_step("t1", 2, 3.0, "click_control", "{}", False, "Couldn't press Save.")
+    first._conn.close()
+
+    second = MemoryStore(path)
+    assert [r["id"] for r in second.orphaned_tasks()] == ["t1"]
+    assert [(r["seq"], r["ok"]) for r in second.task_steps("t1")] == [(1, 1), (2, 0)]
+
+
+def test_the_account_of_a_stranded_task_says_what_the_record_shows_and_no_more():
+    from jarvis.tasks.reconcile import describe_interrupted
+
+    steps = [
+        {"seq": 1, "tool": "open_application", "ok": 1, "summary": "Opened Finder.", "args_redacted": "{}"},
+        {"seq": 2, "tool": "click_control", "ok": 1, "summary": "Pressed “Save”.",
+         "args_redacted": json.dumps({"proven": ["file saved"]})},
+        {"seq": 3, "tool": "click_control", "ok": 0, "summary": "Couldn't press Done.",
+         "args_redacted": "{}"},
+    ]
+    text = describe_interrupted(steps)
+    assert "3 steps recorded" in text
+    assert "last action to report success was “Pressed “Save”.”" in text
+    assert "last thing recorded was “Couldn't press Done.” (it failed)" in text
+    assert "its checklist had confirmed: file saved" in text
+    assert "may or may not have taken effect" in text
+    assert "verified" not in text, "a tool's own report is not called verification"
+
+    only = describe_interrupted(steps[:1])
+    assert "1 step recorded" in only and "last thing recorded" not in only
+    assert "confirmed" not in only
+    assert "no telling" in describe_interrupted([])
+
+
+async def test_startup_reconciles_a_stranded_task_without_replaying_anything(app):
+    """Reconcile, don't replay: the report says how far the record shows it
+    got, keeps that on the task's own record, drops the checkpoints — and
+    does not call a tool or start a task."""
+    import time
+
+    from jarvis.core.events import EventType
+
+    await app.memory.log_task("crashed-2", "automation", "Tidy the desktop", "running",
+                              time.time(), None, "")
+    await app.memory.log_task_step("crashed-2", 1, time.time(), "open_application", "{}", True,
+                                   "Opened Finder.")
+    await app.memory.log_task_step("crashed-2", 2, time.time(), "click_control",
+                                   json.dumps({"proven": ["downloads folder open"]}), True,
+                                   "Pressed “Downloads”.")
+
+    await app.startup()
+    await asyncio.sleep(0.2)
+
+    notice = next(e.payload["message"] for e in app.bus.history if e.type == EventType.NOTICE
+                  and "Tidy the desktop" in e.payload.get("message", ""))
+    assert "2 steps recorded" in notice and "Pressed “Downloads”." in notice
+    assert "downloads folder open" in notice and "check before running it again" in notice
+
+    row = next(r for r in app.memory.task_history() if r["id"] == "crashed-2")
+    assert row["status"] == "interrupted" and "2 steps recorded" in row["result"]
+    assert app.memory.task_steps("crashed-2") == []
+    assert not app.memory.orphaned_tasks()
+
+    assert not [e for e in app.bus.history if e.type == EventType.TOOL_CALL], "nothing was replayed"
+    assert app.tasks.all() == [], "no task was started to 'resume' it"
     await app.shutdown()

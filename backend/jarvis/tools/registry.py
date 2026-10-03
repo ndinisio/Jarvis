@@ -335,6 +335,11 @@ def _redact(args: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: The same redaction, for anything else that writes a tool's arguments to
+#: disk (tasks/manager.py's step checkpoints) — one path for secrets, not two.
+redact_arguments = _redact
+
+
 def _confirmation_text(spec, args: dict[str, Any], target: dict[str, Any] | None = None) -> str:
     if spec.confirmation_template:
         # The user is asked about the element that will really be clicked,

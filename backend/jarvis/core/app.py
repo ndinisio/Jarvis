@@ -24,6 +24,7 @@ from ..security.permissions import PermissionBroker
 from ..surfaces.native import NativeSurface
 from ..surfaces.web.hub import BrowserHub
 from ..tasks.manager import TaskManager
+from ..tasks.reconcile import describe_interrupted
 from ..tasks.views import TaskViews
 from ..tools.files.sandbox import FileSandbox
 from ..tools.macos.apps import AppCatalog
@@ -143,23 +144,30 @@ class JarvisApp:
         a normal completion always updates it to a real terminal status
         (see tasks/manager.py, MemoryStore.orphaned_tasks). There is no safe
         way to resume mid-task (the conversation, browser and app state that
-        run was using are all gone with the old process), so this only
-        surfaces it rather than losing it silently, and closes the record
-        out so it doesn't nag again next time."""
+        run was using are all gone with the old process) and no replaying it
+        either, so this reports what the step checkpoints show about how far
+        it got (tasks/reconcile.py) and leaves the decision to the user. The
+        same account is kept on the task's record, the checkpoints are
+        dropped, and the record is closed out so it doesn't nag again."""
         try:
             orphaned = self.memory.orphaned_tasks()
             if not orphaned:
                 return
+            accounts = {row["id"]: describe_interrupted(self.memory.task_steps(row["id"]))
+                        for row in orphaned}
             titles = ", ".join(f"“{row['title']}”" for row in orphaned[:3])
             more = len(orphaned) - 3
+            detail = " ".join(f"“{row['title']}”: {accounts[row['id']]}" for row in orphaned[:3])
             self.bus.publish(
                 EventType.NOTICE,
                 level="warning",
                 message=f"{titles}{f' (+{more} more)' if more > 0 else ''} "
                         f"{'was' if len(orphaned) == 1 else 'were'} still running when JARVIS last "
-                        "stopped and never finished — it may be worth trying again.",
+                        f"stopped and never finished. {detail}",
             )
-            await self.memory.mark_interrupted([row["id"] for row in orphaned])
+            ids = [row["id"] for row in orphaned]
+            await self.memory.mark_interrupted(ids, {i: f"Interrupted. {a}" for i, a in accounts.items()})
+            await self.memory.discard_task_steps(ids)
         except Exception as exc:
             log.debug("orphaned-task check skipped: %s", exc)
 

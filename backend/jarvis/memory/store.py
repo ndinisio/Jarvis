@@ -27,6 +27,11 @@ from ..core.logging import get_logger
 
 log = get_logger("jarvis.memory")
 
+#: Step rows kept per running task. An errand that runs for hours would
+#: otherwise write a row a second forever; this is a ring — the newest
+#: steps, which are the ones a crash leaves worth reading.
+TASK_STEPS_KEPT = 200
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS preferences (
     key TEXT PRIMARY KEY,
@@ -58,6 +63,16 @@ CREATE TABLE IF NOT EXISTS task_log (
     started REAL,
     finished REAL,
     result TEXT
+);
+CREATE TABLE IF NOT EXISTS task_steps (
+    task_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    tool TEXT DEFAULT '',
+    args_redacted TEXT DEFAULT '{}',
+    ok INTEGER,
+    summary TEXT DEFAULT '',
+    PRIMARY KEY (task_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(created);
@@ -276,18 +291,64 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    async def mark_interrupted(self, task_ids: list[str]) -> None:
+    async def mark_interrupted(self, task_ids: list[str],
+                               results: dict[str, str] | None = None) -> None:
         """Close out orphaned_tasks()'s rows once they've been reported, so
         the same stale entry doesn't get surfaced again on every future
-        startup."""
+        startup. *results* records, per task, what was known about how far
+        it got (see tasks/reconcile.py) — the one durable trace of it once
+        the step rows are discarded."""
+        if not task_ids:
+            return
+        await self._run(self._mark_interrupted, list(task_ids), results or {})
+
+    def _mark_interrupted(self, task_ids: list[str], results: dict[str, str]) -> None:
+        for task_id in task_ids:
+            note = results.get(task_id)
+            if note is None:
+                self._conn.execute("UPDATE task_log SET status='interrupted' WHERE id=?", (task_id,))
+            else:
+                self._conn.execute("UPDATE task_log SET status='interrupted', result=? WHERE id=?",
+                                   (note[:4000], task_id))
+        self._conn.commit()
+
+    # -- task steps --------------------------------------------------------
+    async def log_task_step(self, task_id: str, seq: int, ts: float, tool: str,
+                            args_redacted: str, ok: bool | None, summary: str) -> None:
+        """One step of a running task, written as it happens so a crash
+        leaves a record of how far the task got — a record to reconcile
+        against the real machine afterwards, never one to replay (see
+        tasks/reconcile.py). Append-only; the oldest rows beyond
+        TASK_STEPS_KEPT go."""
+        await self._run(self._write_task_step, task_id, seq, ts, tool, args_redacted,
+                        None if ok is None else int(bool(ok)), summary)
+
+    def _write_task_step(self, task_id: str, seq: int, ts: float, tool: str, args_redacted: str,
+                         ok: int | None, summary: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO task_steps(task_id, seq, ts, tool, args_redacted, ok, summary) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (task_id, seq, ts, tool, args_redacted, ok, summary),
+        )
+        self._conn.execute("DELETE FROM task_steps WHERE task_id=? AND seq<=?",
+                           (task_id, seq - TASK_STEPS_KEPT))
+        self._conn.commit()
+
+    def task_steps(self, task_id: str) -> list[dict[str, Any]]:
+        """The recorded steps of *task_id*, oldest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM task_steps WHERE task_id=? ORDER BY seq", (task_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def discard_task_steps(self, task_ids: list[str]) -> None:
+        """A task that finished (one way or another) has nothing left to
+        reconcile, and its step rows would only pile up."""
         if not task_ids:
             return
         placeholders = ",".join("?" * len(task_ids))
-        await self._run(
-            self._execute,
-            f"UPDATE task_log SET status='interrupted' WHERE id IN ({placeholders})",
-            tuple(task_ids),
-        )
+        await self._run(self._execute, f"DELETE FROM task_steps WHERE task_id IN ({placeholders})",
+                        tuple(task_ids))
 
     # -- introspection -----------------------------------------------------
     def snapshot(self) -> dict[str, Any]:

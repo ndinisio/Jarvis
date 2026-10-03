@@ -9,6 +9,7 @@ same token the tools poll.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -17,8 +18,19 @@ from typing import Any
 
 from ..core.events import EventBus, EventType
 from ..core.logging import get_logger
+from ..tools.registry import redact_arguments
 
 log = get_logger("jarvis.tasks")
+
+#: Longest step summary written to disk — the audit log's own limit.
+STEP_SUMMARY_CHARS = 240
+#: Checklist items a step's record names as proven, and how long each is kept.
+STEP_PROVEN_ITEMS = 20
+STEP_PROVEN_CHARS = 120
+#: What a step entry holds that has a column of its own (or is handled
+#: separately); the rest is the "arguments" column.
+_STEP_COLUMNS = frozenset({"message", "ts", "tool", "ok", "checklist"})
+_STEP_ARGS_CHARS = 2000
 
 
 class TaskStatus:
@@ -55,6 +67,9 @@ class Task:
     resume_event: asyncio.Event = field(default_factory=_running)
     #: "" when running, else why it's paused: "paused" or "taken over".
     paused: str = ""
+    #: Steps reported so far — the sequence number of the next durable
+    #: checkpoint, which ``steps`` can't give (the UI view is trimmed).
+    step_count: int = 0
     _runner: asyncio.Task | None = field(default=None, repr=False)
 
     @property
@@ -89,6 +104,9 @@ class TaskManager:
         self._memory = memory
         self._tasks: dict[str, Task] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        #: Memory writes in flight. Held so none is garbage-collected
+        #: half-done, and so a clean shutdown can wait for them.
+        self._writes: set[asyncio.Task] = set()
 
     # -- lifecycle ---------------------------------------------------------
     def create(self, kind: str, title: str) -> Task:
@@ -117,7 +135,7 @@ class TaskManager:
                 # that lets the next startup notice a task that never got
                 # the chance to log its own finish (see
                 # MemoryStore.orphaned_tasks).
-                asyncio.create_task(
+                self._write(
                     self._memory.log_task(task.id, task.kind, task.title, TaskStatus.RUNNING,
                                           task.started, None, "")
                 )
@@ -139,21 +157,74 @@ class TaskManager:
         task.progress = 1.0 if status == TaskStatus.SUCCEEDED else task.progress
         self._bus.publish(EventType.TASK_FINISHED, **task.as_dict())
         if self._memory is not None:
-            asyncio.create_task(
+            self._write(
                 self._memory.log_task(
                     task.id, task.kind, task.title, status, task.started, task.finished,
                     str(_summarise(task.result) or task.error or ""),
                 )
             )
+            # Nothing left to reconcile for a task that finished one way or
+            # another: its step checkpoints only matter if a crash strands it.
+            self._write(self._memory.discard_task_steps([task.id]))
 
     # -- progress ----------------------------------------------------------
     def step(self, task: Task, message: str, progress: float | None = None,
              **meta: Any) -> None:
         entry = {"message": message, "ts": time.time(), **meta}
         task.steps.append(entry)
+        task.step_count += 1
         if progress is not None:
             task.progress = max(0.0, min(1.0, progress))
         self._publish_update(task, step=entry)
+        self._checkpoint(task, entry)
+
+    def _checkpoint(self, task: Task, entry: dict[str, Any]) -> None:
+        """Write a step through to memory as it happens, so a crash leaves a
+        record of how far the task got — to be reconciled against the real
+        machine at the next start (tasks/reconcile.py), never replayed.
+
+        Only while the task is running: that is when the "running" row that
+        lets startup find a stranded task exists (see _run). The arguments
+        go through the same redaction as the audit log's."""
+        if self._memory is None or task.status != TaskStatus.RUNNING:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return                      # not on the event loop: nowhere to write from
+        meta = {k: v for k, v in entry.items() if k not in _STEP_COLUMNS}
+        checklist = entry.get("checklist")
+        proven = [str(item.get("text", ""))[:STEP_PROVEN_CHARS] for item in checklist or []
+                  if isinstance(item, dict) and item.get("done")]
+        if proven:
+            meta["proven"] = proven[:STEP_PROVEN_ITEMS]
+        args = json.dumps(redact_arguments(meta), default=str)
+        if len(args) > _STEP_ARGS_CHARS:
+            args = json.dumps({"truncated": True})
+        ok = entry.get("ok")
+        self._write(self._memory.log_task_step(
+            task.id, task.step_count, entry["ts"], str(entry.get("tool") or ""), args,
+            None if ok is None else bool(ok), str(entry["message"])[:STEP_SUMMARY_CHARS]))
+
+    def _write(self, coro: Awaitable[Any]) -> None:
+        """Run a memory write in the background without letting a failed
+        write take a task down — and without losing track of it."""
+        write = asyncio.create_task(self._guarded(coro))
+        self._writes.add(write)
+        write.add_done_callback(self._writes.discard)
+
+    async def flush(self) -> None:
+        """Wait for the memory writes in flight — a clean shutdown's last
+        chance to leave the record complete."""
+        while self._writes:
+            await asyncio.gather(*list(self._writes), return_exceptions=True)
+
+    @staticmethod
+    async def _guarded(coro: Awaitable[Any]) -> None:
+        try:
+            await coro
+        except Exception as exc:
+            log.warning("task memory write failed: %s", exc)
 
     def _publish_update(self, task: Task, step: dict | None = None) -> None:
         payload = task.as_dict()
@@ -237,6 +308,7 @@ class TaskManager:
             runner.cancel()
         if runners:
             await asyncio.gather(*runners, return_exceptions=True)
+        await self.flush()
 
 
 def _force_cancel(task: Task) -> None:
