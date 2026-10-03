@@ -18,6 +18,7 @@ import asyncio
 import platform
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,25 @@ PERMISSION_HINT = (
 )
 #: Handles kept before the registry starts again from ax1.
 MAX_HANDLES = 4000
+#: Controls looked at when re-finding a stale handle — the same ceiling
+#: ``find()`` uses for a whole-window search.
+RELOCATE_MAX_LISTED = 1000
+
+
+@dataclass(frozen=True)
+class _Locator:
+    """How a handle was first found, in terms that outlive the element
+    itself: which app and window, and what the control was (role and
+    name). When the element goes stale, this is what a plain re-search of
+    the same window looks for."""
+
+    app: str
+    pid: int
+    window: str
+    ax_role: str
+    subrole: str
+    label: str
+    identifier: str
 
 
 class NativeError(Exception):
@@ -63,6 +83,9 @@ class NativeSurface:
         #: stays valid, since it's the same element, but what it now shows
         #: has silently changed since the model read it. See _resolve().
         self._fingerprints: dict[str, str] = {}
+        #: How each handle was first found — what _relocate() re-searches
+        #: for when the element behind a handle has gone stale.
+        self._locators: dict[str, _Locator] = {}
         self._counter = 0
         self._last: dict[int, WindowSnapshot] = {}
         self._marks: list[Mark] = []
@@ -135,15 +158,22 @@ class NativeSurface:
         if window is None:
             raise NativeError(f"{name} has no window open.", detail="no window")
         self._guard(name, _title(backend, window))
-        dialogs = [w for w in backend.windows(application)
-                   if not backend.same(w, window) and _is_dialog(backend, w)]
         snap = ax.snapshot(backend, window, app=name, pid=pid, offset=offset,
-                           max_listed=max_listed, blockers=dialogs)
+                           max_listed=max_listed, blockers=self._blockers(application, window))
         snap.menus = self._menu_titles(application)
         for control in snap.controls:
-            control.handle = self._handle_for(control.ref, pid, control.label)
+            locator = _Locator(name, pid, snap.title, control.ax_role, control.subrole,
+                               control.label, control.identifier)
+            control.handle = self._handle_for(control.ref, pid, control.label, locator)
         self.last_app = name
         return snap
+
+    def _blockers(self, application: Any, window: Any) -> list[Any]:
+        """The sheets and dialogs over *window* — listed first, since they
+        block everything else until dealt with."""
+        backend = self.backend
+        return [w for w in backend.windows(application)
+                if not backend.same(w, window) and _is_dialog(backend, w)]
 
     async def find(self, label: str, app: str = "") -> list[Control]:
         """Every control whose name matches *label*, at any depth of the
@@ -469,18 +499,22 @@ class NativeSurface:
                 return
         self.input.press(resolve_key("escape"))
 
-    def _handle_for(self, element: Any, pid: int, label: str = "") -> str:
+    def _handle_for(self, element: Any, pid: int, label: str = "",
+                    locator: _Locator | None = None) -> str:
         backend = self.backend
         key = backend.key(element)
         for known, handle in self._by_key.get(key, []):
             if backend.same(known, element):
                 self._fingerprints[handle] = label
+                if locator is not None:
+                    self._locators[handle] = locator
                 return handle
         if self._counter >= MAX_HANDLES:
             self._handles.clear()
             self._by_key.clear()
             self._handle_app.clear()
             self._fingerprints.clear()
+            self._locators.clear()
             self._counter = 0
         self._counter += 1
         handle = f"ax{self._counter}"
@@ -488,23 +522,44 @@ class NativeSurface:
         self._by_key.setdefault(key, []).append((element, handle))
         self._handle_app[handle] = pid
         self._fingerprints[handle] = label
+        if locator is not None:
+            self._locators[handle] = locator
         return handle
 
     def _resolve(self, handle: str) -> tuple[Any, int, dict[str, Any]]:
         """The live element behind *handle*, its owning app, and the
         attributes just fetched to verify it — handed back rather than
         discarded, so a caller that needs them too (every one does) reads
-        the app's Accessibility server once per action, not twice."""
+        the app's Accessibility server once per action, not twice.
+
+        A handle whose element has gone stale (gone, or recycled for other
+        content) is re-found by what it was — see _relocate() — and only
+        reported to the model when that finds nothing, or can't tell
+        which of several it was."""
         self._require()
         cleaned = str(handle).strip().strip("[]").lower()
         element = self._handles.get(cleaned)
         if element is None:
             raise NativeError(f"There's no control [{cleaned}] — read_window to see the current ones.")
         attrs = self.backend.attributes(element, ax.ATTRIBUTES)
+        problem = self._staleness(cleaned, element, attrs)
+        if problem:
+            found = self._relocate(cleaned)
+            if found is None:
+                raise NativeError(problem)
+            element, attrs = found
+        pid = self._handle_app.get(cleaned, 0)
+        window = self.backend.attribute(element, "AXWindow")
+        self._guard(self._app_name(pid), _title(self.backend, window) if window is not None else "")
+        self.last_app = self._app_name(pid) or self.last_app
+        return element, pid, attrs
+
+    def _staleness(self, handle: str, element: Any, attrs: dict[str, Any]) -> str:
+        """Why the element behind *handle* can't be trusted as read, or ""."""
         role = str(attrs.get("AXRole") or "")
         if not role:
-            raise NativeError(f"[{cleaned}] isn't on screen any more — read_window again.")
-        expected = self._fingerprints.get(cleaned, "")
+            return f"[{handle}] isn't on screen any more — read_window again."
+        expected = self._fingerprints.get(handle, "")
         if expected:
             current = ax.control_label(self.backend, element, role, attrs)
             if current and current != expected:
@@ -513,14 +568,68 @@ class NativeSurface:
                 # Electron apps), not a genuinely stale handle — but acting
                 # on it now would hit whatever it shows today, not what the
                 # model actually chose.
-                raise NativeError(
-                    f"[{cleaned}] now shows “{current}”, not “{expected}” as last read — its content "
-                    "has changed since then. read_window again before acting on it.")
-        pid = self._handle_app.get(cleaned, 0)
-        window = self.backend.attribute(element, "AXWindow")
-        self._guard(self._app_name(pid), _title(self.backend, window) if window is not None else "")
-        self.last_app = self._app_name(pid) or self.last_app
-        return element, pid, attrs
+                return (f"[{handle}] now shows “{current}”, not “{expected}” as last read — its "
+                        "content has changed since then. read_window again before acting on it.")
+        return ""
+
+    def _relocate(self, handle: str) -> tuple[Any, dict[str, Any]] | None:
+        """Re-find a stale handle's control by what it was, rather than
+        sending the model back to read the window again for what is often a
+        trivially re-findable button.
+
+        Deliberately no looser than the check that rejected the element: it
+        looks only in the window the handle was read in, of the same app
+        process; it needs the same role, name and identifier; it gives up
+        unless exactly one control matches (two, or a window too big to
+        search whole, means it can't say which was meant); the match must
+        be on screen; and the match must then pass the very same staleness
+        check as any other element. It does not refresh other handles'
+        fingerprints, so everything else the model read stays protected.
+        """
+        locator = self._locators.get(handle)
+        if locator is None or not (locator.label or locator.identifier):
+            return None
+        backend = self.backend
+        application = backend.application(locator.pid)
+        windows = [w for w in backend.windows(application)
+                   if ax._text(backend.attribute(w, "AXTitle")) == locator.window]
+        matches: list[Control] = []
+        for window in windows:
+            snap = ax.snapshot(backend, window, app=locator.app, pid=locator.pid,
+                               max_listed=RELOCATE_MAX_LISTED,
+                               blockers=self._blockers(application, window))
+            if snap.truncated:
+                return None             # can't show nothing else matches
+            matches.extend(c for c in snap.controls
+                           if (c.ax_role, c.subrole, c.label, c.identifier)
+                           == (locator.ax_role, locator.subrole, locator.label, locator.identifier))
+        if len(matches) != 1 or not matches[0].visible:
+            return None
+        candidate = matches[0].ref
+        attrs = backend.attributes(candidate, ax.ATTRIBUTES)
+        if self._staleness(handle, candidate, attrs):
+            return None
+        self._repoint(handle, candidate)
+        log.debug("re-found [%s] (%s “%s”) after it went stale", handle, matches[0].role, locator.label)
+        return candidate, attrs
+
+    def _repoint(self, handle: str, element: Any) -> None:
+        """Make *handle* mean *element*. The old element stops being known by
+        this handle, so seeing it again later gets it a handle of its own
+        rather than a listing that disagrees with what the handle acts on."""
+        backend = self.backend
+        old = self._handles.get(handle)
+        self._handles[handle] = element
+        if old is not None:
+            old_key = backend.key(old)
+            kept = [(e, h) for e, h in self._by_key.get(old_key, []) if h != handle]
+            if kept:
+                self._by_key[old_key] = kept
+            else:
+                self._by_key.pop(old_key, None)
+        key = backend.key(element)
+        if not any(backend.same(known, element) for known, _ in self._by_key.get(key, [])):
+            self._by_key.setdefault(key, []).append((element, handle))
 
 
 def _title(backend: Any, element: Any) -> str:

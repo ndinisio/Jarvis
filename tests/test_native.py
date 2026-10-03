@@ -381,6 +381,132 @@ async def test_a_recycled_row_refuses_to_be_pressed_as_if_unchanged(notes):
         await surface.press(handle)
 
 
+def _swap(parts, old, new) -> None:
+    """Put *new* where *old* sits in the tree — a control the app rebuilt."""
+    def walk(element) -> bool:
+        for index, child in enumerate(element.children):
+            if child is old:
+                element.children[index] = new
+                return True
+            if walk(child):
+                return True
+        return False
+
+    assert walk(parts["window"])
+
+
+def _set_row(row, title: str, preview: str) -> None:
+    cell = row.children[0]
+    cell.children[0].attrs["AXValue"] = title
+    cell.children[1].attrs["AXValue"] = preview
+
+
+# These run against the fake accessibility tree: they prove the surface's own
+# decisions (when to re-find, when to refuse). That macOS really hands back
+# the same role/name for a rebuilt control is only proven on a real Mac.
+async def test_a_stale_handle_is_refound_when_the_same_control_is_still_there(notes):
+    surface, _, recorder, parts = notes
+    handle = await _handle(surface, "New Note")
+    rebuilt = El("AXButton", "New Note", frame=(640, 60, 30, 22))
+    _swap(parts, parts["new_note"], rebuilt)
+    parts["new_note"].alive = False
+    assert await surface.press(handle) == "Pressed “New Note”."
+    assert rebuilt.performed == ["AXPress"] and parts["new_note"].performed == []
+    # The handle now means the rebuilt control: a second press, and a fresh
+    # look at the window, both agree.
+    await surface.press(handle)
+    assert rebuilt.performed == ["AXPress", "AXPress"]
+    assert await _handle(surface, "New Note") == handle
+
+
+async def test_a_recycled_row_is_refound_where_its_content_went(notes):
+    """The virtualised-list case: the row element the model chose now shows
+    something else, but the content it chose is still on screen — on a
+    different element. Act there, never on what the old element shows now."""
+    surface, backend, _, parts = notes
+    handle = await _handle(surface, "Holiday ideas · Lisbon")
+    _set_row(parts["rows"][1], "Recipes", "risotto")
+    _set_row(parts["rows"][2], "Holiday ideas", "Lisbon")
+    await surface.press(handle)
+    assert backend.sets == [(parts["rows"][2], "AXSelected", True)]
+
+
+async def test_an_ambiguous_refind_is_refused_rather_than_guessed(notes):
+    surface, backend, _, parts = notes
+    handle = await _handle(surface, "Holiday ideas · Lisbon")
+    _set_row(parts["rows"][1], "Recipes", "risotto")
+    _set_row(parts["rows"][2], "Holiday ideas", "Lisbon")
+    _set_row(parts["rows"][0], "Holiday ideas", "Lisbon")      # now two of them
+    with pytest.raises(NativeError, match="now shows"):
+        await surface.press(handle)
+    assert backend.sets == []
+
+
+async def test_refinding_one_handle_does_not_vouch_for_the_others(notes):
+    """A re-find must not refresh anyone else's fingerprint: a handle whose
+    row changed to something found nowhere still has to be refused."""
+    surface, backend, _, parts = notes
+    kept = await _handle(surface, "Holiday ideas · Lisbon")
+    lost = await _handle(surface, "Shopping list · milk, eggs")
+    _set_row(parts["rows"][0], "Brand new", "thing")
+    _set_row(parts["rows"][1], "Recipes", "risotto")
+    _set_row(parts["rows"][2], "Holiday ideas", "Lisbon")
+    await surface.press(kept)
+    assert backend.sets == [(parts["rows"][2], "AXSelected", True)]
+    with pytest.raises(NativeError, match="now shows"):
+        await surface.press(lost)
+    assert len(backend.sets) == 1
+
+
+async def test_a_look_alike_with_another_subrole_is_not_refound(notes):
+    """A plain text area gone, a password field of the same name in its
+    place: not the same control, so not acted on — and nothing is typed."""
+    surface, backend, recorder, parts = notes
+    handle = await _handle(surface, "Note body")
+    impostor = El("AXTextArea", subrole="AXSecureTextField", description="Note body",
+                  frame=(240, 100, 500, 400))
+    _swap(parts, parts["body"], impostor)
+    parts["body"].alive = False
+    with pytest.raises(NativeError, match="read_window again"):
+        await surface.type_into(handle, "hunter2")
+    assert recorder.events == [] and backend.sets == []
+
+
+async def test_a_same_named_control_in_another_window_is_not_refound(notes):
+    surface, backend, _, parts = notes
+    handle = await _handle(surface, "New Note")
+    elsewhere = El("AXWindow", "Another note", actions=(), frame=(0, 0, 900, 560),
+                   children=[El("AXButton", "New Note", frame=(640, 60, 30, 22))])
+    backend.apps["Notes"][1].attrs["AXWindows"].append(elsewhere)
+    parts["new_note"].alive = False
+    with pytest.raises(NativeError, match="read_window again"):
+        await surface.press(handle)
+
+
+async def test_a_refind_that_is_not_on_screen_is_refused(notes):
+    surface, _, _, parts = notes
+    handle = await _handle(surface, "New Note")
+    _swap(parts, parts["new_note"], El("AXButton", "New Note", frame=(5000, 5000, 30, 22)))
+    parts["new_note"].alive = False
+    with pytest.raises(NativeError, match="read_window again"):
+        await surface.press(handle)
+
+
+async def test_a_window_too_big_to_search_whole_is_not_refound(notes, monkeypatch):
+    """If the walk was cut short, "exactly one match" proves nothing."""
+    surface, backend, _, parts = notes
+    handle = await _handle(surface, "New Note")
+    _swap(parts, parts["new_note"], El("AXButton", "New Note", frame=(640, 60, 30, 22)))
+    parts["new_note"].alive = False
+    # Four nodes reach the rebuilt button and then stop short of the rest of
+    # the window — so the one match is there, but nothing proves it's the only one.
+    monkeypatch.setattr(axmod, "MAX_VISITED", 4)
+    cut = axmod.snapshot(backend, parts["window"])
+    assert cut.truncated and any(c.label == "New Note" for c in cut.controls)
+    with pytest.raises(NativeError, match="read_window again"):
+        await surface.press(handle)
+
+
 async def test_describe_and_press_each_ask_the_accessibility_server_once(notes):
     """_resolve() reads a control's full attributes to verify it and its
     content are still what the handle promised — describe() (the registry's
