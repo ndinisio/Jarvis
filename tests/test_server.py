@@ -32,6 +32,11 @@ def test_status_endpoint(client):
     # the commit hash is what's actually comparable against `git log` or
     # GitHub.
     assert data["commit"]
+    # ...and what the app shows in its top left is the version in the latest
+    # commit's title, which moves with every commit (jarvis/ledger.py).
+    from jarvis.ledger import LEDGER_VERSION
+
+    assert data["ledger"] == LEDGER_VERSION
     assert data["capabilities"]
     assert "system" in data["tools"]
     assert data["workspace"]

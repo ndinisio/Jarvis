@@ -102,3 +102,25 @@ machine or the GitHub UI.
   The two will not match, and that's expected, not a bug to reconcile —
   don't try to make the commit-title version chase the package version or
   vice versa.
+
+## The version in the app
+
+The top left of the app shows the **ledger version** — the number in the
+latest commit's title (`v8.58`) — with the package version small beside it
+and the commit hash only in the tooltip. It exists so a glance answers "is
+this the latest code?" against the commit titles on GitHub.
+
+- Its single source is `LEDGER_VERSION` in `backend/jarvis/ledger.py`.
+- **Every commit sets it to that commit's own title, in the same commit** —
+  the last step of every implementation, after the work and its tests and
+  before `git commit`: `python scripts/ledger.py set v8.59` (`python
+  scripts/ledger.py next` says what is due; `--major` for the rare major),
+  `git add backend/jarvis/ledger.py`, then commit with that title.
+- A commit-msg hook refuses a commit whose title and `LEDGER_VERSION`
+  differ. Enable it once per clone: `git config core.hooksPath
+  scripts/git-hooks`. `tests/test_ledger.py` also fails if the file ever
+  lags the latest commit's title.
+- The frontend bakes the value in when it is built (`frontend/dist/` is not
+  in git, so it is rebuilt locally: `cd frontend && npm run build`); the
+  status bar says "interface out of date" when the interface was built from
+  an older value than the backend running it.

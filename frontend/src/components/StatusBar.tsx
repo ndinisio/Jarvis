@@ -1,3 +1,4 @@
+import { versionLabel } from '../lib/version'
 import { useStore } from '../state/store'
 import { VoiceChip } from './VoiceChip'
 
@@ -14,15 +15,22 @@ export function StatusBar({ send }: { send: (m: Record<string, unknown>) => bool
   const fast = slots.fast ?? {}
   const general = slots.general ?? {}
   const modelLabel = general.ready ? general.resolved : fast.ready ? fast.resolved : 'no model'
+  const version = versionLabel(status, __UI_LEDGER__)
 
   return (
     <header className="statusbar">
       <div className="statusbar__identity">
         <span className="statusbar__mark" aria-hidden="true" />
         <span className="statusbar__name">JARVIS</span>
-        {status?.version && (
-          <span className="statusbar__version" title="Compare against `git log -1 --oneline` or GitHub to check you're on the latest code">
-            v{status.version}{status.commit && ` (${status.commit})`}
+        {version && (
+          <span className="statusbar__version" title={version.title}>
+            {version.main}
+            {version.sub && <span className="statusbar__subversion">{version.sub}</span>}
+          </span>
+        )}
+        {version?.stale && (
+          <span className="statusbar__pill is-warn" title={version.stale}>
+            interface out of date
           </span>
         )}
       </div>

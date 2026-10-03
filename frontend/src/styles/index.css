@@ -138,7 +138,8 @@ button { cursor: pointer; }
   font-size: 13px; font-weight: 600; letter-spacing: 0.34em; text-transform: uppercase;
 }
 
-.statusbar__version { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+.statusbar__version { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.statusbar__subversion { margin-left: 6px; font-size: 10px; color: var(--text-faint); }
 
 .statusbar__meta { display: flex; align-items: center; gap: 8px; }
 

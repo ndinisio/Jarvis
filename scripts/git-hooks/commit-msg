@@ -1,0 +1,5 @@
+#!/bin/sh
+# Refuses a commit titled with a ledger version (v8.58) unless the ledger file in the same commit says the
+# same, so the version the app shows always matches the commit it was built from.
+# Enable once per clone:  git config core.hooksPath scripts/git-hooks
+exec python3 "$(git rev-parse --show-toplevel)/scripts/ledger.py" check-message "$1"

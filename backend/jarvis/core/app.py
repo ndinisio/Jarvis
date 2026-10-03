@@ -261,6 +261,7 @@ class JarvisApp:
         voice_status = await self.voice.probe() if self.voice else {"enabled": False}
         return {
             "version": _version(),
+            "ledger": _ledger(),
             "commit": _commit(),
             "platform": {
                 "system": platform.system(),
@@ -325,17 +326,25 @@ def _version() -> str:
     return __version__
 
 
+def _ledger() -> str:
+    """The commit-title version of the code that is running ("v8.58"): what the app shows in its top left,
+    set in every commit (jarvis/ledger.py) so it names the latest code at a glance."""
+    from ..ledger import LEDGER_VERSION
+
+    return LEDGER_VERSION
+
+
 _commit_cache: str | None = None
 
 
 def _commit() -> str:
     """The short git commit hash of this checkout — deliberately not the
     package version above (which tracks toward a real 3.0.0 release on its
-    own schedule and doesn't change per-commit). This is what actually lets
-    a running app be compared against ``git log`` or GitHub to answer "am I
-    on the latest code", which the version number alone cannot. Cached: it
-    can't change while this process is running, so there's no reason to
-    shell out to git on every status call."""
+    own schedule and doesn't change per-commit). The app's label is the ledger
+    version (``_ledger``), which is readable; the hash stays in its tooltip,
+    for an exact comparison against ``git log`` or GitHub. Cached: it can't
+    change while this process is running, so there's no reason to shell out
+    to git on every status call."""
     global _commit_cache
     if _commit_cache is None:
         try:
