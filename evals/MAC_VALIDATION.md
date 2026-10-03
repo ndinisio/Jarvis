@@ -56,6 +56,21 @@ Run 1 first. If it fails, stop and send it back: everything after rests on it. A
 1–5 each pass once, run 7 for repeatability and timings. Only then think about
 turning anything on.
 
+## Reading the background-press line (`--stale`)
+
+`a press works with another app in front` passes only when a semantic AXPress was accepted by the app,
+the app recorded it, and Finder stayed in front. Its ✗ says which way it went wrong:
+
+* `AXPress succeeded, JARVIS posted no click and activated nothing, and the app still came forward` -
+  the press worked and the app activated itself in response: AXPress, or the app's handling of it.
+* `AXPress did not do the press: AXPress was refused … fell back to a coordinate click` (or `the button
+  does not offer AXPress`) - the press was done by a synthetic click, which brings the app forward.
+* `AXPress succeeded but the app recorded no press`, `the press raised …`, `not an AXPress: …` - the
+  mechanism is named in the line.
+
+Each line ends with what the surface returned (`'Pressed “Save”.'` is AXPress; `'Clicked …'` is the click)
+and what the window recorded.
+
 ## What the marks mean
 
 * ✓ passed · ✗ failed · ⚠ **couldn't tell** (for example macOS kept the old reference

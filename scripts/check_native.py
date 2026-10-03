@@ -1206,29 +1206,131 @@ STALE_SCENARIOS = (
 )
 
 
+class PressTrace:
+    """What one ``surface.press`` actually did, seen from the seams it acts through. Nothing is added to
+    the press: the wrappers record and pass through. They record ``backend.actions`` (what the element
+    offered), ``backend.perform`` (each Accessibility action, and whether the app accepted it) and
+    ``input.click`` (a synthetic mouse click - only ever the fallback, and always after bringing the app
+    forward). The app activating *itself* in response to an action is invisible here by design: that is
+    exactly what is left over when none of these shows JARVIS doing it."""
+
+    _missing = object()
+
+    def __init__(self, surface: NativeSurface):
+        self.surface = surface
+        self.offered: list[list[str]] = []
+        self.performed: list[tuple[str, bool]] = []
+        self.clicks: list[tuple] = []
+        self._restore: list[tuple] = []
+
+    def __enter__(self) -> PressTrace:
+        backend, device = self.surface.backend, self.surface.input
+        actions, perform, click = backend.actions, backend.perform, device.click
+
+        def traced_actions(element):
+            found = actions(element)
+            self.offered.append(list(found))
+            return found
+
+        def traced_perform(element, action):
+            accepted = perform(element, action)
+            self.performed.append((str(action), bool(accepted)))
+            return accepted
+
+        def traced_click(*args, **kwargs):
+            self.clicks.append((args, kwargs))
+            return click(*args, **kwargs)
+
+        for owner, name, wrapper in ((backend, "actions", traced_actions), (backend, "perform", traced_perform),
+                                     (device, "click", traced_click)):
+            self._restore.append((owner, name, vars(owner).get(name, self._missing)))
+            setattr(owner, name, wrapper)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        for owner, name, original in reversed(self._restore):
+            if original is self._missing:
+                delattr(owner, name)
+            else:
+                setattr(owner, name, original)
+
+    @property
+    def axpress(self) -> bool | None:
+        """Whether the app accepted AXPress: True/False, or None if it was never tried."""
+        tried = [accepted for action, accepted in self.performed if action == "AXPress"]
+        return any(tried) if tried else None
+
+    @property
+    def offered_axpress(self) -> bool:
+        return any("AXPress" in actions for actions in self.offered)
+
+
+def press_verdict(trace: PressTrace, summary: str, error: str, pressed: int, behind: bool,
+                  front: str) -> tuple[bool, str]:
+    """Pass or fail for a press made while *front* was the app in front, and the mechanism that says why.
+    Passes only for a semantic AXPress that the app accepted, that the app recorded, and that left *front*
+    in front. Everything else fails, saying which of the ways it went wrong it was."""
+    where = f"{front} " + ("stayed in front" if behind else "was no longer in front")
+    counted = f"the window recorded {pressed} press(es); {where}"
+    said = f"the surface returned {summary!r}" if summary else "the surface returned nothing"
+    if trace.axpress is True:
+        how = "AXPress succeeded"
+    elif trace.axpress is False:
+        how = "AXPress was refused by the app (perform returned False)"
+    elif trace.offered_axpress:
+        how = "AXPress was offered but never tried"
+    else:
+        how = "the button does not offer AXPress" + ("" if trace.offered else " (no action list was read)")
+    if trace.clicks:
+        if trace.axpress is True:      # not a path the surface has: say so rather than guess at it
+            return False, f"AXPress succeeded and a coordinate click was posted as well — {said}; {counted}"
+        sentence = ("the fallback click brought the app forward" if not behind
+                    else "the fallback click ran, the app did not come forward")
+        return False, (f"AXPress did not do the press: {how}, so the surface fell back to a coordinate click; "
+                       f"{sentence} — {said}; {counted}")
+    if error:
+        tried = f" — {how}" if trace.performed or trace.offered else ""
+        return False, f"the press raised instead of acting: {error}{tried}; {counted}"
+    others = [action for action, accepted in trace.performed if action != "AXPress" and accepted]
+    if trace.axpress is not True:
+        return False, (f"not an AXPress: {how}; " + (f"it was done by {', '.join(others)}" if others
+                                                     else "and no click was posted either") + f" — {said}; {counted}")
+    if pressed == 0:
+        return False, f"AXPress succeeded but the app recorded no press — {said}; {counted}"
+    if not behind:
+        return False, (f"AXPress succeeded, JARVIS posted no click and activated nothing, and the app still came "
+                       f"forward: AXPress (or the app's handling of it) activated the target — the fixture's own "
+                       f"action only logs a line — {said}; {counted}")
+    return True, f"{how}, with no click and no activation — {said}; {counted}"
+
+
 async def background_press(surface: NativeSurface, fixture: FixtureProcess) -> bool:
-    """A press by Accessibility needs no focus: with Finder in front, pressing
-    the fixture's button does it without taking the front."""
+    """A press by Accessibility needs no focus: with Finder in front, pressing the fixture's button does
+    it without taking the front. Activation is a failure, and so is any other way of getting the press
+    done: the verdict names the mechanism (see :func:`press_verdict`)."""
+    label = "a press works with another app in front"
     backend = surface.backend
     finder = backend.find_app("Finder")
     if finder is None:
-        return step("a press works with another app in front", False, "no Finder to put in front")
+        return step(label, False, "no Finder to put in front")
     await asyncio.to_thread(fixture.send, "restore")
     handle, seen = await fixture_handle(surface)
     if handle is None:
-        return step("a press works with another app in front", False, "the window showed: " + seen)
+        return step(label, False, "the window showed: " + seen)
     await asyncio.to_thread(backend.activate, finder[0])
     await asyncio.to_thread(wait_front, backend, finder[0])
     before = len(fixture.events())
-    await surface.press(handle)
+    summary, error = "", ""
+    with PressTrace(surface) as trace:
+        try:
+            summary = await surface.press(handle)
+        except NativeError as exc:
+            error = exc.message
     await pause(0.5)
     with RUN.verifying():
-        pressed = fixture.events()[before:]
-    still_behind = front_pid(backend) == finder[0]
-    return step("a press works with another app in front", bool(pressed) and still_behind,
-                f"the window recorded {len(pressed)} press(es); Finder "
-                + ("stayed in front" if still_behind else "was no longer in front — the press brought the app forward"),
-                inconclusive=bool(pressed) and not still_behind)
+        pressed = len(fixture.events()[before:])
+    ok, detail = press_verdict(trace, summary, error, pressed, front_pid(backend) == finder[0], "Finder")
+    return step(label, ok, detail)
 
 
 async def stale_checks(surface: NativeSurface, fixture: FixtureProcess) -> bool:

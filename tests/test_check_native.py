@@ -15,6 +15,7 @@ calls is exactly what the real run is for.
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 import json
 import os
@@ -23,7 +24,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from jarvis.surfaces.native import NativeSurface
+from jarvis.surfaces.native import NativeError, NativeSurface
 from jarvis.surfaces.native.ax import TextItem
 from jarvis.surfaces.native.marks import TextBox
 from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED
@@ -1504,8 +1505,12 @@ class FakeFixtureView:
     the same reference after a rebuild."""
 
     def __init__(self, backend: FakeBackend, log: list[str], *, keep_references: bool = False,
-                 process_name: str = "JARVIS Fixture", steals_focus: bool = False):
+                 process_name: str = "JARVIS Fixture", steals_focus: bool = False, axpress: str = "works",
+                 enabled: bool = True):
+        """*axpress*: ``works``; ``absent`` (the button offers no AXPress); ``silent`` (the app accepts
+        AXPress and records nothing). Refusing AXPress is the backend's doing (``StaleMac``)."""
         self.backend, self.log, self.keep, self.steals_focus = backend, log, keep_references, steals_focus
+        self.axpress, self.enabled = axpress, enabled
         self.window = El("AXWindow", "JARVIS Fixture", actions=(), frame=(0, 0, 420, 300))
         self.other = El("AXWindow", "JARVIS Fixture (other)", actions=(), frame=(500, 0, 420, 300))
         self.app = El("AXApplication", "JARVIS Fixture", actions=(), AXWindows=[self.window],
@@ -1515,9 +1520,12 @@ class FakeFixtureView:
 
     def _control(self, title, identifier, kind, born, x):
         control = El("AXButton" if kind == "button" else "AXCheckBox", title, frame=(x, 240, 90, 28),
-                     AXIdentifier=identifier)
+                     AXIdentifier=identifier, actions=() if self.axpress == "absent" else ("AXPress",),
+                     enabled=self.enabled)
         verb = "click" if kind == "button" else "toggle"
-        def performed(_action):
+        def performed(action):
+            if self.axpress == "silent" and action == "AXPress":
+                return
             self.log.append(f"{verb}:{control.attrs['AXTitle']}:{identifier}:born={born}")
             if self.steals_focus:
                 self.backend.activate(303)
@@ -1571,14 +1579,51 @@ class FakeFixtureProcess:
         return list(self.log)
 
 
-def _stale_setup(fx, *, keep_references=False, steals_focus=False):
-    backend = FakeBackend({"Finder": (202, El("AXApplication", "Finder", actions=(), AXWindows=[],
-                                              AXMenuBar=El("AXMenuBar", actions=()))),
-                           "Notes": (101, El("AXApplication", "Notes", actions=(), AXWindows=[],
-                                             AXMenuBar=El("AXMenuBar", actions=()))), }, front="Notes")
+class StaleMac(FakeBackend):
+    """The fixture's Mac, where the app can refuse AXPress and where bringing an app forward can fail."""
+
+    refuse_axpress = False
+    activation_works = True
+
+    def perform(self, element, action):
+        if action == "AXPress" and self.refuse_axpress:
+            return False
+        return super().perform(element, action)
+
+    def activate(self, pid):
+        if pid == 303 and not self.activation_works:      # the fixture refuses to come forward
+            self.activations.append(pid)
+            return False
+        return super().activate(pid)
+
+
+class PressingInput(RecordingInput):
+    """Input whose click presses the fixture control it lands on, as the real app would see it."""
+
+    view = None
+
+    def click(self, x, y, *, button="left", clicks=1):
+        super().click(x, y, button=button, clicks=clicks)
+        for control in list(self.view.window.children):
+            frame = control.attrs["AXPosition"], control.attrs["AXSize"]
+            (px, py), (w, h) = frame
+            if px <= x <= px + w and py <= y <= py + h and control.on_perform:
+                control.on_perform("click")
+
+
+def _stale_setup(fx, *, keep_references=False, steals_focus=False, axpress="works", refuse_axpress=False,
+                 activation_works=True, enabled=True):
+    backend = StaleMac({"Finder": (202, El("AXApplication", "Finder", actions=(), AXWindows=[],
+                                           AXMenuBar=El("AXMenuBar", actions=()))),
+                        "Notes": (101, El("AXApplication", "Notes", actions=(), AXWindows=[],
+                                          AXMenuBar=El("AXMenuBar", actions=()))), }, front="Notes")
+    backend.refuse_axpress, backend.activation_works = refuse_axpress, activation_works
     log: list[str] = []
-    view = FakeFixtureView(backend, log, keep_references=keep_references, steals_focus=steals_focus)
-    surface = NativeSurface(backend=backend, input=RecordingInput(), sleep=lambda _s: None)
+    view = FakeFixtureView(backend, log, keep_references=keep_references, steals_focus=steals_focus,
+                           axpress=axpress, enabled=enabled)
+    device = PressingInput()
+    device.view = view
+    surface = NativeSurface(backend=backend, input=device, sleep=lambda _s: None)
     return surface, FakeFixtureProcess(view, log, fx), view, log
 
 
@@ -1626,11 +1671,110 @@ async def test_references_macos_keeps_valid_make_the_rebuild_checks_inconclusive
     assert "✗ a rebuilt button" not in out
 
 
-async def test_a_press_that_brings_the_app_forward_is_not_reported_as_working_in_the_background(cn, fx, capsys):
+@pytest.mark.parametrize("setup, ok, expected", [
+    ({}, True, ["✓ a press works with another app in front — AXPress succeeded, with no click and no activation",
+                "the surface returned 'Pressed “Save”.'", "the window recorded 1 press(es); Finder stayed in front"]),
+    ({"steals_focus": True}, False,
+     ["✗ a press works with another app in front — AXPress succeeded, JARVIS posted no click and activated nothing, "
+      "and the app still came forward: AXPress (or the app's handling of it) activated the target",
+      "the surface returned 'Pressed “Save”.'", "the window recorded 1 press(es); Finder was no longer in front"]),
+    ({"refuse_axpress": True}, False,
+     ["✗ a press works with another app in front — AXPress did not do the press: AXPress was refused by the app "
+      "(perform returned False), so the surface fell back to a coordinate click; the fallback click brought the app "
+      "forward", "the surface returned 'Clicked “Save”.'", "the window recorded 1 press(es); Finder was no longer in front"]),
+    ({"axpress": "absent"}, False,
+     ["✗ a press works with another app in front — AXPress did not do the press: the button does not offer AXPress, "
+      "so the surface fell back to a coordinate click; the fallback click brought the app forward",
+      "the surface returned 'Clicked “Save”.'"]),
+    ({"refuse_axpress": True, "activation_works": False}, False,
+     ["fell back to a coordinate click; the fallback click ran, the app did not come forward",
+      "the window recorded 1 press(es); Finder stayed in front"]),
+    ({"axpress": "silent"}, False,
+     ["✗ a press works with another app in front — AXPress succeeded but the app recorded no press",
+      "the surface returned 'Pressed “Save”.'", "the window recorded 0 press(es); Finder stayed in front"]),
+    ({"enabled": False}, False,
+     ["✗ a press works with another app in front — the press raised instead of acting: “Save” is greyed out right now.",
+      "the window recorded 0 press(es); Finder stayed in front"]),
+], ids=["background-axpress", "axpress-activates", "axpress-refused", "axpress-absent", "fallback-fails-to-activate",
+        "axpress-unrecorded", "raises"])
+async def test_the_background_press_names_the_mechanism_that_did_or_did_not_work(cn, fx, capsys, setup, ok, expected):
+    surface, fixture, _, _ = _stale_setup(fx, **setup)
+    assert await cn.background_press(surface, fixture) is ok
+    out = capsys.readouterr().out
+    for fragment in expected:
+        assert fragment in out, (fragment, out)
+    assert ("⚠" in out) is False, "there is no 'couldn't tell' here: activation and fallback are failures, not doubts"
+
+
+async def test_a_press_that_activates_the_app_stays_a_failure_in_the_whole_stale_run(cn, fx, capsys):
     surface, fixture, _, _ = _stale_setup(fx, steals_focus=True)
+    assert await cn.stale_checks(surface, fixture) is False
+    out = capsys.readouterr().out
+    assert "✗ a press works with another app in front" in out and "⚠ a press works" not in out
+
+
+async def test_a_fallback_click_is_a_failure_even_when_it_does_the_press_and_nothing_comes_forward(cn, fx, capsys):
+    """The contract is a semantic AXPress. A click that happened to work is not that."""
+    surface, fixture, _, log = _stale_setup(fx, refuse_axpress=True, activation_works=False)
     assert await cn.background_press(surface, fixture) is False
-    assert "⚠ a press works with another app in front — the window recorded 1 press(es); Finder was no longer in front" \
-        in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "AXPress did not do the press" in out and "the window recorded 1 press(es); Finder stayed in front" in out
+    assert len(log) == 1, "the click did land"
+
+
+@pytest.mark.parametrize("performed, offered, clicks, summary, error, pressed, behind, ok, expected", [
+    ([("AXPress", True)], [["AXPress"]], [], "Pressed “Save”.", "", 1, True, True, "AXPress succeeded, with no click"),
+    ([("AXPress", True)], [["AXPress"]], [], "Pressed “Save”.", "", 1, False, False, "activated the target"),
+    ([("AXPress", True)], [["AXPress"]], [], "Pressed “Save”.", "", 0, True, False, "app recorded no press"),
+    ([("AXPress", False)], [["AXPress"]], [((1, 2), {})], "Clicked “Save”.", "", 1, False, False, "was refused by the app"),
+    ([], [[]], [((1, 2), {})], "Clicked “Save”.", "", 1, False, False, "does not offer AXPress"),
+    ([], [], [((1, 2), {})], "Clicked “Save”.", "", 1, False, False, "(no action list was read)"),
+    ([("AXShowMenu", True)], [["AXShowMenu"]], [], "Opened the menu for “Save”.", "", 1, True, False,
+     "not an AXPress: the button does not offer AXPress; it was done by AXShowMenu"),
+    ([], [["AXPress"]], [], "", "", 0, True, False, "AXPress was offered but never tried; and no click was posted either"),
+    ([("AXPress", True)], [["AXPress"]], [((1, 2), {})], "Pressed “Save”.", "", 1, True, False,
+     "AXPress succeeded and a coordinate click was posted as well"),
+    ([], [], [], "", "“Save” is greyed out right now.", 0, True, False,
+     "the press raised instead of acting: “Save” is greyed out right now.; the window recorded"),
+])
+def test_the_verdict_for_each_way_a_press_can_go(cn, performed, offered, clicks, summary, error, pressed, behind, ok,
+                                                 expected):
+    trace = cn.PressTrace.__new__(cn.PressTrace)
+    trace.performed, trace.offered, trace.clicks = list(performed), list(offered), list(clicks)
+    verdict, text = cn.press_verdict(trace, summary, error, pressed, behind, "Finder")
+    assert verdict is ok and expected in text, text
+
+
+async def test_the_trace_records_the_seams_a_press_acts_through_and_puts_them_back(cn, fx):
+    surface, fixture, view, _ = _stale_setup(fx, refuse_axpress=True)
+    await asyncio.to_thread(fixture.send, "restore")
+    handle, _ = await cn.fixture_handle(surface)
+    backend, device = surface.backend, surface.input
+    assert "perform" not in vars(backend) and "click" not in vars(device)
+    with cn.PressTrace(surface) as trace:
+        summary = await surface.press(handle)
+    assert summary == "Clicked “Save”."
+    assert trace.performed == [("AXPress", False)] and trace.offered_axpress and trace.axpress is False
+    assert len(trace.clicks) == 1
+    assert not {"actions", "perform"} & set(vars(backend)) and "click" not in vars(device), "the originals are back"
+
+
+async def test_the_trace_puts_the_seams_back_when_the_press_raises(cn, fx):
+    surface, fixture, view, _ = _stale_setup(fx, enabled=False)
+    await asyncio.to_thread(fixture.send, "restore")
+    handle, _ = await cn.fixture_handle(surface)
+    with pytest.raises(NativeError), cn.PressTrace(surface):
+        await surface.press(handle)
+    assert not {"actions", "perform"} & set(vars(surface.backend)) and "click" not in vars(surface.input)
+
+
+async def test_a_trace_that_found_a_wrapper_already_in_place_restores_that_wrapper(cn, fx):
+    surface, _, _, _ = _stale_setup(fx)
+    marker = surface.backend.perform
+    surface.backend.perform = marker              # an instance attribute, as another tool might have put there
+    with cn.PressTrace(surface):
+        assert surface.backend.perform is not marker
+    assert surface.backend.perform is marker
 
 
 async def test_a_twin_pressed_by_the_wrong_identifier_is_a_failure(cn):
