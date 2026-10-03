@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1191,3 +1193,112 @@ def test_a_result_is_never_reported_for_a_tool_that_is_not_there(app):
     assert app.deps.registry.get("read_window") is not None
     assert isinstance(ToolResult(summary="x"), ToolResult)
 
+
+
+# ---------------------------------------------------------------------------
+# reading text off a picture (Vision), against stand-in modules
+# ---------------------------------------------------------------------------
+class _CocoaDict:
+    """What +[NSMutableDictionary dictionary] gives: Cocoa semantics, where
+    removing a key that isn't there is quietly nothing."""
+
+    def removeObjectForKey_(self, key):
+        return None
+
+
+class _Observation:
+    def __init__(self, text, confidence, box):
+        self._text, self._confidence, self._box = text, confidence, box
+
+    def topCandidates_(self, n):
+        return [SimpleNamespace(string=lambda: self._text, confidence=lambda: self._confidence)]
+
+    def boundingBox(self):
+        x, y, w, h = self._box
+        return SimpleNamespace(origin=SimpleNamespace(x=x, y=y), size=SimpleNamespace(width=w, height=h))
+
+
+def _vision_stand_ins(monkeypatch, seen):
+    """Vision, as PyObjC presents it on a Mac: handing a *Python* dict to Cocoa
+    wraps it as OC_PythonDictionary, whose -removeObjectForKey: raises for an
+    absent key, and Vision removes keys it may not find. (Models that behaviour,
+    from PyObjC's own source; it is not Vision.)"""
+    observations = [_Observation("Hello", 0.9, (0.1, 0.5, 0.2, 0.1)), _Observation("noise", 0.1, (0, 0, 0.1, 0.1))]
+
+    class Handler:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def initWithURL_options_(self, url, options):
+            seen["options"] = options
+            if type(options) is dict:
+                raise ValueError("NSInvalidArgumentException - key does not exist")
+            options.removeObjectForKey_("VNImageOptionNotThere")
+            return self
+
+        def performRequests_error_(self, requests, error):
+            return True, None
+
+    class Request:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+        def setRecognitionLevel_(self, level):
+            seen["level"] = level
+
+        def setUsesLanguageCorrection_(self, on):
+            seen["correction"] = on
+
+        def results(self):
+            return observations
+
+    vision = SimpleNamespace(VNImageRequestHandler=Handler, VNRecognizeTextRequest=Request)
+    foundation = SimpleNamespace(NSURL=SimpleNamespace(fileURLWithPath_=lambda path: ("url", path)),
+                                 NSMutableDictionary=SimpleNamespace(dictionary=lambda: _CocoaDict()))
+    monkeypatch.setitem(sys.modules, "Vision", vision)
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
+
+
+async def test_vision_is_handed_a_cocoa_dictionary_not_a_python_one(monkeypatch, tmp_path):
+    """On a Mac the OCR step failed with "NSInvalidArgumentException - key does
+    not exist": the ``{}`` passed as Vision's options was a Python dict."""
+    pytest.importorskip("PIL")
+    from jarvis.surfaces.native.marks import recognize_text
+    from PIL import Image
+
+    picture = tmp_path / "shot.png"
+    Image.new("RGB", (200, 100), "white").save(picture)
+    seen: dict = {}
+    _vision_stand_ins(monkeypatch, seen)
+    boxes = recognize_text(picture)
+    assert type(seen["options"]) is not dict
+    assert [b.text for b in boxes] == ["Hello", "noise"]
+    assert (boxes[0].x, boxes[0].y, boxes[0].w, boxes[0].h) == pytest.approx((20, 40, 40, 10))
+    assert boxes[0].confidence == 0.9
+    assert seen["level"] == 0 and seen["correction"] is True
+
+
+async def test_the_fast_setting_changes_the_recognition_level(monkeypatch, tmp_path):
+    pytest.importorskip("PIL")
+    from jarvis.surfaces.native.marks import recognize_text
+    from PIL import Image
+
+    picture = tmp_path / "shot.png"
+    Image.new("RGB", (10, 10), "white").save(picture)
+    seen: dict = {}
+    _vision_stand_ins(monkeypatch, seen)
+    recognize_text(picture, fast=True)
+    assert seen["level"] == 1 and seen["correction"] is False
+
+
+async def test_the_stand_in_really_does_fail_on_a_python_dict(monkeypatch):
+    """So the test above could not pass by accident: given ``{}`` the stand-in raises."""
+    seen: dict = {}
+    _vision_stand_ins(monkeypatch, seen)
+    with pytest.raises(ValueError, match="key does not exist"):
+        sys.modules["Vision"].VNImageRequestHandler.alloc().initWithURL_options_("u", {})

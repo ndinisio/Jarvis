@@ -47,6 +47,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -94,6 +95,84 @@ async def capture_window(pid: int, number: int) -> Path:
     return path
 
 
+def describe_failure(exc: BaseException) -> str:
+    """What went wrong, and where: the exception's own words, then the innermost
+    line of this repository it passed through. An exception that crosses into
+    Objective-C otherwise arrives as a bare message with nothing to say which call raised it."""
+    if isinstance(exc, NativeError):
+        return exc.message
+    import traceback
+
+    frames = traceback.extract_tb(exc.__traceback__)
+    mine = [f for f in frames if str(f.filename).startswith(str(ROOT))] or frames
+    where = f" — at {Path(mine[-1].filename).name}:{mine[-1].lineno} in {mine[-1].name}" if mine else ""
+    return f"{type(exc).__name__}: {exc}{where}"
+
+
+def words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]{4,}", text.lower()))
+
+
+def matching_words(ocr_texts: list[str], window_texts: list[str]) -> list[str]:
+    """The words (4+ letters) that both the screenshot's text and the window's own
+    accessibility text contain — evidence the OCR read what is really there."""
+    return sorted(words(" ".join(ocr_texts)) & words(" ".join(window_texts)))
+
+
+def window_texts(snap) -> list[str]:
+    return [snap.title, *snap.menus, *snap.texts, *(c.label for c in snap.controls),
+            *(c.value for c in snap.controls)]
+
+
+def flat_colour(path: Path) -> bool | None:
+    """Whether the picture is a single flat colour (what a window captured without
+    Screen Recording permission tends to be); None if that can't be told."""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return all(low == high for low, high in image.convert("RGB").getextrema())
+    except Exception:
+        return None
+
+
+async def diagnose_screenshot(surface: NativeSurface, snap, shots: list[Path]) -> list[str]:
+    """After "text on a screenshot" fails: find which stage did — the window id,
+    the screenshot itself, the OCR — each tried on its own, with what it said."""
+    lines = []
+    backend = surface.backend
+    number = None
+    try:
+        number = await asyncio.to_thread(backend.window_number, snap.pid, snap.title)
+        lines.append(f"window id: {number}" if number else "window id: none found for this window on screen")
+    except Exception as exc:
+        lines.append("window id: " + describe_failure(exc))
+    path = shots[-1] if shots else None
+    if path is None and number:
+        try:
+            path = await capture_window(snap.pid, number)
+        except Exception as exc:
+            lines.append("screenshot: " + describe_failure(exc))
+    if path is not None:
+        flat = flat_colour(path)
+        try:
+            size = image_size(path)
+            lines.append(f"screenshot: {size[0]}×{size[1]} px, {path.stat().st_size} bytes"
+                         + (" — one flat colour: Screen Recording is probably not allowed for this terminal "
+                            "(System Settings → Privacy & Security → Screen Recording)" if flat else ""))
+        except Exception as exc:
+            lines.append("screenshot: " + describe_failure(exc))
+        try:
+            boxes = await asyncio.to_thread(recognize_text, path)
+            lines.append(f"OCR on that picture: {len(boxes)} pieces of text")
+        except Exception as exc:
+            import traceback
+
+            tail = " | ".join(line.strip() for line in traceback.format_exc().splitlines()[-4:])
+            lines.append(f"OCR on that picture failed: {describe_failure(exc)}  [{tail}]")
+    return lines
+
+
 async def look(surface: NativeSurface, app: str) -> bool:
     print(f"Looking at {app or 'the frontmost app'}")
     try:
@@ -104,14 +183,45 @@ async def look(surface: NativeSurface, app: str) -> bool:
     print("\n" + "\n".join("    " + line for line in listing.splitlines()[:40]) + "\n")
     ok = step("menus", bool(snap.menus), ", ".join(snap.menus[:8]))
 
+    shots: list[Path] = []
+    boxes: list = []
+
+    async def capture(pid: int, number: int) -> Path:
+        shots.append(await capture_window(pid, number))
+        return shots[-1]
+
+    def recognize(path: str):
+        boxes.extend(recognize_text(path))
+        return boxes
+
     try:
-        marks, marked, overlay = await surface.mark(capture_window, app,
+        marks, marked, overlay = await surface.mark(capture, app, recognize=recognize,
                                                     overlay_dir=Path(tempfile.mkdtemp()))
-        texts = [m for m in marks if m.source == "ocr"]
-        ok &= step("text on a screenshot", bool(texts), f"{len(texts)} pieces of text, "
-                   f"{len(marks)} marks" + (f", overlay at {overlay}" if overlay else ""))
     except Exception as exc:  # report, don't crash
-        ok &= step("text on a screenshot", False, str(exc))
+        ok &= step("text on a screenshot", False, describe_failure(exc))
+        for line in await diagnose_screenshot(surface, snap, shots):
+            print("      diagnosis: " + line)
+        return ok
+    # Whether OCR read text is a question about the picture, not about the window's layout:
+    # text that sits inside a control (a terminal's one big text area) is named by that
+    # control in the marks, so it can't be counted from the marks alone.
+    read = [b for b in boxes if b.confidence >= MIN_CONFIDENCE and b.text.strip()]
+    outside = [m for m in marks if m.source == "ocr"]
+    ok &= step("text on a screenshot", bool(read),
+               f"{len(read)} pieces of text read ({len(outside)} outside any control), {len(marks)} marks"
+               + (f", overlay at {overlay}" if overlay else ""))
+    if not read:
+        for line in await diagnose_screenshot(surface, snap, shots):
+            print("      diagnosis: " + line)
+        return ok
+    # And whether it read the right text: the words in the picture should be words the
+    # window's own accessibility text has (its title, menus, labels, values).
+    common = matching_words([b.text for b in read], window_texts(snap))
+    ok &= step("screenshot text matches the window's own text", bool(common),
+               f"both contain: {', '.join(common[:8])}" if common else
+               f"no word in common. Screenshot: {' · '.join(b.text for b in read[:8])}. "
+               f"Window: {' · '.join(t for t in window_texts(snap) if t)[:200]}",
+               inconclusive=not common)
     return ok
 
 

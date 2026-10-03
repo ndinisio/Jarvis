@@ -220,7 +220,8 @@ class Criterion:
 
 CRITERIA = (
     Criterion("AX observation", "real applications successfully inspected",
-              ("read the window", "menus", "text on a screenshot")),
+              ("read the window", "menus", "text on a screenshot",
+               "screenshot text matches the window's own text")),
     Criterion("AX actions", "press and set-value actually work",
               ("pressing the buttons worked the sum", "typed Unicode text")),
     Criterion("Keyboard", "real input to the target process verified",

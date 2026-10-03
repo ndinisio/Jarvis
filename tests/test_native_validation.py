@@ -165,7 +165,8 @@ def _steps(**labels):
 
 
 def test_a_criterion_is_shown_only_when_every_label_under_it_passed(nv):
-    labels = dict.fromkeys(("read the window", "menus", "text on a screenshot"), "pass")
+    labels = dict.fromkeys(("read the window", "menus", "text on a screenshot",
+                            "screenshot text matches the window's own text"), "pass")
     rows = {row[0]: row for row in nv.evaluate(_steps(**{k.replace(" ", "_"): v for k, v in labels.items()}), [], 1)}
     assert rows["AX observation"][2] == "pass"
     broken = {**labels, "menus": "fail"}
@@ -177,7 +178,8 @@ def test_a_label_never_reached_is_not_run_and_an_undecided_one_is_inconclusive(n
     steps = _steps(read_the_window="pass", menus="pass")
     rows = {row[0]: row for row in nv.evaluate(steps, [], 1)}
     assert rows["AX observation"][2] == "not run" and "text on a screenshot (not run)" in rows["AX observation"][3]
-    steps = _steps(read_the_window="pass", menus="inconclusive", text_on_a_screenshot="pass")
+    steps = _steps(read_the_window="pass", menus="inconclusive", text_on_a_screenshot="pass",
+                   **{"screenshot_text_matches_the_window's_own_text": "pass"})
     assert {row[0]: row for row in nv.evaluate(steps, [], 1)}["AX observation"][2] == "inconclusive"
     steps = _steps(read_the_window="fail", menus="inconclusive")
     assert {row[0]: row for row in nv.evaluate(steps, [], 1)}["AX observation"][2] == "fail", "a failure outranks the rest"

@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .ax import Control, Frame
 
@@ -63,6 +64,20 @@ class Mark:
         return f'[{self.handle}] {self.kind} "{label}"' if label else f"[{self.handle}] {self.kind} (unlabelled)"
 
 
+def _vision_options() -> Any:
+    """The (empty) options dictionary Vision wants — a real Cocoa one.
+
+    Not ``{}``: a Python dict crosses into Objective-C as PyObjC's
+    ``OC_PythonDictionary``, whose ``-removeObjectForKey:`` raises
+    ``NSInvalidArgumentException - key does not exist`` for a key that isn't
+    there (Cocoa's own dictionaries ignore it), and Vision removes keys it may
+    not find. Seen on a Mac as the "text on a screenshot" step of
+    ``scripts/check_native.py`` failing with exactly that message."""
+    from Foundation import NSMutableDictionary
+
+    return NSMutableDictionary.dictionary()
+
+
 def recognize_text(path: str | Path, *, fast: bool = False) -> list[TextBox]:
     """Text in an image, via Apple's Vision framework (macOS only;
     ``pyobjc-framework-Vision``). Synchronous — call it from a thread."""
@@ -70,7 +85,7 @@ def recognize_text(path: str | Path, *, fast: bool = False) -> list[TextBox]:
     from Foundation import NSURL
 
     url = NSURL.fileURLWithPath_(str(path))
-    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, {})
+    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, _vision_options())
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLevel_(1 if fast else 0)   # 0 accurate, 1 fast
     request.setUsesLanguageCorrection_(not fast)

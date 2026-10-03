@@ -88,8 +88,10 @@ class Calculator:
             button.on_perform = lambda _action, key=key: self.press(key)
         window = El("AXWindow", "Calculator", actions=(), frame=self.WINDOW,
                     children=[self.screen, *self.buttons.values()])
+        menus = El("AXMenuBar", actions=(), children=[El("AXMenuBarItem", "Apple"), El("AXMenuBarItem", "Calculator"),
+                                                      El("AXMenuBarItem", "View")])
         self.app = El("AXApplication", "Calculator", actions=(), AXWindows=[window],
-                      AXFocusedWindow=window, AXMenuBar=El("AXMenuBar", actions=()))
+                      AXFocusedWindow=window, AXMenuBar=menus)
 
     def press(self, key: str) -> None:
         if key == "clear":
@@ -1176,3 +1178,134 @@ async def test_json_goes_where_it_is_told_and_a_failed_step_fails_the_run(cn, mo
 async def test_repeat_below_one_is_one(cn, monkeypatch):
     ran = _patch_main(cn, monkeypatch, argv=["--repeat", "0"])
     assert await cn.main() == 0 and ran["look"] == 1
+
+
+# ---------------------------------------------------------------------------
+# step 1: looking, and "text on a screenshot"
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def looking(cn, monkeypatch, tmp_path):
+    """Calculator's window, a screenshot of it, and OCR that returns whatever
+    the test sets in ``ocr`` (a list of TextBox, or an exception to raise)."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    calculator = Calculator()
+    state = {"ocr": calculator.ocr(2), "picture": "busy"}
+
+    async def capture(pid, number):
+        path = tmp_path / "window.png"
+        image = Image.new("RGB", (400, 600), "white")
+        if state["picture"] == "busy":
+            for x in range(0, 400, 8):
+                image.putpixel((x, x), (0, 0, 0))
+        image.save(path)
+        return path
+
+    def recognize(path):
+        if isinstance(state["ocr"], Exception):
+            raise state["ocr"]
+        return state["ocr"]
+
+    monkeypatch.setattr(cn, "capture_window", capture)
+    monkeypatch.setattr(cn, "recognize_text", recognize)
+    surface = surface_for({"Calculator": (101, calculator.app)}, "Calculator", ClickingInput(calculator))
+    return cn, surface, state, calculator
+
+
+async def test_text_that_sits_inside_a_control_still_counts_as_text_read_off_the_screenshot(looking, capsys):
+    """A terminal's text is all inside one big text area, so none of it becomes a
+    mark of its own; OCR reading it is still what the step is about. Here every
+    piece of text is inside a button, so there are no marks from text at all."""
+    cn, surface, state, calculator = looking
+    state["ocr"] = calculator.ocr(2) + [TextBox("Clear", x=48, y=128, w=24, h=24)]
+    assert await cn.look(surface, "Calculator") is True
+    out = capsys.readouterr().out
+    assert "✓ text on a screenshot — 7 pieces of text read (0 outside any control)" in out
+    assert "✓ screenshot text matches the window's own text — both contain: clear" in out
+
+
+async def test_text_outside_every_control_is_counted_apart_from_text_inside_them(looking, capsys):
+    cn, surface, state, calculator = looking
+    state["ocr"] = calculator.ocr(2) + [TextBox("Calculator", x=300, y=10, w=140, h=24)]
+    assert await cn.look(surface, "Calculator") is True
+    out = capsys.readouterr().out
+    assert "✓ text on a screenshot — 7 pieces of text read (1 outside any control)" in out
+    assert "✓ screenshot text matches the window's own text — both contain: calculator" in out
+
+
+async def test_a_screenshot_with_no_readable_text_is_still_a_failure(looking, capsys):
+    cn, surface, state, _ = looking
+    state["ocr"] = []
+    assert await cn.look(surface, "Calculator") is False
+    out = capsys.readouterr().out
+    assert "✗ text on a screenshot — 0 pieces of text read" in out
+    assert "diagnosis: OCR on that picture: 0 pieces of text" in out
+    assert "one flat colour" not in out, "this picture has content, so it isn't a permission problem"
+
+
+async def test_text_below_the_confidence_floor_is_not_text_read(looking, capsys):
+    cn, surface, state, _ = looking
+    state["ocr"] = [TextBox("smudge", x=10, y=10, w=50, h=12, confidence=0.1)]
+    assert await cn.look(surface, "Calculator") is False
+    assert "✗ text on a screenshot — 0 pieces of text read" in capsys.readouterr().out
+
+
+async def test_a_blank_screenshot_points_at_screen_recording(looking, capsys):
+    cn, surface, state, _ = looking
+    state["ocr"], state["picture"] = [], "blank"
+    assert await cn.look(surface, "Calculator") is False
+    out = capsys.readouterr().out
+    assert "✗ text on a screenshot" in out
+    assert "one flat colour: Screen Recording is probably not allowed for this terminal" in out
+
+
+async def test_the_failure_seen_on_a_mac_says_what_raised_where_and_which_stage_it_was(looking, capsys):
+    """The step used to print just the exception text — "NSInvalidArgumentException
+    - key does not exist" — with nothing to say it came from the OCR, or from where."""
+    cn, surface, state, _ = looking
+    state["ocr"] = ValueError("NSInvalidArgumentException - key does not exist")
+    assert await cn.look(surface, "Calculator") is False
+    out = capsys.readouterr().out
+    assert "✗ text on a screenshot — ValueError: NSInvalidArgumentException - key does not exist — at test_check_native.py" in out \
+        or "✗ text on a screenshot — ValueError: NSInvalidArgumentException - key does not exist — at check_native.py" in out
+    assert "diagnosis: window id: 4242" in out
+    assert "diagnosis: screenshot: 400×600 px" in out
+    assert "diagnosis: OCR on that picture failed: ValueError: NSInvalidArgumentException - key does not exist" in out
+
+
+async def test_a_screenshot_whose_text_shares_nothing_with_the_window_is_inconclusive_not_a_pass(looking, capsys):
+    cn, surface, state, _ = looking
+    state["ocr"] = [TextBox("Completely unrelated sentence", x=10, y=10, w=200, h=14)]
+    assert await cn.look(surface, "Calculator") is False
+    out = capsys.readouterr().out
+    assert "✓ text on a screenshot — 1 pieces of text read" in out
+    assert "⚠ screenshot text matches the window's own text — no word in common. Screenshot: Completely unrelated sentence" in out
+
+
+async def test_no_window_to_photograph_is_reported_by_the_screenshot_stage(looking, monkeypatch, capsys):
+    cn, surface, state, _ = looking
+    surface.backend.window_number = lambda pid, title="": None
+    assert await cn.look(surface, "Calculator") is False
+    out = capsys.readouterr().out
+    assert "✗ text on a screenshot — I couldn't find Calculator's window on screen to look at." in out
+    assert "diagnosis: window id: none found for this window on screen" in out
+
+
+async def test_matching_words_needs_four_letters_and_ignores_case_and_punctuation(cn):
+    assert cn.matching_words(["Zsh — Documents"], ["documents", "Terminal"]) == ["documents"]
+    assert cn.matching_words(["abc de"], ["abc de"]) == []
+    assert cn.matching_words(["TERMINAL-window"], ["terminal"]) == ["terminal"]
+    assert cn.matching_words([], ["terminal"]) == []
+
+
+async def test_a_failure_is_described_by_its_type_and_the_innermost_line_of_this_project(cn):
+    def deep():
+        raise KeyError("missing")
+
+    try:
+        deep()
+    except KeyError as exc:
+        text = cn.describe_failure(exc)
+    assert text.startswith("KeyError: 'missing' — at test_check_native.py:") and text.endswith(" in deep")
+    assert cn.describe_failure(cn.NativeError("plain words")) == "plain words"
