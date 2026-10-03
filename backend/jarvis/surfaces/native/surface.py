@@ -92,6 +92,9 @@ class NativeSurface:
         #: it, checking it is still the one asked for, re-finding it) — so a
         #: timing harness can tell locating from acting.
         self.resolve_seconds = 0.0
+        #: Where the last drag took hold and let go (``ax.GrabPoint``s) and the two elements'
+        #: frames — what a validation run prints when the app didn't take the drop.
+        self.last_drag: dict[str, Any] | None = None
         self._backend = backend
         self._input = input
         self._clipboard = clipboard
@@ -253,7 +256,7 @@ class NativeSurface:
     def _press(self, handle: str, clicks: int, button: str) -> str:
         element, pid, attrs = self._resolve(handle)
         backend = self.backend
-        name = ax.label_for(attrs) or ax.ROLE_NAMES.get(str(attrs.get("AXRole")), "control")
+        name = self._name(element, attrs, "control")
         if attrs.get("AXEnabled") is False:
             raise NativeError(f"“{name}” is greyed out right now.")
         actions = backend.actions(element)
@@ -415,18 +418,26 @@ class NativeSurface:
             raise NativeError(f"I couldn't choose “{' › '.join(chosen_titles)}”.")
         return f"Chose {' › '.join(chosen_titles)} in {name}."
 
+    def _name(self, element: Any, attrs: dict[str, Any], fallback: str) -> str:
+        """What to call *element* in a sentence: its listed label — a row is named by the text
+        inside it, which ``label_for`` on the row alone never sees — else its kind."""
+        role = str(attrs.get("AXRole") or "")
+        return ax.control_label(self.backend, element, role, attrs) or ax.ROLE_NAMES.get(role, fallback)
+
     async def drag(self, source: str, target: str) -> str:
         return await asyncio.to_thread(self._drag, source, target)
 
     def _drag(self, source: str, target: str) -> str:
         start, pid, a = self._resolve(source)
         end, _, b = self._resolve(target)
-        fa, fb = ax.frame_of(a), ax.frame_of(b)
-        if fa is None or fb is None:
+        grab, drop = ax.grab_point(self.backend, start, a), ax.grab_point(self.backend, end, b)
+        if grab is None or drop is None:
             raise NativeError("One of those has no position on screen to drag from or to.")
         self._front(pid)
-        self.input.drag(fa.center, fb.center)
-        return f"Dragged “{ax.label_for(a)}” onto “{ax.label_for(b)}”."
+        self.last_drag = {"from": grab, "to": drop, "source": ax.frame_of(a), "target": ax.frame_of(b)}
+        self.input.drag(grab.point, drop.point)
+        return (f"Dragged “{self._name(start, a, 'item')}” onto “{self._name(end, b, 'item')}” "
+                "— the drop is the app's to accept; check that it moved.")
 
     async def scroll_to(self, handle: str) -> None:
         """Put the pointer over *handle*, so the next scroll goes to it."""

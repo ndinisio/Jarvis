@@ -159,6 +159,15 @@ class MacAXBackend:
         return (self.attribute(app, "AXFocusedWindow") or self.attribute(app, "AXMainWindow")
                 or next(iter(self.windows(app)), None))
 
+    def element_at(self, x: float, y: float) -> Any:
+        """The element Accessibility reports at a screen point — what a click there would land on."""
+        try:
+            error, element = self.AS.AXUIElementCopyElementAtPosition(
+                self.AS.AXUIElementCreateSystemWide(), float(x), float(y), None)
+        except Exception:
+            return None
+        return element if error == 0 else None
+
     def focused_element(self, app: Any) -> Any:
         return self.attribute(app, "AXFocusedUIElement")
 

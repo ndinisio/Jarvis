@@ -174,6 +174,29 @@ class Control:
 
 
 @dataclass
+class TextItem:
+    """One piece of static text, with its two halves kept apart.
+
+    An ``AXStaticText`` carries *what the app calls it* (``AXTitle`` / ``AXDescription`` —
+    Calculator's display is described as "Edit field", the line above it as "Last Expression")
+    separately from *what it shows* (``AXValue`` — "12"). A reader that keeps only the first
+    non-empty one reads the display as "Edit field" and never sees the sum, so both are kept:
+    a check that wants the shown value reads ``value``, the listing prints ``text``."""
+
+    label: str
+    value: str
+    role: str = "text"
+    identifier: str = ""
+    frame: Frame | None = None
+
+    @property
+    def text(self) -> str:
+        if self.label and self.value and self.label != self.value:
+            return f"{self.label}: {self.value}"
+        return self.value or self.label
+
+
+@dataclass
 class WindowSnapshot:
     app: str
     pid: int
@@ -181,6 +204,7 @@ class WindowSnapshot:
     frame: Frame | None
     controls: list[Control] = field(default_factory=list)
     texts: list[str] = field(default_factory=list)
+    text_items: list[TextItem] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     menus: list[str] = field(default_factory=list)
     visited: int = 0
@@ -209,6 +233,72 @@ def label_for(attrs: dict[str, Any], texts_inside: list[str] | None = None,
     if texts_inside:
         return " · ".join(texts_inside)[:120]
     return _text(attrs.get("AXHelp")) or _text(attrs.get("AXPlaceholderValue"))
+
+
+def text_item(role: str, attrs: dict[str, Any], frame: Frame | None = None) -> TextItem:
+    """A static text's name and its shown value, as two things (see :class:`TextItem`)."""
+    label = _text(attrs.get("AXTitle")) or _text(attrs.get("AXDescription"))
+    return TextItem(label=label, value=shown_text(attrs.get("AXValue")),
+                    role=ROLE_NAMES.get(role, "text"), identifier=_text(attrs.get("AXIdentifier")),
+                    frame=frame)
+
+
+@dataclass
+class GrabPoint:
+    """Where the pointer goes to take hold of (or drop onto) an element, and why there."""
+
+    x: float
+    y: float
+    on: str          # "icon" / "name" / "centre"
+
+    @property
+    def point(self) -> tuple[float, float]:
+        return (self.x, self.y)
+
+
+#: Bounds on the search for a row's icon and name: its first few descendants are enough.
+_GRAB_BUDGET = 14
+_ICON_MAX = 64.0
+
+
+def grab_point(backend: AXBackend, element: Any, attrs: dict[str, Any]) -> GrabPoint | None:
+    """The spot to press on, or release over, to act on *element* with the pointer.
+
+    The centre of a plain control is on it. The centre of a *row* is not: a row spans the whole
+    width of its list, and a list view only treats the item's icon and its name as the item —
+    the middle of the row is blank space in the Date Modified column, where a press selects at
+    best and a drag starts a rubber band instead of carrying the file. So a row (or cell) is
+    taken by its icon if it has one, else just inside the left edge of its first text (the
+    text's own frame can be as wide as its column, whose middle is as blank as the row's)."""
+    frame = frame_of(attrs)
+    role = str(attrs.get("AXRole") or "")
+    if role in {"AXRow", "AXCell"}:
+        icon: tuple[float, float] | None = None
+        name: tuple[float, float] | None = None
+        queue = list(backend.attribute(element, "AXChildren") or [])
+        budget = _GRAB_BUDGET
+        while queue and budget > 0 and icon is None:
+            budget -= 1
+            child = queue.pop(0)
+            child_attrs = backend.attributes(child, ("AXRole", "AXPosition", "AXSize"))
+            child_role, child_frame = child_attrs.get("AXRole"), frame_of(child_attrs)
+            usable = child_frame is not None and not child_frame.empty and (
+                frame is None or child_frame.intersects(frame))
+            if child_role == "AXImage":
+                if usable and child_frame.w <= _ICON_MAX and child_frame.h <= _ICON_MAX:
+                    icon = child_frame.center
+            elif child_role in {"AXStaticText", "AXTextField"}:
+                if usable and name is None:
+                    name = (child_frame.x + min(child_frame.w / 2, 24.0), child_frame.center[1])
+            else:
+                queue.extend(list(backend.attribute(child, "AXChildren") or []))
+        if icon is not None:
+            return GrabPoint(*icon, "icon")
+        if name is not None:
+            return GrabPoint(*name, "name")
+    if frame is None or frame.empty:
+        return None
+    return GrabPoint(*frame.center, "centre")
 
 
 def control_label(backend: AXBackend, element: Any, role: str, attrs: dict[str, Any]) -> str:
@@ -245,6 +335,7 @@ def snapshot(backend: AXBackend, window: Any, *, app: str = "", pid: int = 0,
                             frame=window_frame)
     found: list[Control] = []
     texts: list[str] = []
+    items: list[TextItem] = []
     roots: list[tuple[Any, bool]] = [(window, False)] + [(b, True) for b in (blockers or [])]
 
     for root, root_blocks in roots:
@@ -267,18 +358,24 @@ def snapshot(backend: AXBackend, window: Any, *, app: str = "", pid: int = 0,
             if role in SKIP:
                 continue
             frame = frame_of(attrs)
-            if frame is not None and frame.empty and role not in {"AXGroup", "AXLayoutArea"}:
+            blocking = role in BLOCKING or subrole in BLOCKING
+            # A sheet or dialog in the tree is one, whatever frame it reports: an element with
+            # no area is skipped as hidden, but that rule is for plumbing, and a blocker that
+            # drops out of the listing leaves the model acting on a window that is not
+            # accepting input. (Its controls still have frames of their own to be judged by.)
+            if frame is not None and frame.empty and role not in {"AXGroup", "AXLayoutArea"} and not blocking:
                 continue            # hidden
-            if role in BLOCKING or subrole in BLOCKING:
+            if blocking:
                 blocked = True
                 result.blockers.append(_blocker_name(backend, element, attrs))
             visible = clip is None or frame is None or frame.intersects(clip)
 
             listed_row = False
             if role == "AXStaticText" or role == "AXHeading":
-                text = label_for(attrs)
-                if text and not in_row and len(texts) < MAX_TEXTS and visible:
-                    texts.append(text[:100])
+                item = text_item(role, attrs, frame)
+                if item.text and not in_row and len(texts) < MAX_TEXTS and visible:
+                    texts.append(item.text[:100])
+                    items.append(item)
             elif _interesting(role, attrs, backend, element):
                 control = Control(
                     ref=element, ax_role=role, subrole=subrole,
@@ -314,6 +411,7 @@ def snapshot(backend: AXBackend, window: Any, *, app: str = "", pid: int = 0,
     if len(ordered) > offset + max_listed:
         result.truncated = True
     result.texts = texts
+    result.text_items = items
     return result
 
 
@@ -448,8 +546,9 @@ def _value_text(role: str, attrs: dict[str, Any]) -> str:
     value = attrs.get("AXValue")
     if isinstance(value, bool):
         return ""
-    if isinstance(value, (int, float)) and role in {"AXSlider", "AXIncrementor", "AXStepper"}:
-        return f"{value:g}"
+    if isinstance(value, (int, float)) and (role in {"AXSlider", "AXIncrementor", "AXStepper"}
+                                            or role in EDITABLE):
+        return number_text(value)
     return _text(value)
 
 
@@ -477,6 +576,24 @@ def _stable_lines(snap: WindowSnapshot) -> list[str]:
     for control in snap.controls:
         out.append(f"{control.role}|{control.label}|{control.value}|{control.checked}|{control.selected}")
     return out
+
+
+def number_text(value: int | float) -> str:
+    """12 and 12.0 are "12"; 0.5 is "0.5"; nothing in scientific notation."""
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return ""
+        return str(int(value)) if value.is_integer() else format(value, ".12g")
+    return str(value)
+
+
+def shown_text(value: Any) -> str:
+    """What a *text* element shows: its string, or its number — which is a real value for text
+    (a calculator's display arrives as a number), unlike a checkbox's 0/1 that :func:`_text`
+    is right to drop."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return number_text(value)
+    return _text(value)
 
 
 def _text(value: Any) -> str:

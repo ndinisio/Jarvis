@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 from jarvis.surfaces.native import NativeSurface
+from jarvis.surfaces.native.ax import TextItem
 from jarvis.surfaces.native.marks import TextBox
 from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED
 from test_native import El, FakeBackend, RecordingInput
@@ -75,17 +76,28 @@ class Calculator:
     #: for the symbols is not what accessibility calls them.
     PRINTED = {"clear": "AC", "7": "7", "add": "+", "5": "5", "equals": "=", "9": "9"}
 
-    def __init__(self, names: dict[str, str] | None = None):
+    def __init__(self, names: dict[str, str] | None = None, display_as: str = "plain"):
+        """*display_as* is how the display is exposed: ``plain`` (a static text whose value is the
+        number — the shape every earlier version of this fake had, and the one real Calculator is
+        not), ``described`` (the real shape, as far as a Mac's own dump has shown it: a static text
+        *described* as "Edit field", its value the number as a string, under a "Last Expression"
+        line), or ``number`` (the same, with the value an NSNumber)."""
         self.display, self.left, self.fresh = "0", 0, True
+        self.display_as = display_as
         called = {"clear": "All Clear", "7": "7", "add": "add", "5": "5", "equals": "equals",
                   "9": "9", **(names or {})}
-        self.screen = El("AXStaticText", value="0", actions=(), frame=(110, 110, 180, 30))
+        self.screen = El("AXStaticText", value="0", actions=(), frame=(110, 110, 180, 30),
+                         description="" if display_as == "plain" else "Edit field")
+        self.expression = El("AXStaticText", description="Last Expression", value="", actions=(),
+                             frame=(110, 104, 180, 10))
+        self._show()
         self.buttons = {key: El("AXButton", called[key], frame=(x, y, 40, 40))
                         for key, (x, y) in self.LAYOUT.items()}
         for key, button in self.buttons.items():
             button.on_perform = lambda _action, key=key: self.press(key)
         window = El("AXWindow", "Calculator", actions=(), frame=self.WINDOW,
-                    children=[self.screen, *self.buttons.values()])
+                    children=[*([] if display_as == "plain" else [self.expression]), self.screen,
+                              *self.buttons.values()])
         menus = El("AXMenuBar", actions=(), children=[El("AXMenuBarItem", "Apple"), El("AXMenuBarItem", "Calculator"),
                                                       El("AXMenuBarItem", "View")])
         self.app = El("AXApplication", "Calculator", actions=(), AXWindows=[window],
@@ -101,7 +113,10 @@ class Calculator:
         else:
             self.display = key if self.fresh else self.display + key
             self.fresh = False
-        self.screen.attrs["AXValue"] = self.display
+        self._show()
+
+    def _show(self) -> None:
+        self.screen.attrs["AXValue"] = int(self.display) if self.display_as == "number" else self.display
 
     def click_at(self, x: float, y: float) -> None:
         for key, (bx, by) in self.LAYOUT.items():
@@ -161,6 +176,33 @@ async def test_calculator_checks_pass_against_a_working_calculator(cn, calc, cap
     assert ("launch", "Calculator") in cn.calls
     assert ("quit", "Calculator") in cn.calls, "it was launched by the check, so it's quit by it"
     assert ("clipboard", "0") in cn.calls, "the clipboard it borrowed is put back"
+
+
+@pytest.mark.parametrize("display_as", ["plain", "described", "number"])
+async def test_read_window_shows_the_result_however_the_display_is_exposed(cn, display_as, capsys):
+    """The display on a real Mac is a static text the app *describes* ("Edit field"), whose value is
+    the sum. Reading it by name alone gives "Edit field" and never "12"."""
+    calculator = Calculator(display_as=display_as)
+    surface = surface_for({"Calculator": (101, calculator.app)}, "Calculator", ClickingInput(calculator))
+    cn.read_clipboard = lambda: calculator.display
+    assert await cn.calculator_click(surface) is True
+    out = capsys.readouterr().out
+    assert "✓ read_window shows the result" in out and "✗" not in out
+    if display_as != "plain":
+        assert "Edit field → 12" in out, "the check prints the name and the shown value apart"
+
+
+async def test_a_display_that_never_shows_the_sum_fails_and_dumps_the_raw_text_attributes(cn, capsys):
+    calculator = Calculator(display_as="number")
+    surface = surface_for({"Calculator": (101, calculator.app)}, "Calculator", ClickingInput(calculator))
+    cn.read_clipboard = lambda: "12"                       # the app copies 12; read_window can't see it
+    calculator.press = lambda key: None                    # ...because the display never changes
+    assert await cn.calculator_click(surface) is False
+    out = capsys.readouterr().out
+    assert "✗ read_window shows the result" in out
+    assert "AXStaticText Description='Edit field'<str> Value=0<int>" in out, \
+        "the raw attribute and the type it came back as, so a number is not mistaken for a string"
+    assert "AXStaticText Description='Last Expression'<str>" in out
 
 
 async def test_a_calculator_that_was_already_open_is_left_open(cn, calc, monkeypatch):
@@ -300,17 +342,26 @@ async def test_nothing_is_closed_if_the_check_never_made_a_document(cn):
 # Finder
 # ---------------------------------------------------------------------------
 class Finder:
-    """A Finder list-view window for the check's throwaway folder."""
+    """A Finder list-view window for the check's throwaway folder.
 
-    def __init__(self, home: Path, *, title: str | None = None):
+    Each row is an icon, a name and a date column, as a list view lays them out — the row spans the
+    whole width, the name's text is only as wide as its letters although its frame is the column's.
+    With ``expose_icon=False`` the icon is drawn (and draggable) but Accessibility doesn't list it."""
+
+    ROW_X, ROW_W, ICON, NAME_X, NAME_W, LETTER = 20, 400, (22, 16, 16), 42, 200, 7
+
+    def __init__(self, home: Path, *, title: str | None = None, expose_icon: bool = True):
         self.base = home / "Desktop" / f"JARVIS-check-{os.getpid()}"
         self.log: list[str] = []
+        self.rows = {"drag-me.txt": 100, "target": 130}
 
         def row(name, y):
-            return El("AXRow", actions=(), frame=(20, y, 400, 22), children=[
-                El("AXCell", actions=(), frame=(20, y, 400, 22), children=[
-                    El("AXStaticText", value=name, actions=(), frame=(24, y, 200, 18)),
-                    El("AXStaticText", value="--", actions=(), frame=(240, y, 60, 18))])])
+            icon = [El("AXImage", actions=(), frame=(self.ICON[0], y + 3, 16, 16))] if expose_icon else []
+            return El("AXRow", actions=(), frame=(self.ROW_X, y, self.ROW_W, 22), children=[
+                El("AXCell", actions=(), frame=(self.ROW_X, y, self.ROW_W, 22), children=[
+                    *icon,
+                    El("AXStaticText", value=name, actions=(), frame=(self.NAME_X, y + 2, self.NAME_W, 18)),
+                    El("AXStaticText", value="--", actions=(), frame=(260, y, 60, 18))])])
 
         self.file_row, self.folder_row = row("drag-me.txt", 100), row("target", 130)
         self.window = El("AXWindow", title or self.base.name, actions=(), frame=(0, 0, 500, 300),
@@ -327,19 +378,92 @@ class Finder:
             El("AXMenuBarItem", "View", children=[El("AXMenu", actions=(), children=[item("as List", "View")])])])
         self.app = El("AXApplication", "Finder", actions=(), AXWindows=[self.window],
                       AXFocusedWindow=self.window, AXMenuBar=menubar)
+        self._link(self.window)
+
+    def _link(self, element: El) -> None:
+        for child in element.children:
+            child.attrs["AXParent"] = element
+            self._link(child)
+
+    def hit(self, x: float, y: float) -> str | None:
+        """What a list view treats as the item at a point: its icon or its name's letters — not the
+        blank rest of the row. ("file" / "folder" / None.)"""
+        for name, top in self.rows.items():
+            if not top <= y < top + 22:
+                continue
+            on_icon = self.ICON[0] <= x <= self.ICON[0] + self.ICON[1]
+            on_name = self.NAME_X <= x <= self.NAME_X + self.LETTER * len(name)
+            if on_icon or on_name:
+                return "file" if name == "drag-me.txt" else "folder"
+        return None
+
+    def over_folder_row(self, x: float, y: float) -> bool:
+        return self.ROW_X <= x <= self.ROW_X + self.ROW_W and self.rows["target"] <= y < self.rows["target"] + 22
 
 
-class DroppingInput(RecordingInput):
-    """Input whose drag moves the file when it ends over the folder row."""
+class FinderMac(FakeBackend):
+    """Accessibility's answer to "what is at this point", from the window's own frames."""
 
-    def __init__(self, finder: Finder):
-        super().__init__()
-        self.finder = finder
+    def element_at(self, x, y):
+        found = None
+        stack = [self.apps["Finder"][1].attrs["AXFocusedWindow"]]
+        while stack:
+            element = stack.pop()
+            px, py = element.attrs["AXPosition"] or (0, 0)
+            w, h = element.attrs["AXSize"] or (0, 0)
+            if px <= x <= px + w and py <= y <= py + h and w and h:
+                found = element
+                stack.extend(element.children)
+        return found
 
-    def drag(self, start, end, steps: int = 12) -> None:
-        super().drag(start, end, steps)
-        if 130 <= end[1] <= 152:
-            (self.finder.base / "drag-me.txt").rename(self.finder.base / "target" / "drag-me.txt")
+
+class FinderPoster:
+    """What Finder's list view does with the mouse events it is sent — as far as this repository
+    can model it, which is *a model, not a measurement*. A press takes hold of the file only on
+    its icon or its name. The drag begins once the pointer has moved past a threshold and had a
+    moment to. The drop is taken if the pointer has been seen over the folder for a moment before
+    the button comes up. (The real answer is what ``check_native.py --controls`` finds.)"""
+
+    THRESHOLD, BEGIN_S, DWELL_S = 4.0, 0.1, 0.25
+
+    def __init__(self, finder: Finder, clock: list[float], *, accepts: bool = True):
+        self.finder, self.clock, self.accepts = finder, clock, accepts
+        self.held = False
+        self.pressed_at = (0.0, 0.0)
+        self.pressed_when = 0.0
+        self.began: float | None = None
+        self.over_since: float | None = None
+
+    def mouse(self, kind, x, y, button="left", state=1):
+        now = self.clock[0]
+        if kind == "down":
+            self.held = self.finder.hit(x, y) == "file"
+            self.pressed_at, self.pressed_when, self.began, self.over_since = (x, y), now, None, None
+        elif kind == "drag" and self.held:
+            moved = ((x - self.pressed_at[0]) ** 2 + (y - self.pressed_at[1]) ** 2) ** 0.5
+            if self.began is None and moved >= self.THRESHOLD and now - self.pressed_when >= self.BEGIN_S:
+                self.began = now
+            over = self.began is not None and self.finder.over_folder_row(x, y)
+            self.over_since = (self.over_since if self.over_since is not None else now) if over else None
+        elif kind == "up":
+            dropped = (self.accepts and self.held and self.began is not None
+                       and self.over_since is not None and now - self.over_since >= self.DWELL_S
+                       and self.finder.over_folder_row(x, y))
+            self.held = False
+            if dropped:
+                (self.finder.base / "drag-me.txt").rename(self.finder.base / "target" / "drag-me.txt")
+
+
+def finder_input(finder: Finder, *, accepts: bool = True):
+    """The real input device, posting to a Finder model on a clock that only its own sleeps advance."""
+    from jarvis.surfaces.native.input import NativeInput
+
+    clock = [0.0]
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    return NativeInput(FinderPoster(finder, clock, accepts=accepts), sleep=sleep)
 
 
 @pytest.fixture
@@ -348,21 +472,64 @@ def home(monkeypatch, tmp_path):
     return tmp_path
 
 
-async def test_a_file_dragged_onto_a_folder_is_checked_on_disk_and_cleaned_up(cn, home, capsys):
-    finder = Finder(home)
-    surface = surface_for({"Finder": (202, finder.app)}, "Finder", DroppingInput(finder))
+def finder_surface(finder: Finder, input_device=None) -> NativeSurface:
+    return NativeSurface(backend=FinderMac({"Finder": (202, finder.app)}, front="Finder"),
+                         input=input_device or finder_input(finder), sleep=lambda _s: None)
+
+
+@pytest.mark.parametrize("expose_icon", [True, False], ids=["icon listed", "icon not listed"])
+async def test_a_file_dragged_onto_a_folder_is_checked_on_disk_and_cleaned_up(cn, home, capsys, expose_icon):
+    finder = Finder(home, expose_icon=expose_icon)
+    surface = finder_surface(finder)
     assert await cn.guarded("x", cn.finder_drag(surface)) is True
     assert "✓ the file is inside the folder" in capsys.readouterr().out
+    assert surface.last_drag["from"].on == ("icon" if expose_icon else "name")
     assert finder.log == ["as List", "Close Window"]
     assert not finder.base.exists(), "the throwaway folder is removed"
 
 
-async def test_a_drag_that_moved_nothing_is_a_failure_that_says_what_is_on_disk(cn, home, capsys):
+def test_the_middle_of_a_row_is_not_the_file_so_a_drag_from_there_moves_nothing(home):
+    """The failure on a real Mac: the drag started at the centre of the row — blank space in the list
+    view — and Finder treated it as a rubber band. The model of Finder here must say the same."""
     finder = Finder(home)
-    surface = surface_for({"Finder": (202, finder.app)}, "Finder")       # a drag that does nothing
+    row = finder.file_row.attrs
+    middle = (row["AXPosition"][0] + row["AXSize"][0] / 2, row["AXPosition"][1] + row["AXSize"][1] / 2)
+    assert finder.hit(*middle) is None, "the model: the row's middle is blank"
+    assert finder.hit(30, 111) == "file" and finder.hit(60, 111) == "file"
+    finder.base.mkdir(parents=True)
+    (finder.base / "target").mkdir()
+    (finder.base / "drag-me.txt").write_text("x")
+    finder_input(finder).drag(middle, (60, 141))
+    assert (finder.base / "drag-me.txt").exists() and not (finder.base / "target" / "drag-me.txt").exists()
+
+
+def test_a_gesture_without_the_pauses_is_not_taken_either(home):
+    from jarvis.surfaces.native.input import NativeInput
+
+    finder = Finder(home)
+    clock = [0.0]
+    poster = FinderPoster(finder, clock)
+    finder.base.mkdir(parents=True)
+    (finder.base / "target").mkdir()
+    (finder.base / "drag-me.txt").write_text("x")
+    quick = NativeInput(poster, sleep=lambda _s: None)           # press, a jump, release: no time passes
+    quick.drag((30, 111), (60, 141))
+    assert (finder.base / "drag-me.txt").exists(), "no time to begin the drag, no time over the target"
+
+
+async def test_a_drag_that_moved_nothing_is_a_failure_that_says_where_it_pressed_and_what_was_there(cn, home, capsys):
+    finder = Finder(home)
+    surface = finder_surface(finder, finder_input(finder, accepts=False))          # Finder ignores the drop
     assert await cn.guarded("x", cn.finder_drag(surface)) is False
     out = capsys.readouterr().out
-    assert "✗ the file is inside the folder" in out and "drag-me.txt" in out
+    assert "✗ the file is inside the folder" in out
+    assert "Dragged “drag-me.txt · --” onto “target · --”" in out, \
+        "rows are named as the listing names them, by the text inside — not the empty “” of before"
+    assert "on disk: ['drag-me.txt', 'target']" in out
+    assert "drag-me.txt is still at the top of the folder; target/drag-me.txt does not exist" in out
+    assert "pressed at (30, 111) on its icon in the row at (20, 100, 400×22)" in out
+    assert "released at (30, 141) on its icon in the row at (20, 130, 400×22)" in out
+    assert "under that point: AXImage ‹ AXCell ‹ AXRow ‹ AXOutline" in out
     assert not finder.base.exists()
 
 
@@ -450,10 +617,19 @@ async def test_picking_and_reading_helpers(cn):
 
     class Snap:
         texts = ["‎12"]
+        text_items = [TextItem(label="", value="‎12")]
         controls = [C("main display", "5")]
 
     assert cn.shows(Snap, "12"), "direction marks around the number don't hide it"
     assert cn.shows(Snap, "5") and not cn.shows(Snap, "1"), "whole texts only, never part of one"
+
+    class Named:
+        texts = ["Edit field: 12"]
+        text_items = [TextItem(label="Edit field", value="12")]
+        controls: list = []
+
+    assert cn.shows(Named, "12"), "a text's shown value counts even when the app names it something else"
+    assert not cn.shows(Named, "Edit"), "...but never a part of its name"
     assert cn.names([C("OK"), C("")], limit=1).endswith("… (2 in all)")
 
 
@@ -1319,8 +1495,13 @@ class ClosingTextEdit:
     (a separate dialog window, not a sheet)."""
 
     def __init__(self, behaviour: str = "sheet", buttons=("Delete", "Cancel", "Save…"), *,
-                 discard_closes: bool = True, identifiers: bool = True, ids: dict | None = None):
+                 discard_closes: bool = True, identifiers: bool = True, ids: dict | None = None,
+                 focus: str = "sheet", sheet_frame: str = "normal"):
+        """*focus*: what the app calls its focused window while the sheet is up (``sheet``, as macOS 27
+        does, or ``window``). *sheet_frame*: the sheet's geometry as it reports it: ``normal``,
+        ``zero`` (0×0), ``flat`` (full width, no height) or ``missing`` (no position or size)."""
         self.behaviour, self.log, self.discard_closes = behaviour, [], discard_closes
+        self.focus, self.sheet_frame = focus, sheet_frame
         self.identifiers, self.ids, self.pressed = identifiers, ids or {}, []
         self.area = El("AXTextArea", description="document", value="", frame=(60, 80, 480, 300))
         self.window = El("AXWindow", "Untitled", actions=(), frame=(50, 50, 500, 400), children=[self.area])
@@ -1354,7 +1535,9 @@ class ClosingTextEdit:
             button.on_perform = (lambda _a, t=title: self._discard(t)) if discards else \
                 (lambda _a, t=title: self._back_out(t))
             controls.append(button)
-        sheet = El("AXSheet", description="save", AXIdentifier="save-panel", actions=(), frame=(60, 200, 480, 200),
+        frame = {"normal": (60, 200, 480, 200), "zero": (60, 200, 0, 0), "flat": (60, 200, 480, 0),
+                 "missing": None}[self.sheet_frame]
+        sheet = El("AXSheet", description="save", AXIdentifier="save-panel", actions=(), frame=frame,
                    children=[El("AXStaticText", value="Do you want to keep this new document?", actions=()),
                              *controls])
         sheet.attrs["AXParent"] = self.window
@@ -1363,7 +1546,7 @@ class ClosingTextEdit:
     def _raise_sheet(self, sheet):
         """As on a Mac: the sheet hangs from the window, and is what the app calls its focused window."""
         self.window.children.append(sheet)
-        self.app.attrs["AXFocusedWindow"] = sheet
+        self.app.attrs["AXFocusedWindow"] = sheet if self.focus == "sheet" else self.window
 
     def _lower_sheet(self):
         self.window.children = [c for c in self.window.children if c.attrs["AXRole"] != "AXSheet"]
@@ -1425,6 +1608,23 @@ async def test_whichever_way_a_macos_release_words_the_sheet_it_is_found_and_dis
     assert textedit.log == ["Close", "discard"], "the document was discarded, and nothing else was pressed"
 
 
+@pytest.mark.parametrize("sheet_frame", ["normal", "zero", "flat", "missing"])
+@pytest.mark.parametrize("focus", ["sheet", "window"])
+async def test_the_exact_structure_seen_on_a_mac_is_found_whatever_is_focused_and_whatever_size_it_reports(
+        cn, quick_sheet, capsys, focus, sheet_frame):
+    """AXWindow → AXSheet desc='save' id='save-panel' → Delete (DontSaveButton) / Cancel (CancelButton) /
+    Save (OKButton): the sheet directly under the window, with the window or the sheet focused, and
+    with the sheet reporting an ordinary frame, none, or one with no area."""
+    textedit, surface = _closing(focus=focus, sheet_frame=sheet_frame)
+    await surface.choose_menu(["File", "Close"], "TextEdit")
+    assert any(c.attrs["AXRole"] == "AXSheet" for c in textedit.window.children)
+    assert await cn.save_sheet(surface, typed="Hello from JARVIS") is True
+    out = capsys.readouterr().out
+    assert "blockers: none" not in out and "no sheet is open" not in out
+    assert "discard = “Delete” (id DontSaveButton)" in out
+    assert textedit.pressed == ["Delete"]
+
+
 async def test_a_sheet_that_slides_down_a_moment_later_is_waited_for(cn, monkeypatch, capsys):
     monkeypatch.setattr(cn, "SHEET_WAIT_S", 2.0)
     textedit, surface = _closing("late")
@@ -1439,7 +1639,8 @@ async def test_no_sheet_at_all_is_a_failure_and_the_tree_is_printed_as_the_evide
     out = capsys.readouterr().out
     assert "✗ the save sheet appeared, listed first — no sheet is open; blockers: none" in out
     assert "evidence: 1 AX window(s): AXWindow title='Untitled'" in out
-    assert "evidence: AXFocusedWindow: AXWindow title='Untitled'  (one of AXWindows)" in out
+    assert "evidence: AXFocusedWindow: AXWindow title='Untitled'" in out and "(one of AXWindows)" in out
+    assert "frame=(50,50 500x400)" in out, "the dump shows geometry, which is what an element is skipped for"
     assert "evidence:     AXTextArea desc='document' value='Hello from JARVIS — café, £5, 😀'" in out
     assert "discard" not in textedit.log, "nothing is discarded when the sheet isn't understood"
 

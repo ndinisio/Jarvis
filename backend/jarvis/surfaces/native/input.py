@@ -205,6 +205,12 @@ class QuartzPoster:
 _GLIDE_MIN_DISTANCE = 8.0
 _GLIDE_STEPS = 6
 _GLIDE_STEP_DELAY = 0.006
+#: A drag: how far the first move goes (points — past the ~4 pt threshold apps use), and the
+#: pauses that let the app follow: resting on the item, after the press, after the first move,
+#: between steps, and while hovering over the target.
+_DRAG_THRESHOLD = 8.0
+_DRAG_HOVER_S, _DRAG_PRESS_S, _DRAG_START_S, _DRAG_STEP_S = 0.15, 0.15, 0.2, 0.015
+_DRAG_DWELL_EVENTS, _DRAG_DWELL_S = 4, 0.12
 
 
 def _glide_points(x0: float, y0: float, x1: float, y1: float,
@@ -266,18 +272,33 @@ class NativeInput:
             self.poster.mouse("move", x, y, button)
         self._last_position = (x, y)
 
-    def drag(self, start: tuple[float, float], end: tuple[float, float], steps: int = 12) -> None:
+    def drag(self, start: tuple[float, float], end: tuple[float, float], steps: int = 24) -> None:
+        """Press at *start*, carry the pointer to *end* and let go there, the way a hand does.
+
+        An app that runs its own drag (Finder's list view, any ``NSDraggingSource``) does not take
+        a press followed straight away by a jump: it needs the pointer seen resting on the item,
+        a first nudge past its drag threshold before the drag begins, and — to take a drop — the
+        pointer seen *over the target*, not arriving and releasing in the same breath. Hence the
+        hover before the press, the small first move and pause, the gradual carry, and the dwell."""
         (x0, y0), (x1, y1) = start, end
         self._glide_to(x0, y0)
-        self._sleep(0.05)
+        self._sleep(_DRAG_HOVER_S)
         self.poster.mouse("down", x0, y0, "left", 1)
-        self._sleep(0.08)
+        self._sleep(_DRAG_PRESS_S)
+        distance = math.hypot(x1 - x0, y1 - y0)
+        reach = min(_DRAG_THRESHOLD, distance) / distance if distance else 0.0
+        nx, ny = x0 + (x1 - x0) * reach, y0 + (y1 - y0) * reach
+        self.poster.mouse("drag", nx, ny)              # past the threshold: the drag begins
+        self._sleep(_DRAG_START_S)
         for step in range(1, steps + 1):
             t = step / steps
-            self.poster.mouse("drag", x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
-            self._sleep(0.02)
-        self._sleep(0.08)
+            self.poster.mouse("drag", nx + (x1 - nx) * t, ny + (y1 - ny) * t)
+            self._sleep(_DRAG_STEP_S)
+        for _ in range(_DRAG_DWELL_EVENTS):            # over the target, so it can offer to take the drop
+            self.poster.mouse("drag", x1, y1)
+            self._sleep(_DRAG_DWELL_S)
         self.poster.mouse("up", x1, y1, "left", 1)
+        self._last_position = (x1, y1)
 
 
 class Clipboard:

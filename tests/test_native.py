@@ -270,7 +270,8 @@ async def test_a_sheet_is_listed_first_and_called_out(notes):
 # scripts/check_native.py --act): the sheet is *the app's focused window*, not a child of
 # a focused window; the window it hangs from is the one entry in AXWindows. The fake tree
 # above had the window focused with the sheet inside it, which is not what macOS says.
-def _save_sheet_app(*, in_window_children: bool = True, nested: bool = False, parent: bool = True):
+def _save_sheet_app(*, in_window_children: bool = True, nested: bool = False, parent: bool = True,
+                    focus: str = "sheet", sheet_frame="normal"):
     delete = El("AXButton", "Delete", AXIdentifier="DontSaveButton", frame=(260, 540, 80, 24))
     cancel = El("AXButton", "Cancel", AXIdentifier="CancelButton", frame=(350, 540, 80, 24))
     save = El("AXButton", "Save", AXIdentifier="OKButton", frame=(440, 540, 80, 24))
@@ -284,6 +285,12 @@ def _save_sheet_app(*, in_window_children: bool = True, nested: bool = False, pa
     window = El("AXWindow", "Untitled", subrole="AXStandardWindow", AXIdentifier="_NS:31", actions=(),
                 frame=(100, 100, 600, 500), children=[close, body, *([sheet] if in_window_children else [])])
     focused = sheet
+    if sheet_frame == "missing":
+        sheet.attrs["AXPosition"] = sheet.attrs["AXSize"] = None
+    elif sheet_frame == "zero":
+        sheet.attrs["AXSize"] = (0.0, 0.0)
+    elif sheet_frame == "flat":
+        sheet.attrs["AXSize"] = (400.0, 0.0)
     if nested:
         confirm = El("AXButton", "Replace", frame=(300, 400, 80, 24))
         inner = El("AXSheet", description="alert", actions=(), frame=(250, 350, 300, 120), children=[confirm])
@@ -292,6 +299,8 @@ def _save_sheet_app(*, in_window_children: bool = True, nested: bool = False, pa
         focused = inner
     if parent:
         sheet.attrs["AXParent"] = window
+    if focus == "window":
+        focused = window
     app = El("AXApplication", "TextEdit", actions=(), AXWindows=[window], AXFocusedWindow=focused,
              AXMenuBar=El("AXMenuBar", actions=()))
     return app, {"window": window, "sheet": sheet, "delete": delete, "cancel": cancel, "save": save,
@@ -355,6 +364,33 @@ async def test_a_sheet_whose_window_cannot_be_found_is_still_read_not_lost():
     surface, _, _ = _on_save_sheet(parent=False)
     snap, _ = await surface.read("TextEdit")
     assert {"Delete", "Cancel", "Save"} <= {c.label for c in snap.controls}
+
+
+@pytest.mark.parametrize("focus", ["sheet", "window"])
+@pytest.mark.parametrize("sheet_frame", ["normal", "missing", "zero", "flat"])
+async def test_the_real_save_sheet_is_a_blocker_whichever_window_is_focused_and_whatever_frame_it_reports(
+        focus, sheet_frame):
+    """AXWindow > AXSheet desc="save" > Delete / Cancel / Save, as a Mac reports it: the sheet
+    directly under the window, and either one of them the app's focused window. A sheet that
+    reports no area is still a sheet — it used to be skipped as a hidden element."""
+    surface, _, _ = _on_save_sheet(focus=focus, sheet_frame=sheet_frame)
+    snap, listing = await surface.read("TextEdit")
+    assert snap.title == "Untitled"
+    assert snap.blockers == ["sheet “save”"]
+    blocked = [c for c in snap.controls if c.in_blocker]
+    assert {"Delete", "Cancel", "Save"} <= {c.label for c in blocked}
+    assert snap.controls[:len(blocked)] == blocked, "the sheet's controls come first"
+    assert {c.identifier for c in blocked} >= {"DontSaveButton", "CancelButton", "OKButton"}
+    assert listing.splitlines()[1].startswith("Open sheet “save” — deal with it first")
+
+
+async def test_a_zero_sized_group_is_still_skipped_but_a_zero_sized_sheet_is_not():
+    """The hidden-element rule stays for what it is for."""
+    surface, _, parts = _on_save_sheet(focus="window", sheet_frame="zero")
+    parts["window"].children.append(El("AXButton", "Ghost", frame=(0, 0, 0, 0)))
+    snap, _ = await surface.read("TextEdit")
+    assert "Ghost" not in {c.label for c in snap.controls}
+    assert snap.blockers == ["sheet “save”"]
 
 
 async def test_a_sheet_that_hangs_from_the_application_not_a_window_is_read_as_what_it_is():
@@ -826,12 +862,137 @@ async def test_an_option_is_chosen_from_a_pop_up(notes):
         await surface.choose_option(await _handle(surface, "Paper size"), "Legal")
 
 
-async def test_dragging_goes_from_centre_to_centre(notes):
+async def test_dragging_between_plain_controls_goes_from_centre_to_centre(notes):
     surface, _, recorder, _ = notes
     snap, _ = await surface.read()
     handles = {c.label: c.handle for c in snap.controls}
+    await surface.drag(handles["New Note"], handles["Bold"])
+    assert recorder.events[-1] == ("drag", (655, 71), (312, 71))
+
+
+async def test_dragging_a_row_takes_hold_of_its_name_not_the_middle_of_the_row(notes):
+    """A row is as wide as its list; its middle is blank space, where a drag begins a rubber band."""
+    surface, _, recorder, _ = notes
+    snap, _ = await surface.read()
+    handles = {c.label: c.handle for c in snap.controls}
+    summary = await surface.drag(handles["Recipes · risotto"], handles["New Note"])
+    assert recorder.events[-1] == ("drag", (48, 168), (655, 71)), \
+        "just inside the left edge of the row's first text (24 + 24, its middle line), not (120, 174)"
+    assert summary.startswith("Dragged “Recipes · risotto” onto “New Note”"), \
+        "a row is named by the text inside it; its own title is empty"
+
+
+def _row_with(*children, frame=(20, 100, 400, 22)):
+    return El("AXRow", actions=(), frame=frame, children=[El("AXCell", actions=(), frame=frame, children=list(children))])
+
+
+def _grab(row: El, backend=None):
+    backend = backend or FakeBackend({}, front="")
+    return axmod.grab_point(backend, row, backend.attributes(row, axmod.ATTRIBUTES))
+
+
+def test_a_row_with_an_icon_is_taken_by_its_icon():
+    row = _row_with(El("AXImage", actions=(), frame=(22, 103, 16, 16)),
+                    El("AXStaticText", value="drag-me.txt", actions=(), frame=(42, 102, 200, 18)))
+    point = _grab(row)
+    assert (point.on, point.x, point.y) == ("icon", 30, 111)
+
+
+def test_a_row_without_one_is_taken_just_inside_its_name_even_when_the_name_is_wide():
+    row = _row_with(El("AXStaticText", value="drag-me.txt", actions=(), frame=(42, 102, 300, 18)))
+    point = _grab(row)
+    assert (point.on, point.x, point.y) == ("name", 66, 111), "42 + 24, not the middle of the 300-wide frame"
+    narrow = _row_with(El("AXStaticText", value="a", actions=(), frame=(42, 102, 10, 18)))
+    assert _grab(narrow).x == 47, "a name narrower than that is taken at its own middle"
+
+
+def test_a_row_is_taken_at_its_centre_only_when_nothing_inside_it_can_be_located():
+    nothing = _row_with(El("AXStaticText", value="x", actions=(), frame=(0, 0, 0, 0)),
+                        El("AXImage", actions=(), frame=(500, 500, 16, 16)),     # not inside the row
+                        El("AXImage", actions=(), frame=(22, 103, 300, 300)))     # a picture, not an icon
+    point = _grab(nothing)
+    assert (point.on, point.x, point.y) == ("centre", 220, 111)
+
+
+def test_a_zero_sized_element_has_nowhere_to_grab():
+    assert _grab(El("AXButton", "Hidden", frame=(0, 0, 0, 0))) is None
+    assert _grab(El("AXButton", "No frame", frame=None)) is None
+
+
+def test_a_plain_control_is_taken_at_its_centre():
+    point = _grab(El("AXButton", "OK", frame=(10, 10, 80, 20)))
+    assert (point.on, point.x, point.y) == ("centre", 50, 20)
+
+
+async def test_a_drag_records_where_it_took_hold_and_let_go(notes):
+    surface, _, _, _ = notes
+    snap, _ = await surface.read()
+    handles = {c.label: c.handle for c in snap.controls}
     await surface.drag(handles["Recipes · risotto"], handles["New Note"])
-    assert recorder.events[-1] == ("drag", (120, 174), (655, 71))
+    drag = surface.last_drag
+    assert (drag["from"].on, drag["to"].on) == ("name", "centre")
+    assert drag["source"].w == 200 and drag["target"].w == 30
+
+
+async def test_pressing_a_row_names_it_by_the_text_inside(notes):
+    surface, _, _, els = notes
+    snap, _ = await surface.read()
+    row = next(c for c in snap.controls if c.label == "Recipes · risotto")
+    els["rows"][2].actions = []
+    assert await surface.press(row.handle) == "Selected “Recipes · risotto”."
+
+
+# ---------------------------------------------------------------------------
+# static text: what the app calls it, and what it shows
+# ---------------------------------------------------------------------------
+def _read_texts(*children: El) -> axmod.WindowSnapshot:
+    window = El("AXWindow", "Calculator", actions=(), frame=(0, 0, 300, 400), children=list(children))
+    return axmod.snapshot(FakeBackend({}, front=""), window)
+
+
+@pytest.mark.parametrize("shown", ["12", 12, 12.0], ids=["string", "int", "float"])
+def test_a_static_text_described_by_the_app_still_shows_its_value(shown):
+    """Calculator's display: a static text *described* as "Edit field", its value the sum. The
+    description used to win outright, so the window read "Edit field" and the 12 was never seen."""
+    snap = _read_texts(El("AXStaticText", description="Last Expression", value="7+5", actions=(),
+                          frame=(10, 10, 100, 10)),
+                       El("AXStaticText", description="Edit field", value=shown, actions=(),
+                          frame=(10, 30, 100, 30)))
+    assert [(i.label, i.value) for i in snap.text_items] == [("Last Expression", "7+5"), ("Edit field", "12")]
+    assert snap.texts == ["Last Expression: 7+5", "Edit field: 12"]
+    assert "Text on screen: Last Expression: 7+5 · Edit field: 12" in axmod.render(snap)
+
+
+def test_a_static_text_that_is_only_a_value_or_only_a_name_is_listed_as_before():
+    snap = _read_texts(El("AXStaticText", value="3 notes", actions=(), frame=(0, 0, 50, 10)),
+                       El("AXStaticText", description="Spacer", actions=(), frame=(0, 20, 50, 10)),
+                       El("AXHeading", "Welcome", value="Welcome", actions=(), frame=(0, 40, 50, 10)))
+    assert snap.texts == ["3 notes", "Spacer", "Welcome"], "a name that is also the value isn't said twice"
+    assert [i.value for i in snap.text_items] == ["3 notes", "", "Welcome"]
+
+
+def test_numbers_are_shown_as_numbers_and_a_boolean_is_not_a_number():
+    snap = _read_texts(El("AXStaticText", value=0.5, actions=(), frame=(0, 0, 50, 10)),
+                       El("AXStaticText", value=True, actions=(), frame=(0, 20, 50, 10)),
+                       El("AXStaticText", value=1234567.0, actions=(), frame=(0, 40, 50, 10)),
+                       El("AXStaticText", value=float("nan"), actions=(), frame=(0, 60, 50, 10)))
+    assert snap.texts == ["0.5", "1234567"]
+
+
+def test_a_text_field_with_a_numeric_value_lists_it_and_a_checkbox_still_does_not():
+    snap = _read_texts(El("AXTextField", "Quantity", value=12, frame=(0, 0, 80, 20)),
+                       El("AXCheckBox", "Bold", value=1, frame=(0, 30, 80, 20)),
+                       El("AXButton", "Count", value=3, frame=(0, 60, 80, 20)))
+    by_label = {c.label: c for c in snap.controls}
+    assert by_label["Quantity"].value == "12" and 'value="12"' in by_label["Quantity"].line()
+    assert by_label["Bold"].value == "" and by_label["Count"].value == "", "0/1 and badge counts aren't text"
+
+
+def test_a_static_text_inside_a_listed_row_is_still_the_rows_name_not_a_separate_text():
+    row = _row_with(El("AXStaticText", description="Name", value="drag-me.txt", actions=(), frame=(24, 100, 80, 18)))
+    snap = _read_texts(row)
+    assert snap.texts == [] and snap.text_items == []
+    assert [c.label for c in snap.controls] == ["drag-me.txt"], "named by what the text shows, not what it is called"
 
 
 # ---------------------------------------------------------------------------
@@ -906,6 +1067,71 @@ def test_a_short_move_stays_a_single_direct_jump():
     native.move(0, 0)
     native.move(2, 2)  # well under the glide threshold
     assert poster.moves == [(0, 0), (2, 2)], "a move this small must not be split into steps"
+
+
+class _Timeline:
+    """A poster and the clock it is driven by, so an event sequence can be read with its timing."""
+
+    def __init__(self):
+        self.now, self.log = 0.0, []
+
+    def mouse(self, kind, x, y, button="left", state=1):
+        self.log.append((self.now, kind, x, y))
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def kinds(self):
+        return [kind for _, kind, _, _ in self.log]
+
+
+def _drag(start, end, **kw):
+    line = _Timeline()
+    native = NativeInput(line, sleep=line.sleep)
+    native.drag(start, end, **kw)
+    return line, native
+
+
+def test_a_drag_rests_presses_nudges_carries_dwells_and_only_then_lets_go():
+    line, _ = _drag((100, 100), (100, 300))
+    down = next(i for i, (_, kind, _, _) in enumerate(line.log) if kind == "down")
+    up = next(i for i, (_, kind, _, _) in enumerate(line.log) if kind == "up")
+    assert line.kinds()[down + 1:up] == ["drag"] * (up - down - 1) and line.kinds()[-1] == "up"
+    assert line.log[down][2:] == (100, 100) and line.log[up][2:] == (100, 300)
+
+    # the pointer was seen resting on the item before it was pressed
+    before_press = [t for t, kind, x, y in line.log[:down] if (x, y) == (100, 100)]
+    assert line.log[down][0] - before_press[-1] >= 0.1
+
+    # the first drag event is a small nudge past the drag threshold, then there is a pause
+    first = line.log[down + 1]
+    assert 4 < first[3] - 100 <= 12 and first[2] == 100, "past a ~4 pt threshold, not yet far"
+    assert line.log[down + 2][0] - first[0] >= 0.15
+
+    # the carry is monotonic toward the target and arrives exactly there
+    carried = [y for _, kind, _, y in line.log[down + 1:up] if kind == "drag"]
+    assert carried == sorted(carried) and carried[-1] == 300 and len(carried) >= 24
+
+    # ...and the pointer is seen over the target for a while before the button comes up
+    arrived = next(t for t, kind, _, y in line.log[down + 1:up] if y == 300)
+    assert line.log[up][0] - arrived >= 0.3, "dropping needs the target to have seen the pointer"
+    assert sum(1 for _, kind, _, y in line.log[down + 1:up] if y == 300) >= 4
+
+
+def test_a_drag_shorter_than_the_threshold_never_overshoots_and_zero_distance_is_safe():
+    line, _ = _drag((100, 100), (103, 100))
+    drags = [x for _, kind, x, _ in line.log if kind == "drag"]
+    assert max(drags) <= 103 and drags[-1] == 103
+    line, _ = _drag((50, 50), (50, 50))
+    assert line.kinds()[-1] == "up" and {(x, y) for _, kind, x, y in line.log if kind == "drag"} == {(50, 50)}
+
+
+def test_after_a_drag_the_next_move_glides_from_where_it_ended():
+    line, native = _drag((0, 0), (200, 0))
+    mark = len(line.log)
+    native.click(300, 0)
+    glided = [x for _, kind, x, _ in line.log[mark:] if kind == "move"]
+    assert glided[0] > 200 and glided[-1] == 300, "from the drop point, not back from where the drag began"
 
 
 def test_glide_points_end_exactly_on_the_target():

@@ -284,7 +284,7 @@ def sheet_button(controls, kind: str):
 
 def ax_line(backend, element, depth: int) -> str:
     attrs = backend.attributes(element, ("AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue",
-                                          "AXIdentifier", "AXModal"))
+                                          "AXIdentifier", "AXModal", "AXPosition", "AXSize"))
     parts = [str(attrs.get("AXRole") or "?")]
     if attrs.get("AXSubrole"):
         parts[0] += "/" + str(attrs["AXSubrole"])
@@ -294,6 +294,11 @@ def ax_line(backend, element, depth: int) -> str:
             parts.append(f'{mark}={str(value)[:40]!r}')
     if attrs.get("AXModal"):
         parts.append("modal")
+    position, size = attrs.get("AXPosition"), attrs.get("AXSize")
+    if position and size:
+        parts.append("frame=({:.0f},{:.0f} {:.0f}x{:.0f})".format(*position, *size))
+    else:
+        parts.append("no-frame")
     return "  " * depth + " ".join(parts)
 
 
@@ -470,11 +475,63 @@ def pick(controls, *wanted: str):
 
 
 def shows(snap, text: str) -> bool:
-    """Whether *text* is what some piece of the window says, by itself."""
+    """Whether *text* is what some piece of the window shows, by itself: the value of a piece of
+    static text (what it says, not what the app calls it), or a control's value or name."""
     def clean(value: str) -> str:
         return value.strip().strip("\u200e\u200f\u202a\u202c").strip()
-    return (any(clean(t) == text for t in snap.texts)
+    return (any(clean(i.value) == text or clean(i.text) == text for i in snap.text_items)
+            or any(clean(t) == text for t in snap.texts)
             or any(text in (clean(c.value), clean(c.label)) for c in snap.controls))
+
+
+#: What a text-like element can say, in the order they are printed when a check has to show its working.
+TEXT_ATTRIBUTES = ("AXTitle", "AXDescription", "AXValue", "AXValueDescription", "AXRoleDescription",
+                   "AXIdentifier")
+TEXT_ROLES = {"AXStaticText", "AXTextField", "AXTextArea", "AXHeading", "AXComboBox"}
+
+
+def text_line(backend, element, depth: int) -> str:
+    """One element with every text attribute it has and the Python type each came back as
+    (a number and a string are told apart here — ``12`` is not ``'12'``)."""
+    attrs = backend.attributes(element, ("AXRole", "AXSubrole", "AXPosition", "AXSize", *TEXT_ATTRIBUTES))
+    parts = [str(attrs.get("AXRole") or "?")]
+    for key in TEXT_ATTRIBUTES:
+        value = attrs.get(key)
+        if value not in (None, ""):
+            shown = repr(value[:40]) if isinstance(value, str) else repr(value)
+            parts.append(f"{key.removeprefix('AX')}={shown}<{type(value).__name__}>")
+    position, size = attrs.get("AXPosition"), attrs.get("AXSize")
+    parts.append("frame=({:.0f},{:.0f} {:.0f}x{:.0f})".format(*position, *size) if position and size else "no-frame")
+    return "  " * depth + " ".join(parts)
+
+
+def text_structure(backend, pid: int, *, limit: int = 40, depth: int = 12) -> list[str]:
+    """Every text-like element in the front window and its text attributes, raw — what a
+    check about *reading* text is judged against, not what the surface made of it."""
+    window = backend.front_window(backend.application(pid))
+    if window is None:
+        return ["no front window"]
+    lines, stack = [], [(window, 0)]
+    while stack and len(lines) < limit:
+        element, level = stack.pop()
+        role = backend.attribute(element, "AXRole")
+        if role in TEXT_ROLES:
+            lines.append(text_line(backend, element, min(level, 6)))
+        if level < depth:
+            stack.extend((child, level + 1) for child in reversed(list(backend.attribute(element, "AXChildren") or [])))
+    return lines or ["no text-like element found in the front window"]
+
+
+async def show_text_structure(surface: NativeSurface, app: str) -> None:
+    try:
+        found = surface.backend.find_app(app)
+        if found is None:
+            print(f"      evidence: {app} is not running")
+            return
+        for line in await asyncio.to_thread(text_structure, surface.backend, found[0]):
+            print("      evidence: " + line)
+    except Exception as exc:
+        print("      evidence: couldn't dump the text — " + describe_failure(exc))
 
 
 async def guarded(label: str, check) -> bool:
@@ -516,8 +573,14 @@ async def calculator_click(surface: NativeSurface) -> bool:
     result = await copied_display(surface)
     ok = step("pressing the buttons worked the sum", result == "12", f"the display copied as {result!r}")
     snap, _ = await surface.read("Calculator")
-    return step("read_window shows the result", shows(snap, "12"),
-                f"texts: {snap.texts[:6]}; controls: {names(snap.controls, 14)}") and ok
+    shown = shows(snap, "12")
+    seen = ("text items (name → shown): "
+            + ", ".join(f"{i.label or '—'} → {i.value or '—'}" for i in snap.text_items[:8])
+            + f"; controls: {names(snap.controls, 14)}")
+    ok &= step("read_window shows the result", shown, seen)
+    if not shown:
+        await show_text_structure(surface, "Calculator")
+    return ok
 
 
 async def calculator_marks(surface: NativeSurface) -> bool:
@@ -635,6 +698,39 @@ async def textedit_dropdown(surface: NativeSurface) -> bool:
             quit_app("TextEdit")
 
 
+def under_pointer(backend, point: tuple[float, float]) -> str:
+    """The element Accessibility reports at a screen point — and what it hangs from — which is
+    what a press there lands on, as opposed to what the check meant it to land on."""
+    finder = getattr(backend, "element_at", None)
+    if finder is None:
+        return "(this backend can't say)"
+    element = finder(*point)
+    if element is None:
+        return "nothing"
+    chain, seen = [], 0
+    while element is not None and seen < 4:
+        chain.append(ax_line(backend, element, 0).split(" frame=")[0])
+        element, seen = backend.attribute(element, "AXParent"), seen + 1
+    return " ‹ ".join(chain)
+
+
+def drag_evidence(surface: NativeSurface, base: Path, source: Path, target: Path) -> str:
+    """After a drag that moved nothing: where the files are, and where the pointer pressed and
+    let go (and what was under it) — enough to tell a drop the app refused from a press that
+    never took hold of the file."""
+    parts = [f"on disk: {sorted(str(p.relative_to(base)) for p in base.rglob('*'))}",
+             f"{source.name} {'is still' if source.exists() else 'is no longer'} at the top of the folder; "
+             f"target/{source.name} {'exists' if (target / source.name).exists() else 'does not exist'}"]
+    drag = surface.last_drag
+    if drag:
+        for key, verb, frame_key in (("from", "pressed", "source"), ("to", "released", "target")):
+            point, frame = drag[key], drag[frame_key]
+            where = f" in the row at ({frame.x:.0f}, {frame.y:.0f}, {frame.w:.0f}×{frame.h:.0f})" if frame else ""
+            parts.append(f"{verb} at ({point.x:.0f}, {point.y:.0f}) on its {point.on}{where}; "
+                         f"under that point: {under_pointer(surface.backend, point.point)}")
+    return "; ".join(parts)
+
+
 async def finder_drag(surface: NativeSurface) -> bool:
     print("drag_control — a file onto a folder in Finder")
     base = Path.home() / "Desktop" / f"JARVIS-check-{os.getpid()}"
@@ -665,7 +761,8 @@ async def finder_drag(surface: NativeSurface) -> bool:
         with RUN.verifying():
             moved = (target / "drag-me.txt").exists() and not source.exists()
         return step("the file is inside the folder", moved,
-                    summary + ("" if moved else f" On disk: {sorted(p.name for p in base.rglob('*'))}"))
+                    summary + ("" if moved else " " + await asyncio.to_thread(
+                        drag_evidence, surface, base, source, target)))
     finally:
         with contextlib.suppress(NativeError):
             front, _ = await surface.read("Finder")
