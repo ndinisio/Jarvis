@@ -266,6 +266,123 @@ async def test_a_sheet_is_listed_first_and_called_out(notes):
     assert snap.controls[0].label == "Delete" and snap.controls[1].label == "Keep"
 
 
+# What a Mac actually reports while TextEdit's save sheet is up (seen on macOS 27 with
+# scripts/check_native.py --act): the sheet is *the app's focused window*, not a child of
+# a focused window; the window it hangs from is the one entry in AXWindows. The fake tree
+# above had the window focused with the sheet inside it, which is not what macOS says.
+def _save_sheet_app(*, in_window_children: bool = True, nested: bool = False, parent: bool = True):
+    delete = El("AXButton", "Delete", AXIdentifier="DontSaveButton", frame=(260, 540, 80, 24))
+    cancel = El("AXButton", "Cancel", AXIdentifier="CancelButton", frame=(350, 540, 80, 24))
+    save = El("AXButton", "Save", AXIdentifier="OKButton", frame=(440, 540, 80, 24))
+    name = El("AXTextField", description="Save As", value="Untitled", frame=(260, 300, 260, 22))
+    sheet = El("AXSheet", description="save", AXIdentifier="save-panel", actions=(), frame=(200, 280, 400, 300),
+               children=[El("AXSplitGroup", actions=(), frame=(200, 320, 400, 200),
+                            children=[El("AXStaticText", value="Where", actions=(), frame=(210, 330, 60, 14))]),
+                         name, delete, cancel, save])
+    body = El("AXTextArea", description="document", value="Hello from JARVIS", frame=(20, 60, 560, 400))
+    close = El("AXButton", subrole="AXCloseButton", description="close button", frame=(8, 4, 14, 14))
+    window = El("AXWindow", "Untitled", subrole="AXStandardWindow", AXIdentifier="_NS:31", actions=(),
+                frame=(100, 100, 600, 500), children=[close, body, *([sheet] if in_window_children else [])])
+    focused = sheet
+    if nested:
+        confirm = El("AXButton", "Replace", frame=(300, 400, 80, 24))
+        inner = El("AXSheet", description="alert", actions=(), frame=(250, 350, 300, 120), children=[confirm])
+        sheet.children.append(inner)
+        inner.attrs["AXParent"] = sheet
+        focused = inner
+    if parent:
+        sheet.attrs["AXParent"] = window
+    app = El("AXApplication", "TextEdit", actions=(), AXWindows=[window], AXFocusedWindow=focused,
+             AXMenuBar=El("AXMenuBar", actions=()))
+    return app, {"window": window, "sheet": sheet, "delete": delete, "cancel": cancel, "save": save,
+                 "body": body, "close": close}
+
+
+def _on_save_sheet(**kwargs):
+    app, parts = _save_sheet_app(**kwargs)
+    backend = FakeBackend({"TextEdit": (303, app)}, front="TextEdit")
+    return NativeSurface(backend=backend, input=RecordingInput(), sleep=lambda _s: None), backend, parts
+
+
+async def test_a_sheet_the_app_reports_as_its_focused_window_is_read_as_a_sheet_over_its_window():
+    surface, _, parts = _on_save_sheet()
+    snap, listing = await surface.read("TextEdit")
+    assert snap.title == "Untitled", "the window the sheet hangs from, not the sheet"
+    assert snap.blockers == ["sheet “save”"]
+    assert [c.label for c in snap.controls[:4]] == ["Save As", "Delete", "Cancel", "Save"] or \
+        [c.label for c in snap.controls[:3]] == ["Delete", "Cancel", "Save"]
+    assert all(c.in_blocker for c in snap.controls[:4] if c.label in {"Delete", "Cancel", "Save"})
+    behind = [c for c in snap.controls if not c.in_blocker]
+    assert any(c.ax_role == "AXTextArea" for c in behind), "the window under the sheet is still listed, after it"
+    assert listing.splitlines()[1].startswith("Open sheet “save” — deal with it first")
+
+
+async def test_the_identifiers_of_a_sheets_buttons_come_through_with_their_labels():
+    surface, _, _ = _on_save_sheet()
+    snap, _ = await surface.read("TextEdit")
+    by_label = {c.label: c.identifier for c in snap.controls if c.in_blocker}
+    assert by_label["Delete"] == "DontSaveButton"
+    assert by_label["Cancel"] == "CancelButton"
+    assert by_label["Save"] == "OKButton"
+
+
+async def test_a_sheet_is_counted_once_whether_or_not_the_window_lists_it_among_its_children():
+    for listed in (True, False):
+        surface, _, _ = _on_save_sheet(in_window_children=listed)
+        snap, _ = await surface.read("TextEdit")
+        assert snap.blockers == ["sheet “save”"], f"in_window_children={listed}"
+        assert [c.label for c in snap.controls if c.in_blocker].count("Delete") == 1
+
+
+async def test_pressing_a_button_on_the_sheet_presses_that_button():
+    surface, _, parts = _on_save_sheet()
+    snap, _ = await surface.read("TextEdit")
+    delete = next(c for c in snap.controls if c.identifier == "DontSaveButton")
+    await surface.press(delete.handle)
+    assert parts["delete"].performed == ["AXPress"] and parts["save"].performed == []
+
+
+async def test_a_sheet_over_a_sheet_is_read_over_the_window_with_both_listed_first():
+    surface, _, _ = _on_save_sheet(nested=True)
+    snap, _ = await surface.read("TextEdit")
+    assert snap.title == "Untitled"
+    assert [b.split(" ")[0] for b in snap.blockers] == ["sheet", "sheet"]
+    labels = [c.label for c in snap.controls if c.in_blocker]
+    assert {"Delete", "Cancel", "Save", "Replace"} <= set(labels)
+
+
+async def test_a_sheet_whose_window_cannot_be_found_is_still_read_not_lost():
+    surface, _, _ = _on_save_sheet(parent=False)
+    snap, _ = await surface.read("TextEdit")
+    assert {"Delete", "Cancel", "Save"} <= {c.label for c in snap.controls}
+
+
+async def test_a_sheet_that_hangs_from_the_application_not_a_window_is_read_as_what_it_is():
+    """Only a window (or another sheet) is something a sheet can be followed up to."""
+    ok = El("AXButton", "OK", frame=(20, 80, 60, 24))
+    sheet = El("AXSheet", description="alert", actions=(), frame=(100, 100, 300, 150), children=[ok])
+    app = El("AXApplication", "Tool", actions=(), AXWindows=[], AXFocusedWindow=sheet,
+             AXMenuBar=El("AXMenuBar", actions=()))
+    sheet.attrs["AXParent"] = app
+    surface = NativeSurface(backend=FakeBackend({"Tool": (404, app)}, front="Tool"), input=RecordingInput(),
+                            sleep=lambda _s: None)
+    snap, _ = await surface.read("Tool")
+    assert [c.label for c in snap.controls] == ["OK"] and snap.frame.w == 300
+
+
+async def test_a_dialog_window_that_is_the_focused_window_is_still_just_the_window():
+    """Only a sheet hangs from another window; a dialog of its own is read as the window it is."""
+    ok = El("AXButton", "OK", frame=(20, 80, 60, 24))
+    dialog = El("AXWindow", "Alert", subrole="AXDialog", actions=(), frame=(100, 100, 300, 150), children=[ok])
+    app = El("AXApplication", "Tool", actions=(), AXWindows=[dialog], AXFocusedWindow=dialog,
+             AXMenuBar=El("AXMenuBar", actions=()))
+    dialog.attrs["AXParent"] = app
+    surface = NativeSurface(backend=FakeBackend({"Tool": (404, app)}, front="Tool"), input=RecordingInput(),
+                            sleep=lambda _s: None)
+    snap, _ = await surface.read("Tool")
+    assert snap.title == "Alert" and snap.blockers == [] and [c.label for c in snap.controls] == ["OK"]
+
+
 async def test_handles_stay_the_same_for_the_same_control(notes):
     surface, _, _, parts = notes
     first, _ = await surface.read()

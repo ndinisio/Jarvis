@@ -256,11 +256,30 @@ async def act(surface: NativeSurface) -> bool:
 # offer the three ways out — save it, back out, or throw it away. When any of that fails it prints
 # what the Accessibility tree really held, so the cause can be read off rather than guessed.
 
-DISCARD_LABELS = ("don't save", "dont save", "delete", "discard")
+#: What AppKit calls the buttons of a save sheet, in AXIdentifier — a stronger statement of what a
+#: button does than its title, which is wording ("Don't Save" once, "Delete" now) and gets localised.
+SHEET_BUTTON_IDS = {"discard": ("DontSaveButton",), "cancel": ("CancelButton",), "save": ("OKButton",)}
+#: Only if there is no identifier to go by: the titles seen on different macOS releases.
+SHEET_BUTTON_LABELS = {"discard": ("don't save", "dont save", "delete", "discard"), "cancel": ("cancel",),
+                       "save": ("save",)}
 
 
 def plain(label: str) -> str:
     return label.lower().replace("’", "'").replace("…", "").replace("...", "").strip()
+
+
+def sheet_button(controls, kind: str):
+    """The sheet's *kind* ("discard" / "cancel" / "save") button and how it was recognised: by
+    its AX identifier if any control carries one, else by its title (the first word for save,
+    since "Save…" and "Save" are the same button)."""
+    for control in controls:
+        if control.identifier in SHEET_BUTTON_IDS[kind]:
+            return control, f"id {control.identifier}"
+    for control in controls:
+        title = plain(control.label)
+        if title in SHEET_BUTTON_LABELS[kind] or (kind == "save" and title.startswith("save")):
+            return control, f"title “{control.label}”"
+    return None, ""
 
 
 def ax_line(backend, element, depth: int) -> str:
@@ -279,17 +298,23 @@ def ax_line(backend, element, depth: int) -> str:
 
 
 def ax_structure(backend, pid: int, *, depth: int = 4, limit: int = 60) -> list[str]:
-    """The app's windows and the front window's tree as Accessibility reports them —
-    what a failing check is judged against, not what the surface made of it."""
+    """The app's windows, which of them it calls focused (and what that hangs from), and the
+    focused window's tree, as Accessibility reports them — what a failing check is judged
+    against, not what the surface made of it."""
     application = backend.application(pid)
     windows = backend.windows(application)
     lines = [f"{len(windows)} AX window(s): " + " | ".join(ax_line(backend, w, 0).strip() for w in windows)]
     front = backend.front_window(application)
     if front is None:
         return lines + ["no front window"]
-    lines.append("front window tree:")
+    owner = backend.attribute(front, "AXParent")
+    lines.append("AXFocusedWindow: " + ax_line(backend, front, 0).strip()
+                 + ("  (one of AXWindows)" if any(backend.same(front, w) for w in windows)
+                    else "  (NOT one of AXWindows)")
+                 + ("; hangs from: " + ax_line(backend, owner, 0).strip() if owner is not None else ""))
+    lines.append("focused window tree:")
     stack = [(front, 0)]
-    while stack and len(lines) < limit + 2:
+    while stack and len(lines) < limit + 3:
         element, level = stack.pop()
         lines.append(ax_line(backend, element, level + 1))
         if level < depth:
@@ -338,12 +363,15 @@ async def save_sheet(surface: NativeSurface, *, typed: str) -> bool:
     flags = [c.in_blocker for c in snap.controls]
     listed_first = all(a >= b for a, b in zip(flags, flags[1:]))
     sheets = [b for b in snap.blockers if b.startswith("sheet")]
-    cancel = next((c for c in blocked if plain(c.label) == "cancel"), None)
-    save = next((c for c in blocked if plain(c.label).startswith("save")), None)
-    discard = next((c for c in blocked if plain(c.label) in DISCARD_LABELS), None)
-    missing = [name for name, found in (("cancel", cancel), ("save", save), ("discard", discard)) if found is None]
-    seen = f"blockers: {snap.blockers or 'none'}; the sheet's controls, in listed order: " + \
-        (", ".join(f'{c.role} “{c.label}”' for c in blocked) or "none")
+    found = {kind: sheet_button(blocked, kind) for kind in ("discard", "cancel", "save")}
+    cancel, discard = found["cancel"][0], found["discard"][0]
+    missing = [kind for kind, (control, _) in found.items() if control is None]
+    seen = (f"blockers: {snap.blockers or 'none'}; the sheet's controls, in listed order: "
+            + (", ".join(f'{c.role} “{c.label}”' + (f" [{c.identifier}]" if c.identifier else "") for c in blocked)
+               or "none")
+            + ("; recognised by " + ", ".join(f"{kind} = “{control.label}” ({how})"
+                                               for kind, (control, how) in found.items() if control is not None)
+               if blocked else ""))
     problems = []
     if not sheets:
         problems.append("no sheet is open" + ("" if not snap.blockers else " (only a dialog or popover)"))
@@ -352,8 +380,9 @@ async def save_sheet(surface: NativeSurface, *, typed: str) -> bool:
     if blocked and not listed_first:
         problems.append("the sheet's controls are not listed ahead of the window's")
     if sheets and blocked and missing:
-        problems.append("the sheet has no " + " / ".join(missing) + " button (discard is one of: "
-                        + ", ".join(f"“{d}”" for d in DISCARD_LABELS) + ")")
+        problems.append("the sheet has no " + " / ".join(missing) + " button (by identifier "
+                        + "/".join(i for k in missing for i in SHEET_BUTTON_IDS[k]) + ", or by title "
+                        + "/".join(f"“{t}”" for k in missing for t in SHEET_BUTTON_LABELS[k]) + ")")
     ok = step(label, not problems, "; ".join([*problems, seen]) if problems else seen)
     if problems:
         await show_structure(surface, "TextEdit")

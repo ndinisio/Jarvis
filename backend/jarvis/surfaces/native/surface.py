@@ -176,12 +176,12 @@ class NativeSurface:
         backend = self._require()
         pid, name = self._target(app)
         application = backend.application(pid)
-        window = backend.front_window(application)
+        window, sheets = self._window_under_sheets(application)
         if window is None:
             raise NativeError(f"{name} has no window open.", detail="no window")
         self._guard(name, _title(backend, window))
-        snap = ax.snapshot(backend, window, app=name, pid=pid, offset=offset,
-                           max_listed=max_listed, blockers=self._blockers(application, window))
+        snap = ax.snapshot(backend, window, app=name, pid=pid, offset=offset, max_listed=max_listed,
+                           blockers=[*sheets, *self._blockers(application, window)])
         snap.menus = self._menu_titles(application)
         for control in snap.controls:
             locator = _Locator(name, pid, snap.title, control.ax_role, control.subrole,
@@ -189,6 +189,34 @@ class NativeSurface:
             control.handle = self._handle_for(control.ref, pid, control.label, locator)
         self.last_app = name
         return snap
+
+    def _window_under_sheets(self, application: Any) -> tuple[Any, list[Any]]:
+        """The window to read, and any sheet over it the walk wouldn't find by itself.
+
+        While a sheet is up, macOS reports *the sheet* as the app's focused window
+        (seen with TextEdit's save sheet on macOS 27). Read as the window, its controls
+        are listed as an ordinary window's: nothing says a sheet is blocking, the title
+        is empty, and the window under it — the one the sheet hangs from — isn't read at
+        all. So a focused sheet is followed up (through its AXParent, as many levels as
+        there are sheets over sheets) to the window it belongs to, which is read with
+        the sheet as what blocks it. Only a sheet is: a dialog that is a window of its
+        own is just the window.
+
+        The sheet is normally among that window's children, where the walk meets it. If
+        it isn't, it is handed over as a blocker to read separately; either way it is
+        listed once."""
+        backend = self.backend
+        window = backend.front_window(application)
+        outer = None
+        while window is not None and backend.attribute(window, "AXRole") == "AXSheet":
+            owner = backend.attribute(window, "AXParent")
+            if owner is None or backend.attribute(owner, "AXRole") not in {"AXWindow", "AXSheet"}:
+                break
+            outer, window = window, owner
+        if outer is None:
+            return window, []
+        listed = list(backend.attribute(window, "AXChildren") or [])
+        return window, ([] if any(backend.same(child, outer) for child in listed) else [outer])
 
     def _blockers(self, application: Any, window: Any) -> list[Any]:
         """The sheets and dialogs over *window* — listed first, since they
