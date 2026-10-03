@@ -88,6 +88,10 @@ class NativeSurface:
         #: reads to tell "the reference survived" from "it was re-found".
         self.relocations = 0
         self.relocations_refused = 0
+        #: Seconds spent so far finding the element behind a handle (reading
+        #: it, checking it is still the one asked for, re-finding it) — so a
+        #: timing harness can tell locating from acting.
+        self.resolve_seconds = 0.0
         self._backend = backend
         self._input = input
         self._clipboard = clipboard
@@ -483,6 +487,11 @@ class NativeSurface:
                     self._observer = ObserverThread(make())
             return self._observer
 
+    def observer_stats(self) -> dict[str, Any]:
+        """What the observer thread is doing, for a validation run; empty if
+        there isn't one."""
+        return self._observer.stats() if self._observer is not None else {}
+
     def close(self) -> None:
         """Stop the observer thread, if one was started. Idempotent."""
         if self._observer is not None:
@@ -609,6 +618,13 @@ class NativeSurface:
         content) is re-found by what it was — see _relocate() — and only
         reported to the model when that finds nothing, or can't tell
         which of several it was."""
+        started = time.monotonic()
+        try:
+            return self._resolve_handle(handle)
+        finally:
+            self.resolve_seconds += time.monotonic() - started
+
+    def _resolve_handle(self, handle: str) -> tuple[Any, int, dict[str, Any]]:
         self._require()
         cleaned = str(handle).strip().strip("[]").lower()
         element = self._handles.get(cleaned)

@@ -1439,7 +1439,8 @@ screenshot shows (it cleans up after itself); `--stale` opens a small window of
 its own (`scripts/ax_fixture.py`) that rebuilds, duplicates, renames or moves
 its button on command, and checks a stale handle is re-found only when it is
 certain which control was meant — against the window's own log of what was
-pressed; `--observe` measures the optional observer below. None of these checks has yet been run on a real Mac. Without
+pressed; `--observe` measures the optional observer below; `--all --repeat 5` runs the lot with timings and the exit-criteria table.
+None of these checks has yet been run on a real Mac. Without
 the `native` extra the app tools fall back to the v2 AppleScript paths.
 
 **Optional: wake Mac-app waits on the app's own notifications
@@ -1456,9 +1457,11 @@ holding the thread). It is off because it is new native
 plumbing that no test here has run against macOS (the logic around it is tested
 against a fake run loop; whether macOS posts those notifications to a Python
 callback on a second thread, and keeps the event loop responsive meanwhile, is
-not). Run `scripts/check_native.py --observe` on your Mac first; it reports
-whether each notification arrives and how much sooner than polling, and fails
-if the thread slows the event loop or the wait.
+not). It is a latency optimisation, not a reliability feature, and worth
+turning on only if `scripts/check_native.py --all --repeat 5` passes on your Mac
+and its usefulness line shows a saving worth the extra thread. The whole
+real-Mac validation — order, exit criteria, timings baseline — is in
+[`evals/MAC_VALIDATION.md`](evals/MAC_VALIDATION.md).
 
 **Other current limits**
 

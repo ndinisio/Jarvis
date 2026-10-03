@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import pytest
@@ -419,6 +420,31 @@ async def test_a_stale_handle_is_refound_when_the_same_control_is_still_there(no
     assert rebuilt.performed == ["AXPress", "AXPress"]
     assert await _handle(surface, "New Note") == handle
     assert surface.relocations == 1
+
+
+async def test_time_spent_finding_the_element_behind_a_handle_is_counted(notes, monkeypatch):
+    surface, backend, _, _ = notes
+    handle = await _handle(surface, "New Note")
+    assert surface.resolve_seconds == 0.0
+    original = surface._resolve_handle
+
+    def slow(handle):
+        time.sleep(0.05)
+        return original(handle)
+
+    monkeypatch.setattr(surface, "_resolve_handle", slow)
+    await surface.describe(handle)
+    assert 0.05 <= surface.resolve_seconds < 1.0
+    first = surface.resolve_seconds
+    await surface.describe(handle)
+    assert surface.resolve_seconds >= first + 0.05, "it accumulates"
+
+
+async def test_time_is_counted_even_when_the_handle_is_refused(notes):
+    surface, _, _, _ = notes
+    with pytest.raises(NativeError):
+        await surface.press("ax999")
+    assert surface.resolve_seconds > 0.0
 
 
 async def test_a_handle_that_never_went_stale_counts_no_relocation(notes):

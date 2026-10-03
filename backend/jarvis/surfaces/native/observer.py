@@ -184,6 +184,8 @@ class ObserverThread:
         self._busy = False
         self._broken = False
         self._stopped = False
+        self._live_count = 0
+        self._spins = 0
 
     # -- the calling side -----------------------------------------------------------------
     def watch(self, pid: int, *notifications: str) -> Watch | None:
@@ -204,6 +206,16 @@ class ObserverThread:
         if not request.tokens:
             return None
         return Watch(request.wake, lambda: self._submit(_Remove(request.id)))
+
+    def stats(self) -> dict[str, Any]:
+        """For a validation run: is the thread alive, has it failed, how many
+        subscriptions are live, how many times has a callback raised (the
+        driver counts those, if it can), how many run-loop slices has it spun."""
+        with self._lock:
+            thread, broken, stopped = self._thread, self._broken, self._stopped
+        return {"alive": bool(thread and thread.is_alive()), "broken": broken, "stopped": stopped,
+                "subscriptions": self._live_count, "spins": self._spins,
+                "callback_errors": int(getattr(self._driver, "errors", 0))}
 
     def stop(self) -> None:
         """Wind the thread down, unsubscribing everything. Idempotent."""
@@ -246,9 +258,11 @@ class ObserverThread:
                     break
                 if request is not None:
                     self._handle(request, live)
+                    self._live_count = len(live)
                     healthy = True
                 elif live:
                     healthy = bool(self._driver.spin(self._spin_s))
+                    self._spins += 1
         except Exception as exc:               # a failing driver ends observing; waits go back to polling
             log.warning("AX observer stopped: %s", exc)
             with self._lock:
@@ -256,6 +270,7 @@ class ObserverThread:
         finally:
             for tokens in live.values():
                 self._unobserve_all(tokens)
+            self._live_count = 0
             self._refuse_pending()
 
     def _handle(self, request: Any, live: dict[int, list[Any]]) -> None:

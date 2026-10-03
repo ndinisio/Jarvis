@@ -467,9 +467,11 @@ class AutomationConfig(BaseModel):
     max_download_mb: int = 2048
     #: Let a wait on a Mac app (it coming to the front, a menu filling in) end
     #: the moment the app says so, through an Accessibility observer thread,
-    #: instead of only on the next 50 ms poll. Off until
-    #: ``scripts/check_native.py --observe`` has been run on your Mac: the
-    #: polling it adds to is unchanged either way.
+    #: instead of only on the next 50 ms poll. A latency optimisation, not a
+    #: reliability feature: the polling it adds to is unchanged either way. Off
+    #: until ``scripts/check_native.py --all --repeat 5`` has passed on your Mac
+    #: and its usefulness line shows a saving worth the extra thread
+    #: (evals/MAC_VALIDATION.md).
     native_observer: bool = False
 
 

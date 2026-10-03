@@ -305,14 +305,19 @@ class MacObserverDriver:
         self.AS = AS
         self.CF = CF
         self._loop: Any = None
+        #: Callbacks that raised (and were swallowed) — a validation run
+        #: reads this to learn the callbacks are clean.
+        self.errors = 0
 
     def prepare(self) -> None:
         self._loop = self.CF.CFRunLoopGetCurrent()
 
     def observe(self, pid: int, notification: str, fire: Callable[[], None]) -> _Observation | None:
         def callback(_observer: Any, _element: Any, _notification: Any, _refcon: Any) -> None:
-            with contextlib.suppress(Exception):
+            try:
                 fire()
+            except Exception:
+                self.errors += 1
 
         try:
             error, observer = self.AS.AXObserverCreate(pid, callback, None)

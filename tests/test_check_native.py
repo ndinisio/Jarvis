@@ -15,7 +15,9 @@ calls is exactly what the real run is for.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -45,6 +47,7 @@ def cn(monkeypatch):
         return None
 
     monkeypatch.setattr(module, "calls", calls, raising=False)
+    monkeypatch.setattr(module, "real_pause", module.pause, raising=False)
     monkeypatch.setattr(module, "pause", no_pause)
     monkeypatch.setattr(module, "launch", lambda app: calls.append(("launch", app)))
     monkeypatch.setattr(module, "open_path", lambda path: calls.append(("open", Path(path).name)))
@@ -460,15 +463,18 @@ async def test_picking_and_reading_helpers(cn):
 class ObservingMac(FakeBackend):
     """Calculator and Finder, where bringing an app to the front and opening
     Calculator's View menu each make the app post its notification — unless
-    told to stay silent."""
+    told to stay silent, or (``drop_every``) to forget every Nth one."""
 
-    def __init__(self, driver: FakeDriver, *, silent: bool = False, can_observe: bool = True):
+    def __init__(self, driver: FakeDriver, *, silent: bool = False, can_observe: bool = True,
+                 drop_every: int = 0, prefilled: bool = False):
         self.driver, self.silent, self.can_observe = driver, silent, can_observe
-        zoom_menu = El("AXMenu", actions=())
+        self.drop_every, self.posts = drop_every, 0
+        zoom_menu = El("AXMenu", actions=(), children=[El("AXMenuItem", "Zoom In")] if prefilled else [])
         view = El("AXMenuBarItem", "View", children=[zoom_menu])
 
         def opened(_action):
-            zoom_menu.children.append(El("AXMenuItem", "Zoom In"))
+            if not zoom_menu.children:
+                zoom_menu.children.append(El("AXMenuItem", "Zoom In"))
             self._post(101, MENU_OPENED)
 
         view.on_perform = opened
@@ -478,8 +484,10 @@ class ObservingMac(FakeBackend):
         super().__init__({"Calculator": (101, calculator), "Finder": (202, finder)}, front="Finder")
 
     def _post(self, pid, notification):
-        if not self.silent:
-            self.driver.post(pid, notification)
+        self.posts += 1
+        if self.silent or (self.drop_every and self.posts % self.drop_every == 0):
+            return
+        self.driver.post(pid, notification)
 
     def activate(self, pid):
         result = super().activate(pid)
@@ -502,52 +510,104 @@ def _observed_surfaces(**backend_kwargs):
 
 @pytest.fixture
 def quick_loop(cn, monkeypatch):
-    """The event-loop stall measurement without its three real seconds; the
-    numbers it returns are whatever the test says, baseline first."""
-    readings = []
+    """The observer check without its real seconds: three rounds of each wait,
+    no breaths between, a short CPU sample, and the event-loop stall numbers
+    whatever the test says (baseline first)."""
+    readings = [0.002, 0.003]
 
     async def lag(_seconds):
         return readings.pop(0)
 
     monkeypatch.setattr(cn, "event_loop_lag", lag)
+    monkeypatch.setattr(cn, "ROUNDS", 3)
+    monkeypatch.setattr(cn, "ROUND_GAP_S", 0.0)
+    monkeypatch.setattr(cn, "CPU_SECONDS", 0.2)
     return readings
 
 
 async def test_the_observer_check_passes_when_the_notifications_arrive(cn, quick_loop, capsys):
     on, off, driver = _observed_surfaces()
-    quick_loop.extend([0.002, 0.004])
     assert await cn.observe(on, off) is True
     out = capsys.readouterr().out
-    assert "✗" not in out
-    assert "✓ AXApplicationActivated arrives — notification at" in out
-    assert "✓ AXMenuOpened arrives — notification at" in out
+    assert "✗" not in out and "⚠" not in out
+    assert "✓ AXApplicationActivated arrives — median" in out
+    assert "✓ AXMenuOpened arrives — median" in out
+    assert "✓ no notification was missed — 0 of 6 waits got no notification" in out
+    assert "✓ no callback raised" in out and "✓ the observer costs next to no CPU" in out
+    assert "✓ no thread is left behind" in out and "✓ waits still work with the observer stopped" in out
     assert "25 of 25 subscribed" in out
     assert ("quit", "Calculator") in cn.calls
     assert ("key", "escape", 1) in on.input.events, "the menu the check opened is closed again"
     assert not driver.observed, "everything subscribed was unsubscribed"
 
 
+async def test_a_menu_that_is_already_filled_in_has_nothing_to_wait_for_and_is_not_counted_as_a_saving(cn, quick_loop, capsys):
+    on, off, _ = _observed_surfaces(prefilled=True)
+    assert await cn.observe(on, off) is True
+    out = capsys.readouterr().out
+    assert "✓ AXMenuOpened arrives — median" in out and "polling had nothing to wait for" in out
+    assert cn.RUN.extra["observer_usefulness"]["waits"] == 3, "only the three activations, not the menus"
+
+
+async def test_what_the_observer_is_worth_is_reported_as_a_finding_not_a_pass_or_fail(cn, quick_loop, capsys):
+    on, off, _ = _observed_surfaces()
+    await cn.observe(on, off)
+    out = capsys.readouterr().out
+    assert "ℹ usefulness: a 50 ms poll would have ended these waits a median" in out
+    finding = cn.RUN.extra["observer_usefulness"]
+    assert finding["waits"] >= 1 and set(finding) >= {"median_saving_ms", "best_ms", "worst_ms", "verdict"}
+    assert not any(step["label"].startswith("usefulness") for step in cn.RUN.steps)
+
+
 async def test_notifications_that_never_arrive_are_a_failure_the_output_shows(cn, quick_loop, capsys):
     on, off, _ = _observed_surfaces(silent=True)
-    quick_loop.extend([0.002, 0.002])
     assert await cn.observe(on, off) is False
     out = capsys.readouterr().out
-    assert "✗ AXApplicationActivated arrives — notification at never; polling saw the app in front at" in out
-    assert "✗ AXMenuOpened arrives — notification at never" in out
+    assert "✗ AXApplicationActivated arrives — median never; polling saw the app in front at" in out
+    assert "✗ AXMenuOpened arrives — median never" in out
+    assert "✗ no notification was missed — 6 of 6 waits got no notification" in out
+    assert "no wait produced both a notification and a poll to compare" in out
+
+
+async def test_a_notification_missed_now_and_then_is_caught_even_though_most_arrive(cn, quick_loop, capsys):
+    on, off, _ = _observed_surfaces(drop_every=4)
+    assert await cn.observe(on, off) is False
+    out = capsys.readouterr().out
+    assert "✓ AXApplicationActivated arrives" in out
+    assert re.search(r"✗ no notification was missed — [1-9]\d* of 6 waits got no notification", out)
 
 
 async def test_an_observer_that_cannot_subscribe_is_reported_not_crashed_on(cn, quick_loop, capsys):
     on, off, _ = _observed_surfaces(can_observe=False)
-    quick_loop.extend([0.002, 0.002])
     assert await cn.observe(on, off) is False
     out = capsys.readouterr().out
-    assert "✗ subscribed to AXApplicationActivated — no subscription was made" in out
-    assert "✗ subscribed to AXMenuOpened" in out
+    assert "✗ AXApplicationActivated arrives — no subscription was made" in out
+    assert "✗ AXMenuOpened arrives — no subscription was made" in out
+    assert "✗ no callback raised — there is no observer thread" in out
+
+
+async def test_a_callback_that_raised_is_a_failure(cn, quick_loop, capsys):
+    on, off, driver = _observed_surfaces()
+    driver.errors = 2
+    assert await cn.observe(on, off) is False
+    assert "✗ no callback raised — observer thread stats:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cpu, expected", [(0.30, "30.0% of one core while waiting"), (None, "no subscription, so nothing")])
+async def test_an_observer_that_burns_cpu_or_cannot_be_measured_is_a_failure(cn, quick_loop, monkeypatch, capsys, cpu, expected):
+    on, off, _ = _observed_surfaces()
+
+    async def sampled(surface, pid, seconds=None):
+        return cpu
+
+    monkeypatch.setattr(cn, "observer_cpu", sampled)
+    assert await cn.observe(on, off) is False
+    assert f"✗ the observer costs next to no CPU — {expected}" in capsys.readouterr().out
 
 
 async def test_a_thread_that_stalls_the_event_loop_is_a_failure(cn, quick_loop, capsys):
     on, off, _ = _observed_surfaces()
-    quick_loop.extend([0.003, 0.2])                    # 200 ms stalls while it spins, 3 ms without
+    quick_loop[:] = [0.003, 0.2]                       # 200 ms stalls while it spins, 3 ms without
     assert await cn.observe(on, off) is False
     assert "✗ the event loop stays free while the observer spins — worst stall 200 ms with it, 3 ms without" \
         in capsys.readouterr().out
@@ -555,11 +615,66 @@ async def test_a_thread_that_stalls_the_event_loop_is_a_failure(cn, quick_loop, 
 
 async def test_an_observer_that_makes_the_wait_slower_is_a_failure(cn, quick_loop, monkeypatch, capsys):
     on, off, _ = _observed_surfaces()
-    quick_loop.extend([0.002, 0.002])
-    monkeypatch.setattr(cn, "average_front", lambda surface, away, to, count=5: 0.3 if surface is on else 0.1)
+    monkeypatch.setattr(cn, "average_front",
+                        lambda surface, away, to, count=5: (0.3, count) if surface is on else (0.1, count))
     assert await cn.observe(on, off) is False
     assert "✗ bringing an app to the front is no slower with it — 300 ms with, 100 ms without" \
         in capsys.readouterr().out
+
+
+async def test_an_app_that_never_comes_to_the_front_with_the_observer_is_a_failure(cn, quick_loop, monkeypatch, capsys):
+    on, off, _ = _observed_surfaces()
+    monkeypatch.setattr(cn, "average_front",
+                        lambda surface, away, to, count=5: (0.1, 0 if surface is on else count))
+    assert await cn.observe(on, off) is False
+    assert "✗ bringing an app to the front is no slower with it" in capsys.readouterr().out
+
+
+async def test_waits_that_stop_working_once_the_observer_is_stopped_are_a_failure(cn, quick_loop, monkeypatch, capsys):
+    on, off, _ = _observed_surfaces()
+    real = cn.average_front
+    calls = []
+
+    def average(surface, away, to, count=5):
+        calls.append(count)
+        return real(surface, away, to, count) if count != 3 else (0.1, 0)
+
+    monkeypatch.setattr(cn, "average_front", average)
+    assert await cn.observe(on, off) is False
+    assert "✗ waits still work with the observer stopped — the app was in front afterwards 0/3 times" \
+        in capsys.readouterr().out
+
+
+async def test_a_thread_still_running_after_the_surface_is_closed_is_a_failure(cn, quick_loop, capsys):
+    on, off, _ = _observed_surfaces()
+    real_close = on.close
+    on.close = lambda: None                            # a close that doesn't stop the thread
+    try:
+        assert await cn.observe(on, off) is False
+        assert "✗ no thread is left behind — still running: ['jarvis-ax-observer']" in capsys.readouterr().out
+    finally:
+        real_close()
+
+
+async def test_the_saving_over_a_poll_is_what_the_next_50ms_tick_would_have_cost(cn):
+    saving = cn.estimated_saving
+    assert saving({"watched": True, "fired": 0.020, "seen": 0.012}) == pytest.approx(0.030)
+    assert saving({"watched": True, "fired": 0.005, "seen": 0.012}) == pytest.approx(0.038), \
+        "a notification before the change is seen can't help before the change"
+    assert saving({"watched": True, "fired": 0.200, "seen": 0.010}) == pytest.approx(-0.150), \
+        "a late notification is slower than the poll"
+    assert saving({"watched": True, "fired": None, "seen": 0.010}) is None
+    assert saving({"watched": False}) is None
+
+
+async def test_a_blocking_call_that_never_returns_is_reported_as_a_deadlock_not_waited_on_forever(cn):
+    import time as real_time
+
+    def stuck():
+        real_time.sleep(0.5)
+
+    with pytest.raises(RuntimeError, match="stuck didn't finish within 0 s — a deadlock"):
+        await cn.bounded(stuck, timeout_s=0.05)
 
 
 async def test_the_event_loop_lag_measure_reports_a_real_stall(cn):
@@ -922,3 +1037,142 @@ async def test_an_inconclusive_step_is_not_a_pass(cn, capsys):
     assert cn.step("another", True) is True
     out = capsys.readouterr().out
     assert "⚠ a thing" in out and "✓ another" in out
+
+
+# ---------------------------------------------------------------------------
+# timing, repeating, reporting
+# ---------------------------------------------------------------------------
+async def test_a_measured_check_times_its_calls_by_phase_and_its_verification(cn, calc):
+    calculator, surface = calc
+    assert await cn.timed("calculator click", cn.calculator_click, surface) is True
+    (run,) = cn.RUN.runs
+    seconds = run["timings"]["seconds"]
+    assert run["check"] == "calculator click" and run["passed"] is True
+    assert seconds["action"] > 0 and seconds["verification"] > 0, "the clipboard reading is verification"
+    assert seconds["observation"] > 0 and seconds["refresh"] > 0, "reads before, and after, the first press"
+    assert run["timings"]["calls"]["action"] == 6, "clear, 7, +, 5, = and then ⌘C"
+    assert {step["check"] for step in cn.RUN.steps} == {"calculator click"}
+
+
+async def test_the_checks_own_waiting_is_counted_apart_from_jarvis_time(cn):
+    class Idle:
+        resolve_seconds = 0.0
+
+    with cn.RUN.measure("waiting", Idle()):
+        await cn.real_pause(0.05)
+    seconds = cn.RUN.runs[0]["timings"]["seconds"]
+    assert seconds["settle"] >= 0.05 and seconds["action"] == 0.0
+
+
+async def test_a_check_that_blows_up_is_a_failed_run_and_the_next_check_still_runs(cn, monkeypatch, capsys):
+    async def boom(surface):
+        raise RuntimeError("it broke")
+
+    async def fine(surface):
+        return cn.step("a good thing", True)
+
+    assert await cn.guarded("first", cn.timed("boom", boom, object())) is False
+    assert await cn.guarded("second", cn.timed("fine", fine, object())) is True
+    assert [(run["check"], run["passed"]) for run in cn.RUN.runs] == [("boom", False), ("fine", True)]
+
+
+async def test_every_stale_scenario_is_a_measured_run_with_its_own_verdict(cn, fx):
+    surface, fixture, _, _ = _stale_setup(fx)
+    await cn.stale_checks(surface, fixture)
+    verdicts = {run["check"]: run["passed"] for run in cn.RUN.runs}
+    assert verdicts == {"stale: press without focus": True, "stale: rebuild": True, "stale: twin": True,
+                        "stale: duplicate": True, "stale: impostor": True, "stale: rename": True,
+                        "stale: move": True}
+
+
+async def test_an_inconclusive_stale_scenario_is_not_a_passing_run(cn, fx):
+    surface, fixture, _, _ = _stale_setup(fx, keep_references=True)
+    await cn.stale_checks(surface, fixture)
+    assert {run["check"]: run["passed"] for run in cn.RUN.runs}["stale: rebuild"] is False
+
+
+class _MainStub(_Stub):
+    pass
+
+
+def _patch_main(cn, monkeypatch, *, look_ok=True, argv=()):
+    ran = {"look": 0}
+
+    async def look(surface, app):
+        ran["look"] += 1
+        return cn.step("read the window", look_ok, "") if True else True
+
+    async def noop(surface):
+        return True
+
+    async def observe(on, off):
+        return True
+
+    monkeypatch.setattr(cn, "NativeSurface", lambda **kwargs: _Stub(**kwargs))
+    monkeypatch.setattr(cn, "look", look)
+    monkeypatch.setattr(cn, "act", noop)
+    monkeypatch.setattr(cn, "controls", noop)
+    monkeypatch.setattr(cn, "stale", noop)
+    monkeypatch.setattr(cn, "observe", observe)
+    monkeypatch.setattr("sys.argv", ["check_native.py", *argv])
+    return ran
+
+
+async def test_repeat_runs_everything_n_times_and_numbers_the_runs(cn, monkeypatch, capsys):
+    ran = _patch_main(cn, monkeypatch, argv=["--repeat", "3"])
+    assert await cn.main() == 0
+    out = capsys.readouterr().out
+    assert ran["look"] == 3
+    assert "=== run 1 of 3 ===" in out and "=== run 3 of 3 ===" in out
+    assert [step["iteration"] for step in cn.RUN.steps if step["label"] == "read the window"] == [1, 2, 3]
+    assert "Timings in milliseconds — median of 3 run(s), worst in brackets" in out
+    assert "3/3" in out
+
+
+async def test_a_single_plain_run_prints_no_table_and_no_criteria(cn, monkeypatch, capsys):
+    _patch_main(cn, monkeypatch)
+    assert await cn.main() == 0
+    out = capsys.readouterr().out
+    assert "Timings in milliseconds" not in out and "Exit criteria" not in out and "=== run" not in out
+
+
+async def test_all_runs_every_section_prints_the_criteria_and_writes_the_results(cn, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    ran = {}
+
+    def section(name):
+        async def run(*args):
+            ran[name] = True
+            return True
+        return run
+
+    _patch_main(cn, monkeypatch, argv=["--all", "--repeat", "3"])
+    for name in ("act", "controls", "stale"):
+        monkeypatch.setattr(cn, name, section(name))
+    monkeypatch.setattr(cn, "observe", section("observe"))
+    assert await cn.main() == 0
+    assert set(ran) == {"act", "controls", "stale", "observe"}
+    out = capsys.readouterr().out
+    assert "Exit criteria for real-Mac validation" in out and "☐ Permissions" in out
+    (written,) = tmp_path.glob("native-validation-*.json")
+    report = json.loads(written.read_text())
+    assert report["schema"] == 1 and report["repeat"] == 3 and report["ok"] is True
+    assert report["argv"] == ["--all", "--repeat", "3"]
+    assert {row["area"] for row in report["criteria"]} >= {"Stale handles", "Observer", "Performance"}
+    assert str(written.name) in out
+
+
+async def test_json_goes_where_it_is_told_and_a_failed_step_fails_the_run(cn, monkeypatch, capsys, tmp_path):
+    target = tmp_path / "out" / "results.json"
+    target.parent.mkdir()
+    _patch_main(cn, monkeypatch, look_ok=False, argv=["--json", str(target)])
+    assert await cn.main() == 1
+    report = json.loads(target.read_text())
+    assert report["ok"] is False
+    assert any(step["status"] == "fail" for step in report["steps"])
+    assert "Something didn't work" in capsys.readouterr().out
+
+
+async def test_repeat_below_one_is_one(cn, monkeypatch):
+    ran = _patch_main(cn, monkeypatch, argv=["--repeat", "0"])
+    assert await cn.main() == 0 and ran["look"] == 1

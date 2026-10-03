@@ -53,15 +53,21 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import native_validation as nv  # noqa: E402  (this folder; see its docstring)
 from jarvis.surfaces.native import NativeError, NativeSurface  # noqa: E402
 from jarvis.surfaces.native.input import resolve_key  # noqa: E402
 from jarvis.surfaces.native.marks import MIN_CONFIDENCE, image_size, recognize_text, to_points  # noqa: E402
 from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED  # noqa: E402
+
+#: Everything this run saw, and how long each part of it took.
+RUN = nv.Recorder()
 
 
 def step(label: str, ok: bool, detail: str = "", *, inconclusive: bool = False) -> bool:
@@ -69,7 +75,14 @@ def step(label: str, ok: bool, detail: str = "", *, inconclusive: bool = False) 
     it is not a pass, and the run isn't "all good" with one in it."""
     mark = "⚠" if inconclusive else ("✓" if ok else "✗")
     print(f"  {mark} {label}" + (f" — {detail}" if detail else ""))
+    RUN.record(label, "inconclusive" if inconclusive else ("pass" if ok else "fail"), detail)
     return ok and not inconclusive
+
+
+async def timed(name: str, check, surface: NativeSurface, *args):
+    """Run *check* (given a surface that times its calls) as one measured run of *name*."""
+    with RUN.measure(name, surface) as timed_surface:
+        return await check(timed_surface, *args)
 
 
 async def capture_window(pid: int, number: int) -> Path:
@@ -104,11 +117,11 @@ async def look(surface: NativeSurface, app: str) -> bool:
 
 async def act(surface: NativeSurface) -> bool:
     print("TextEdit round trip")
-    subprocess.run(["open", "-a", "TextEdit"], check=False)
-    time.sleep(2.0)
+    launch("TextEdit")
+    await pause(2.0)
     try:
         await surface.choose_menu(["File", "New"], "TextEdit")
-        time.sleep(1.0)
+        await pause(1.0)
         snap, _ = await surface.read("TextEdit")
         area = next((c for c in snap.controls if c.ax_role == "AXTextArea"), None)
         if not step("found the document's text area", area is not None):
@@ -119,7 +132,7 @@ async def act(surface: NativeSurface) -> bool:
         summary = await surface.choose_menu(["Format", "Font", "Bold"], "TextEdit")
         ok &= step("chose Format › Font › Bold", True, summary)
         await surface.choose_menu(["File", "Close"], "TextEdit")
-        time.sleep(0.8)
+        await pause(0.8)
         snap, listing = await surface.read("TextEdit")
         dont_save = next((c for c in snap.controls if "don" in c.label.lower() and "save" in c.label.lower()),
                          None)
@@ -154,7 +167,10 @@ def open_path(path: Path) -> None:
 
 
 async def pause(seconds: float) -> None:
+    """Let an app catch up. Counted as the check's own waiting, not as JARVIS's time."""
+    started = time.monotonic()
     await asyncio.sleep(seconds)
+    RUN.add("settle", time.monotonic() - started)
 
 
 def is_running(app: str) -> bool:
@@ -221,7 +237,8 @@ async def copied_display(surface: NativeSurface) -> str:
     how Accessibility happens to name the display."""
     await surface.press_key(resolve_key("cmd+c"))
     await pause(0.3)
-    return read_clipboard().strip()
+    with RUN.verifying():
+        return read_clipboard().strip()
 
 
 async def calculator_click(surface: NativeSurface) -> bool:
@@ -294,8 +311,8 @@ async def calculator(surface: NativeSurface) -> bool:
     launch("Calculator")
     await pause(1.5)
     try:
-        ok = await guarded("click_control in Calculator", calculator_click(surface))
-        ok &= await guarded("mark_screen in Calculator", calculator_marks(surface))
+        ok = await guarded("click_control in Calculator", timed("calculator click", calculator_click, surface))
+        ok &= await guarded("mark_screen in Calculator", timed("calculator marks", calculator_marks, surface))
         return ok
     finally:
         write_clipboard(saved)
@@ -365,6 +382,7 @@ async def finder_drag(surface: NativeSurface) -> bool:
         try:
             await surface.choose_menu(["View", "as List"], "Finder")
             await pause(0.8)
+            step("switched the Finder window to a list", True)
         except NativeError as exc:      # the rows are easier to tell apart as a list, not essential
             step("switched the Finder window to a list", False, exc.message)
         snap, _ = await surface.read("Finder")
@@ -379,7 +397,8 @@ async def finder_drag(surface: NativeSurface) -> bool:
             return False
         summary = await surface.drag(file.handle, folder.handle)
         await pause(1.5)
-        moved = (target / "drag-me.txt").exists() and not source.exists()
+        with RUN.verifying():
+            moved = (target / "drag-me.txt").exists() and not source.exists()
         return step("the file is inside the folder", moved,
                     summary + ("" if moved else f" On disk: {sorted(p.name for p in base.rglob('*'))}"))
     finally:
@@ -392,8 +411,8 @@ async def finder_drag(surface: NativeSurface) -> bool:
 
 async def controls(surface: NativeSurface) -> bool:
     ok = await calculator(surface)
-    ok &= await guarded("choose_option in TextEdit", textedit_dropdown(surface))
-    ok &= await guarded("drag_control in Finder", finder_drag(surface))
+    ok &= await guarded("choose_option in TextEdit", timed("save sheet pop-up", textedit_dropdown, surface))
+    ok &= await guarded("drag_control in Finder", timed("finder drag", finder_drag, surface))
     return ok
 
 
@@ -523,7 +542,8 @@ async def stale_scenario(surface: NativeSurface, fixture: FixtureProcess, comman
     handle, seen = await fixture_handle(surface)
     if handle is None:
         return "no Save button to take a handle to; the window showed: " + seen
-    before = len(fixture.events())
+    with RUN.verifying():
+        before = len(fixture.events())
     relocated, refused = surface.relocations, surface.relocations_refused
     changed = (await asyncio.to_thread(fixture.send, command))["generation"]
     error = None
@@ -532,8 +552,9 @@ async def stale_scenario(surface: NativeSurface, fixture: FixtureProcess, comman
     except NativeError as exc:
         error = exc.message
     await pause(0.5)
-    return {"original": original, "changed": changed, "error": error,
-            "events": [parse_event(line) for line in fixture.events()[before:]],
+    with RUN.verifying():
+        events = [parse_event(line) for line in fixture.events()[before:]]
+    return {"original": original, "changed": changed, "error": error, "events": events,
             "relocated": surface.relocations - relocated, "refused": surface.relocations_refused - refused}
 
 
@@ -563,7 +584,8 @@ async def background_press(surface: NativeSurface, fixture: FixtureProcess) -> b
     before = len(fixture.events())
     await surface.press(handle)
     await pause(0.5)
-    pressed = fixture.events()[before:]
+    with RUN.verifying():
+        pressed = fixture.events()[before:]
     still_behind = front_pid(backend) == finder[0]
     return step("a press works with another app in front", bool(pressed) and still_behind,
                 f"the window recorded {len(pressed)} press(es); Finder "
@@ -572,16 +594,20 @@ async def background_press(surface: NativeSurface, fixture: FixtureProcess) -> b
 
 
 async def stale_checks(surface: NativeSurface, fixture: FixtureProcess) -> bool:
-    ok = await guarded("press without focus", background_press(surface, fixture))
+    ok = await guarded("press without focus", timed("stale: press without focus", background_press,
+                                                    surface, fixture))
     for scenario, command, label in STALE_SCENARIOS:
-        outcome = await guarded(label, stale_scenario(surface, fixture, command))
+        name = f"stale: {scenario}"
+        outcome = await guarded(label, timed(name, stale_scenario, surface, fixture, command))
         if outcome is False:
             ok = False
         elif isinstance(outcome, str):
             ok &= step(label, False, outcome)
+            RUN.mark(name, False)
         else:
             status, why = judge(scenario, outcome)
             ok &= step(label, status == "ok", why, inconclusive=status == "inconclusive")
+            RUN.mark(name, status == "ok")
     return ok
 
 
@@ -653,7 +679,8 @@ def time_activation(surface: NativeSurface, away: int, to: int) -> dict:
 
 def time_menu(surface: NativeSurface, pid: int, title: str) -> dict:
     """Open the *title* menu of *pid*'s menu bar and say when the notification
-    arrived and when its items showed up (seconds after pressing)."""
+    arrived and when its items showed up (seconds after pressing; none if they
+    were there already, which is the usual case for a menu bar menu)."""
     backend = surface.backend
     bar = backend.attribute(backend.application(pid), "AXMenuBar")
     item = next((i for i in backend.attribute(bar, "AXChildren") or []
@@ -665,13 +692,14 @@ def time_menu(surface: NativeSurface, pid: int, title: str) -> dict:
         return any(backend.attribute(menu, "AXChildren")
                    for menu in backend.attribute(item, "AXChildren") or [])
 
+    prefilled = filled()                 # most menu bar menus already hold their items; nothing to wait for
     with surface.watch(pid, MENU_OPENED) as wake:
         if wake is None:
             return {"watched": False}
         start = time.monotonic()
         backend.perform(item, "AXPress")
         seen = None
-        while time.monotonic() - start < 2.0 and seen is None:
+        while not prefilled and time.monotonic() - start < 2.0 and seen is None:
             if filled():
                 seen = time.monotonic() - start
             else:
@@ -679,7 +707,7 @@ def time_menu(surface: NativeSurface, pid: int, title: str) -> dict:
         wake.wait(0.5)
         fired = None if wake.fired_at is None else wake.fired_at - start
     surface.input.press(resolve_key("escape"))
-    return {"watched": True, "fired": fired, "seen": seen}
+    return {"watched": True, "fired": fired, "seen": seen, "prefilled": prefilled}
 
 
 def cycle_watches(surface: NativeSurface, pid: int, count: int = 25) -> tuple[int, int, float]:
@@ -693,16 +721,45 @@ def cycle_watches(surface: NativeSurface, pid: int, count: int = 25) -> tuple[in
     return made, threads, time.monotonic() - start
 
 
-def average_front(surface: NativeSurface, away: int, to: int, count: int = 5) -> float:
-    """Mean seconds for the surface's own wait on an app coming to the front."""
-    backend, total = surface.backend, 0.0
+def average_front(surface: NativeSurface, away: int, to: int, count: int = 5) -> tuple[float, int]:
+    """The surface's own wait on an app coming to the front, *count* times:
+    (mean seconds, how many times the app really was in front afterwards)."""
+    backend, total, arrived = surface.backend, 0.0, 0
     for _ in range(count):
         backend.activate(away)
         wait_front(backend, away)
         start = time.monotonic()
         surface._front(to)
         total += time.monotonic() - start
-    return total / count
+        arrived += front_pid(backend) == to
+    return total / count, arrived
+
+
+#: A breath between two timed waits, so one doesn't run into the next.
+ROUND_GAP_S = 0.15
+
+
+def repeat_timing(measure, count: int, *args) -> list[dict]:
+    """*measure*(*args*) *count* times, with a breath between."""
+    results = []
+    for _ in range(count):
+        results.append(measure(*args))
+        time.sleep(ROUND_GAP_S)
+    return results
+
+
+def estimated_saving(round_: dict) -> float | None:
+    """How much sooner than a 50 ms poll the notification would have ended one
+    wait: the poll sees the change at its next tick after it happened; the
+    observer, when the notification arrives (never before the change)."""
+    if not round_.get("watched") or round_.get("fired") is None or round_.get("seen") is None:
+        return None
+    poll_sees = -(-round_["seen"] // 0.05) * 0.05
+    return poll_sees - max(round_["fired"], round_["seen"])
+
+
+def median(values: list[float]) -> float:
+    return nv.percentile(values, 0.5)
 
 
 async def event_loop_lag(seconds: float) -> float:
@@ -719,90 +776,200 @@ def ms(seconds: float | None) -> str:
     return "never" if seconds is None else f"{seconds * 1000:.0f} ms"
 
 
+async def bounded(function, *args, timeout_s: float = 60.0):
+    """Run a blocking call on a worker thread, and say so rather than hang if it never returns."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(function, *args), timeout_s)
+    except TimeoutError:
+        raise RuntimeError(f"{getattr(function, '__name__', 'a call')} didn't finish within "
+                           f"{timeout_s:.0f} s — a deadlock?") from None
+
+
+async def observer_cpu(surface: NativeSurface, pid: int, seconds: float | None = None) -> float | None:
+    """The share of one core this process uses over *seconds* with a live
+    subscription and nothing else going on; None if none could be made."""
+    entered = surface.watch(pid, ACTIVATED)
+    wake = await asyncio.to_thread(entered.__enter__)
+    try:
+        if wake is None:
+            return None
+        cpu, wall = time.process_time(), time.monotonic()
+        await asyncio.sleep(CPU_SECONDS if seconds is None else seconds)
+        return (time.process_time() - cpu) / (time.monotonic() - wall)
+    finally:
+        await asyncio.to_thread(entered.__exit__, None, None, None)
+
+
+#: What the observer thread may cost, as a share of one core, while merely waiting.
+CPU_ALLOWED = 0.05
+CPU_SECONDS = 3.0
+#: How many times each wait is timed.
+ROUNDS = 15
+
+
+def observer_threads() -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == "jarvis-ax-observer"]
+
+
 async def observe(on: NativeSurface, off: NativeSurface) -> bool:
-    """*on* has the observer enabled; *off* is the same surface without it."""
+    """*on* has the observer enabled; *off* is the same surface without it.
+
+    Two questions, kept apart. Is it correct: do the notifications arrive, every
+    time, without a callback raising, a thread left behind, the CPU running or
+    the event loop stalling, and do waits still work when it isn't there? And is
+    it useful: how much sooner than polling does it end a wait? The second is a
+    measurement, not a pass or a fail."""
     print("AXObserver — what this Mac does")
     was_running = is_running("Calculator")
     launch("Calculator")
     await pause(1.5)
-    try:
-        backend = on.backend
-        calc, finder = backend.find_app("Calculator"), backend.find_app("Finder")
-        if not step("found Calculator and Finder", calc is not None and finder is not None):
-            return False
-        calc_pid, finder_pid = calc[0], finder[0]
-        ok = True
-
-        found = await asyncio.to_thread(time_activation, on, finder_pid, calc_pid)
-        if found["watched"]:
-            ok &= step("AXApplicationActivated arrives", found["fired"] is not None,
-                       f"notification at {ms(found['fired'])}; polling saw the app in front at {ms(found['seen'])}")
-        else:
-            ok &= step("subscribed to AXApplicationActivated", False,
-                       "no subscription was made — the observer thread or the call failed (JARVIS would just poll)")
-
-        found = await asyncio.to_thread(time_menu, on, calc_pid, "View")
-        if found.get("missing"):
-            ok &= step("Calculator has a View menu", False, f"no “{found['missing']}” in its menu bar")
-        elif found["watched"]:
-            ok &= step("AXMenuOpened arrives", found["fired"] is not None,
-                       f"notification at {ms(found['fired'])}; polling saw the items at {ms(found['seen'])}")
-        else:
-            ok &= step("subscribed to AXMenuOpened", False, "no subscription was made (JARVIS would just poll)")
-
-        def bogus():
-            start = time.monotonic()
-            with on.watch(calc_pid, "AXNoSuchNotification") as wake:
-                return wake is not None, time.monotonic() - start
-        accepted, took = await asyncio.to_thread(bogus)
-        ok &= step("an unsupported notification is handled", took < 1.0,
-                   ("macOS accepted it, so it just never fires" if accepted else "refused, so JARVIS polls")
-                   + f" ({ms(took)})")
-
-        made, threads, took = await asyncio.to_thread(cycle_watches, on, calc_pid)
-        ok &= step("25 subscribe/unsubscribe cycles leave nothing behind",
-                   made == 25 and threading.active_count() <= threads + 1,
-                   f"{made} of 25 subscribed in {ms(took)}; threads {threads} → {threading.active_count()}")
-
-        baseline = await event_loop_lag(1.0)
-        entered = on.watch(calc_pid, ACTIVATED)
-        wake = await asyncio.to_thread(entered.__enter__)
+    with RUN.measure("observer", on):
         try:
-            spinning = await event_loop_lag(2.0)
+            return await _observe(on, off)
         finally:
-            await asyncio.to_thread(entered.__exit__, None, None, None)
-        if wake is None:
-            ok &= step("the event loop stays free while the observer spins", False,
-                       "no subscription, so nothing was spinning to measure")
-        else:
-            ok &= step("the event loop stays free while the observer spins",
-                       spinning <= baseline + LOOP_LAG_ALLOWED_S,
-                       f"worst stall {ms(spinning)} with it, {ms(baseline)} without")
+            on.close()
+            if not was_running:
+                quit_app("Calculator")
 
-        with_it = await asyncio.to_thread(average_front, on, finder_pid, calc_pid)
-        without = await asyncio.to_thread(average_front, off, finder_pid, calc_pid)
-        ok &= step("bringing an app to the front is no slower with it", with_it <= without + FRONT_SLOWER_ALLOWED_S,
-                   f"{ms(with_it)} with, {ms(without)} without, mean of 5")
-        return ok
+
+async def _observe(on: NativeSurface, off: NativeSurface) -> bool:
+    backend = on.backend
+    already = observer_threads()
+    calc, finder = backend.find_app("Calculator"), backend.find_app("Finder")
+    if not step("found Calculator and Finder", calc is not None and finder is not None):
+        return False
+    calc_pid, finder_pid = calc[0], finder[0]
+    ok = True
+
+    activations = await bounded(repeat_timing, time_activation, ROUNDS, on, finder_pid, calc_pid)
+    menus = await bounded(repeat_timing, time_menu, ROUNDS, on, calc_pid, "View")
+    for label, rounds, what in (("AXApplicationActivated arrives", activations, "the app in front"),
+                                ("AXMenuOpened arrives", menus, "the items")):
+        if not rounds[0].get("watched"):
+            ok &= step(label, False,
+                       "no subscription was made — the observer thread or the call failed (JARVIS would just poll)")
+        elif rounds[0].get("missing"):
+            ok &= step("Calculator has a View menu", False, f"no “{rounds[0]['missing']}” in its menu bar")
+        else:
+            fired = [r["fired"] for r in rounds if r.get("fired") is not None]
+            seen = [r["seen"] for r in rounds if r.get("seen") is not None]
+            polled = (f"polling saw {what} at {ms(median(seen))}" if seen
+                      else "polling had nothing to wait for — the menu was already filled in")
+            ok &= step(label, bool(fired), f"median {ms(median(fired) if fired else None)}; {polled}")
+    watched = [r for r in (*activations, *menus) if r.get("watched") and not r.get("missing")]
+    missed = sum(1 for r in watched if r.get("fired") is None)
+    ok &= step("no notification was missed", bool(watched) and missed == 0,
+               f"{missed} of {len(watched)} waits got no notification" if watched else "nothing was watched")
+
+    def bogus():
+        start = time.monotonic()
+        with on.watch(calc_pid, "AXNoSuchNotification") as wake:
+            return wake is not None, time.monotonic() - start
+    accepted, took = await bounded(bogus)
+    ok &= step("an unsupported notification is handled", took < 1.0,
+               ("macOS accepted it, so it just never fires" if accepted else "refused, so JARVIS polls")
+               + f" ({ms(took)})")
+
+    made, threads, took = await bounded(cycle_watches, on, calc_pid)
+    ok &= step("25 subscribe/unsubscribe cycles leave nothing behind",
+               made == 25 and threading.active_count() <= threads + 1,
+               f"{made} of 25 subscribed in {ms(took)}; threads {threads} → {threading.active_count()}")
+
+    stats = on.observer_stats()
+    ok &= step("no callback raised", bool(stats) and stats["callback_errors"] == 0 and not stats["broken"],
+               f"observer thread stats: {stats}" if stats else "there is no observer thread")
+
+    cpu = await observer_cpu(on, calc_pid)
+    ok &= step("the observer costs next to no CPU", cpu is not None and cpu <= CPU_ALLOWED,
+               "no subscription, so nothing was measured" if cpu is None
+               else f"{cpu * 100:.1f}% of one core while waiting (limit {CPU_ALLOWED * 100:.0f}%)")
+
+    baseline = await event_loop_lag(1.0)
+    entered = on.watch(calc_pid, ACTIVATED)
+    wake = await asyncio.to_thread(entered.__enter__)
+    try:
+        spinning = await event_loop_lag(2.0)
     finally:
-        on.close()
-        if not was_running:
-            quit_app("Calculator")
+        await asyncio.to_thread(entered.__exit__, None, None, None)
+    if wake is None:
+        ok &= step("the event loop stays free while the observer spins", False,
+                   "no subscription, so nothing was spinning to measure")
+    else:
+        ok &= step("the event loop stays free while the observer spins",
+                   spinning <= baseline + LOOP_LAG_ALLOWED_S,
+                   f"worst stall {ms(spinning)} with it, {ms(baseline)} without")
+
+    with_it, arrived_with = await bounded(average_front, on, finder_pid, calc_pid, 10)
+    without, arrived_without = await bounded(average_front, off, finder_pid, calc_pid, 10)
+    ok &= step("bringing an app to the front is no slower with it",
+               with_it <= without + FRONT_SLOWER_ALLOWED_S and arrived_with >= arrived_without,
+               f"{ms(with_it)} with, {ms(without)} without, mean of 10; the app was in front afterwards "
+               f"{arrived_with}/10 and {arrived_without}/10 times")
+
+    savings = [saving for round_ in (*activations, *menus) if (saving := estimated_saving(round_)) is not None]
+    if savings:
+        typical = median(savings)
+        verdict = ("no measurable gain — leave it off" if typical < 0.010 else
+                   "a small latency optimisation, not a reliability feature" if typical < 0.060 else
+                   "a real latency gain")
+        RUN.extra["observer_usefulness"] = {"waits": len(savings), "median_saving_ms": typical * 1000,
+                                            "best_ms": max(savings) * 1000, "worst_ms": min(savings) * 1000,
+                                            "verdict": verdict}
+        print(f"  ℹ usefulness: a 50 ms poll would have ended these waits a median {ms(typical)} later "
+              f"(best {ms(max(savings))}, worst {ms(min(savings))}, {len(savings)} waits) — {verdict}")
+    else:
+        print("  ℹ usefulness: no wait produced both a notification and a poll to compare")
+
+    # Last: stop it, and check nothing is left, and that waits go on working without it.
+    await asyncio.to_thread(on.close)
+    left = [thread.name for thread in observer_threads() if thread not in already and thread.is_alive()]
+    ok &= step("no thread is left behind", not left,
+               f"still running: {left}" if left else "the observer thread has ended")
+    after, arrived_after = await bounded(average_front, on, finder_pid, calc_pid, 3)
+    ok &= step("waits still work with the observer stopped", arrived_after == 3,
+               f"the app was in front afterwards {arrived_after}/3 times, mean {ms(after)}")
+    return ok
+
+
+async def run_once(args, surface: NativeSurface) -> bool:
+    ok = await guarded("look", timed("look", look, surface, args.app))
+    if args.act:
+        ok &= await guarded("TextEdit round trip", timed("textedit round trip", act, surface))
+    if args.controls:
+        ok &= await controls(surface)
+    if args.stale:
+        ok &= await stale(surface)
+    if args.observe:
+        ok &= await guarded("AXObserver", observe(NativeSurface(observe=True), NativeSurface(observe=False)))
+    return ok
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--app", default="", help="an app to look at (default: the frontmost)")
     parser.add_argument("--act", action="store_true", help="also run the TextEdit round trip")
+    parser.add_argument("--controls", action="store_true",
+                        help="also click, choose from a pop-up, drag and click marks (Calculator, "
+                             "TextEdit's Save sheet, a throwaway Desktop folder)")
     parser.add_argument("--stale", action="store_true",
                         help="also check re-finding a rebuilt control, and refusing look-alikes, "
                              "in a window of its own (scripts/ax_fixture.py)")
     parser.add_argument("--observe", action="store_true",
                         help="also measure the Accessibility observer thread (automation.native_observer)")
-    parser.add_argument("--controls", action="store_true",
-                        help="also click, choose from a pop-up, drag and click marks (Calculator, "
-                             "TextEdit's Save sheet, a throwaway Desktop folder)")
+    parser.add_argument("--all", action="store_true",
+                        help="everything above, in that order, then the exit-criteria table; "
+                             "writes a results file")
+    parser.add_argument("--repeat", type=int, default=1, metavar="N",
+                        help="run it all N times: each check's pass rate and timings over the runs "
+                             f"(the Repeatability row needs {nv.MIN_REPEATS} or more)")
+    parser.add_argument("--json", type=Path, metavar="PATH",
+                        help="write every result, timing and criterion here (default with --all: "
+                             "native-validation-<time>.json)")
     args = parser.parse_args()
+    if args.all:
+        args.act = args.controls = args.stale = args.observe = True
+        args.json = args.json or Path(f"native-validation-{datetime.now():%Y%m%d-%H%M%S}.json")
+    args.repeat = max(1, args.repeat)
     surface = NativeSurface()
     if not surface.available():
         print("The native extras aren't installed here: pip install -e '.[native]' (macOS only).")
@@ -811,16 +978,25 @@ async def main() -> int:
         surface.backend.trusted(prompt=True)
         print("  Allow it in System Settings → Privacy & Security → Accessibility, then run again.")
         return 1
-    ok = await look(surface, args.app)
-    if args.act:
-        ok &= await act(surface)
-    if args.controls:
-        ok &= await controls(surface)
-    if args.stale:
-        ok &= await stale(surface)
-    if args.observe:
-        ok &= await observe(NativeSurface(observe=True), NativeSurface(observe=False))
-    print("\nAll good." if ok else "\nSomething didn't work — the lines marked ✗ say what.")
+    if args.all or args.json or args.repeat > 1:
+        env = nv.environment()
+        print(f"{env['chip'] or env['machine']} · macOS {env['macos']} · Python {env['python']}")
+    ok = True
+    for number in range(1, args.repeat + 1):
+        RUN.iteration = number
+        if args.repeat > 1:
+            print(f"\n=== run {number} of {args.repeat} ===")
+        ok &= await run_once(args, surface)
+    summary = nv.summarise(RUN.runs)
+    if len(summary) > 1 or args.repeat > 1:
+        print("\n" + "\n".join(nv.format_timings(summary, args.repeat)))
+    if args.all:
+        print("\n" + "\n".join(nv.format_criteria(nv.evaluate(RUN.steps, RUN.runs, args.repeat))))
+    if args.json:
+        report = nv.build_report(RUN, argv=sys.argv[1:], repeat=args.repeat, ok=ok)
+        args.json.write_text(json.dumps(report, indent=2))
+        print(f"\nResults written to {args.json} — send that file back (it lists the labels the windows showed).")
+    print("\nAll good." if ok else "\nSomething didn't work — the lines marked ✗ (or ⚠) say what.")
     return 0 if ok else 1
 
 

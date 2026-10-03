@@ -269,6 +269,38 @@ def test_watching_nothing_is_no_watch(observer):
     assert observer.watch(7) is None
 
 
+def test_stats_say_whether_the_thread_is_alive_what_it_holds_and_how_it_ended(driver, observer):
+    assert observer.stats() == {"alive": False, "broken": False, "stopped": False, "subscriptions": 0,
+                                "spins": 0, "callback_errors": 0}
+    watch = observer.watch(7, MENU_OPENED, ACTIVATED)
+    assert eventually(lambda: observer.stats()["spins"] > 0)
+    stats = observer.stats()
+    assert stats["alive"] and stats["subscriptions"] == 1, "one watch, however many notifications it holds"
+    watch.close()
+    assert eventually(lambda: observer.stats()["subscriptions"] == 0)
+    driver.errors = 3                                   # a driver that counts its callbacks' failures
+    assert observer.stats()["callback_errors"] == 3
+    observer.stop()
+    assert observer.stats()["stopped"] and not observer.stats()["alive"]
+
+
+def test_a_failed_loop_shows_in_the_stats(driver, observer):
+    observer.watch(7, MENU_OPENED)
+    driver.spin_error = RuntimeError("gone")
+    driver.post(7, MENU_OPENED)
+    assert eventually(lambda: observer.stats()["broken"])
+
+
+def test_the_surface_reports_the_observer_it_has_and_none_when_it_has_none(driver):
+    surface, _, _ = _surface(observe=True, driver=driver)
+    try:
+        assert surface.observer_stats() == {}
+        with surface.watch(101, ACTIVATED):
+            assert surface.observer_stats()["subscriptions"] == 1
+    finally:
+        surface.close()
+
+
 def test_the_wake_records_when_the_first_notification_came():
     wake = Wake()
     assert wake.fired_at is None
@@ -641,7 +673,7 @@ def test_the_driver_subscribes_in_the_documented_order_and_keeps_the_callback_al
     assert fired == [1]
 
 
-def test_a_callback_that_raises_does_not_escape_into_the_run_loop():
+def test_a_callback_that_raises_does_not_escape_into_the_run_loop_and_is_counted():
     stand_in = StandIn()
     driver = MacObserverDriver(stand_in, stand_in)
 
@@ -649,7 +681,10 @@ def test_a_callback_that_raises_does_not_escape_into_the_run_loop():
         raise RuntimeError("waiter gone")
 
     driver.observe(7, MENU_OPENED, boom)
+    assert driver.errors == 0
     stand_in.callback("observer", "element", MENU_OPENED, None)       # must not raise
+    stand_in.callback("observer", "element", MENU_OPENED, None)
+    assert driver.errors == 2
 
 
 @pytest.mark.parametrize("stand_in", [StandIn(create_error=-25204), StandIn(add_error=-25205),
