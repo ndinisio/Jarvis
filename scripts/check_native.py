@@ -583,7 +583,7 @@ def locate_text(backend, pid: int, needle: str, snap, *, budget: int = 500) -> l
     if window is None:
         return ["no front window"]
     names_of = getattr(backend, "attribute_names", None)
-    is_element = getattr(backend, "is_element", lambda value: False)
+    linked = getattr(backend, "linked_elements", lambda value: None)
     queue = [(window, [], "the window", False)]
     seen: list = []
     found, visited, attributes = [], 0, 0
@@ -602,12 +602,12 @@ def locate_text(backend, pid: int, needle: str, snap, *, budget: int = 500) -> l
         frame = ax.frame_of({"AXPosition": position, "AXSize": size})
         skipped = under_skipped or role in ax.SKIP
         for name, value in values.items():
-            if isinstance(value, (list, tuple)) and value and all(is_element(v) for v in value):
+            if value is None:                      # nothing there - and nothing to hand to the C API
+                continue
+            links = linked(value)
+            if links is not None:
                 if name not in LINKS_NOT_FOLLOWED:
-                    queue.extend((v, here, name, skipped) for v in value)
-            elif is_element(value):
-                if name not in LINKS_NOT_FOLLOWED:
-                    queue.append((value, here, name, skipped))
+                    queue.extend((v, here, name, skipped) for v in links)
             elif isinstance(value, (str, int, float)) and not isinstance(value, bool) and needle in plain_text(value):
                 reasons = []
                 if role not in {"AXStaticText", "AXHeading"} and role not in ax.ACTIONABLE:
@@ -871,17 +871,23 @@ async def close_untitled_textedit(surface: NativeSurface) -> None:
 
 def option_facts(backend, option) -> dict[str, str]:
     """Everything Accessibility says about one menu item that can be said in a word — each scalar
-    attribute — plus where it hangs and where it sits in its menu."""
+    attribute — plus where it hangs and where it sits in its menu.
+
+    Nothing here is handed to the C API but through ``backend`` (``linked_elements``), and only
+    after the missing attributes are set aside: an attribute an element doesn't have comes back as
+    None, and None must never reach CoreFoundation (``CFGetTypeID(NULL)`` is a segmentation fault)."""
     element = option.element
     names = (getattr(backend, "attribute_names", lambda e: [])(element)) or list(DEFAULT_ATTRIBUTES)
-    is_element = getattr(backend, "is_element", lambda value: False)
     facts: dict[str, str] = {}
     for name, value in backend.attributes(element, tuple(names)).items():
-        if isinstance(value, (list, tuple)) and name not in {"AXPosition", "AXSize"}:
+        if value is None or (isinstance(value, str) and not value.strip()):
             continue
-        if is_element(value) or value in (None, ""):
-            continue
-        facts[name] = plain_text(value) if not isinstance(value, tuple) else ",".join(f"{v:g}" for v in value)
+        if isinstance(value, tuple) and name in {"AXPosition", "AXSize"}:
+            facts[name] = ",".join(f"{v:g}" for v in value)
+        elif isinstance(value, bool):                          # enabled, selected, focused: a difference that counts
+            facts[name] = str(value)
+        elif isinstance(value, (str, int, float)):             # a word or a number; links and arrays are not
+            facts[name] = plain_text(value)
     parent = backend.attribute(element, "AXParent")
     if parent is not None:
         siblings = list(backend.attribute(parent, "AXChildren") or [])

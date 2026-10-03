@@ -43,6 +43,11 @@ Every run starts with a line like `code: v8.53 (3f2a9c1)`. Send it with the outp
 result is matched to the code that produced it (`git pull` first if it is older than expected;
 `+ uncommitted changes` means the checkout has been edited).
 
+A run that ends with `Segmentation fault` (exit 139) is a bug in the harness or the backend, not a
+finding about an app: rerun it as `python -X faulthandler scripts/check_native.py …` and send the
+stack. (PyObjC turns `None` into a NULL pointer, and handing NULL to CoreFoundation kills the
+process; the backend keeps `None` away from it - tests/test_backend_cf.py.)
+
 Each check starts from the app you ran it in (`Starting point: Terminal …`), not from whichever
 app an earlier check left in front, so any of 1–5 can be run on its own, in any state. `--app NAME`
 starts somewhere else.

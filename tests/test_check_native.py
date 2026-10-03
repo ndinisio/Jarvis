@@ -14,6 +14,7 @@ calls is exactly what the real run is for.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -26,6 +27,7 @@ from jarvis.surfaces.native import NativeSurface
 from jarvis.surfaces.native.ax import TextItem
 from jarvis.surfaces.native.marks import TextBox
 from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED
+from test_backend_cf import Array, AXRef, NullDereference, strict_backend
 from test_native import El, FakeBackend, RecordingInput
 from test_observer import FakeDriver
 
@@ -213,8 +215,12 @@ class ProbeMac(FakeBackend):
     def attribute_names(self, element):
         return [*element.attrs, "AXChildren"]
 
-    def is_element(self, value):
-        return isinstance(value, El)
+    def linked_elements(self, value):
+        if isinstance(value, El):
+            return [value]
+        if isinstance(value, list) and value and all(isinstance(v, El) for v in value):
+            return value
+        return None
 
 
 def _locate(cn, *children, snap_text="12", **window_extra):
@@ -622,6 +628,173 @@ async def test_a_difference_in_identifier_is_what_the_evidence_points_at(cn, cap
     assert "they differ in: AXIdentifier, AXPosition, place in the menu" in out
     assert "only where they sit" not in out
     assert "Identifier='icloud-desktop'" in out and "Identifier='favourite-desktop'" in out
+
+
+# ---------------------------------------------------------------------------
+# the harness's native diagnostics, on a C API where handing it nothing is fatal
+# ---------------------------------------------------------------------------
+def _menu_items_on_the_strict_api():
+    """Two menu items as the real backend class reads them: attributes an element lacks come back
+    as None, children arrive as an NSArray proxy rather than a list, and the parent is an element."""
+    menu = AXRef(AXRole="AXMenu")
+    items = []
+    for number, section in ((2, "iCloud Library"), (10, "Favourites")):
+        items.append(types_namespace(element=AXRef(
+            AXRole="AXMenuItem", AXTitle="Desktop — iCloud", AXEnabled=True, AXHelp=None, AXIdentifier=None,
+            AXDescription=None, AXMenuItemMarkChar=None, AXPosition=(300.0, 100.0 + 20 * number),
+            AXSize=(200.0, 20.0), AXParent=menu, AXChildren=Array()), index=number, section=section))
+    menu.attrs["AXChildren"] = Array([i.element for i in items])
+    return items
+
+
+def types_namespace(**kw):
+    import types
+
+    return types.SimpleNamespace(**kw)
+
+
+def test_the_candidate_facts_are_read_without_ever_handing_nothing_to_the_c_api(cn):
+    """The v8.54 crash: an attribute the element lacks (here AXHelp, AXIdentifier, AXDescription,
+    AXMenuItemMarkChar) reached CFGetTypeID as NULL, and the process died with exit 139."""
+    backend, accessibility, cf = strict_backend()
+    first, _ = _menu_items_on_the_strict_api()
+    facts = cn.option_facts(backend, first)
+    assert facts["AXTitle"] == "Desktop — iCloud" and facts["AXEnabled"] == "True"
+    assert facts["AXPosition"] == "300,140" and facts["parent"] == "AXMenu with 2 children"
+    assert facts["place in the menu"] == "item 2, under “iCloud Library”"
+    assert not {"AXHelp", "AXIdentifier", "AXChildren", "AXParent"} & set(facts), "missing, links and arrays aren't facts"
+    assert all(kind != "NoneType" for _, kind in cf.calls + accessibility.calls)
+
+
+def test_the_evidence_for_two_candidates_survives_the_strict_c_api_end_to_end(cn):
+    backend, _, cf = strict_backend()
+    lines = cn.option_evidence(backend, _menu_items_on_the_strict_api())
+    assert lines[0].startswith("candidate 1: Role='AXMenuItem' Title='Desktop — iCloud'")
+    assert lines[-1] == ("they differ in: AXPosition, place in the menu — only where they sit; "
+                         "nothing about what they are or do tells them apart")
+    assert all(kind != "NoneType" for _, kind in cf.calls)
+
+
+def test_the_text_search_follows_nsarray_children_that_are_not_lists_and_never_passes_nothing(cn):
+    """The search must walk a real tree: AXChildren is an NSArray proxy, and most attributes of most
+    elements are None. Under v8.54 it would have crashed on the first of them, and, had it not, never
+    followed a child."""
+    from jarvis.surfaces.native import ax
+
+    backend, accessibility, cf = strict_backend()
+    display = AXRef(AXRole="AXStaticText", AXDescription="Edit field", AXValue=12, AXTitle=None,
+                    AXPosition=(10.0, 30.0), AXSize=(100.0, 30.0), AXChildren=Array())
+    group = AXRef(AXRole="AXGroup", AXTitle=None, AXValue=None, AXChildren=Array([display]),
+                  AXPosition=(0.0, 0.0), AXSize=(300.0, 400.0))
+    window = AXRef(AXRole="AXWindow", AXTitle="Calculator", AXChildren=Array([group]),
+                   AXPosition=(0.0, 0.0), AXSize=(300.0, 400.0), AXContents=None)
+    application = AXRef(AXFocusedWindow=window)
+    backend.application = lambda pid: application
+    backend.front_window = lambda app: window
+    snap = ax.WindowSnapshot(app="Calculator", pid=1, title="Calculator", frame=None)
+    lines = cn.locate_text(backend, 1, "12", snap)
+    assert lines[0].startswith("searched 3 elements")
+    assert any("AXValue<int>='12' on AXStaticText description='Edit field'" in line for line in lines), lines
+    assert all(kind != "NoneType" for _, kind in cf.calls + accessibility.calls)
+
+
+def test_the_stand_in_would_have_caught_v8_54s_ordering(cn):
+    """The old test of an attribute was `is_element(value) or value in (None, "")`: the element check
+    first. Put back, against the strict C API, it dies."""
+    backend, _, _ = strict_backend()
+    first, _ = _menu_items_on_the_strict_api()
+    values = backend.attributes(first.element, ("AXTitle", "AXHelp"))
+    assert values["AXHelp"] is None
+    with pytest.raises(NullDereference):
+        backend.CF.CFGetTypeID(values["AXHelp"])         # what handing it the None did
+
+
+# -- where the native diagnostics run -------------------------------------------------------------
+#: The functions that call into Accessibility / CoreFoundation for the harness's evidence.
+NATIVE_DIAGNOSTICS = {"option_evidence", "option_facts", "locate_text", "text_structure", "ax_structure",
+                      "drag_evidence", "under_pointer"}
+
+
+def calls_made_on_the_event_loop(source: str) -> list[str]:
+    """Calls to a native diagnostic made directly (not as the function handed to ``asyncio.to_thread``)
+    from an ``async def`` - that is, on the event loop's own thread."""
+    found = []
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.in_async = []
+
+        def visit_AsyncFunctionDef(self, node):
+            self.in_async.append(node.name)
+            self.generic_visit(node)
+            self.in_async.pop()
+
+        def visit_FunctionDef(self, node):
+            self.in_async.append(None)         # a plain def nested in an async one runs wherever it is called
+            self.generic_visit(node)
+            self.in_async.pop()
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id in NATIVE_DIAGNOSTICS and self.in_async \
+                    and self.in_async[-1]:
+                found.append(f"{self.in_async[-1]} calls {node.func.id} on the event loop (line {node.lineno})")
+            self.generic_visit(node)
+
+    Visitor().visit(ast.parse(source))
+    return found
+
+
+def test_no_async_check_calls_a_native_diagnostic_on_the_event_loop_thread():
+    assert calls_made_on_the_event_loop(SCRIPT.read_text()) == []
+
+
+def test_the_structural_check_does_catch_the_pattern_it_guards_against():
+    """`option_evidence(surface.backend, exc.candidates)` from a coroutine - the v8.54 edit that moved
+    the diagnostics onto the main thread - must be seen."""
+    source = (
+        "async def check(surface):\n"
+        "    for line in option_evidence(surface.backend, exc.candidates):\n"
+        "        print(line)\n"
+        "async def fine(surface):\n"
+        "    for line in await asyncio.to_thread(option_evidence, surface.backend, exc.candidates):\n"
+        "        print(line)\n"
+        "async def nested(surface):\n"
+        "    def sync():\n"
+        "        return locate_text(surface.backend, 1, 'x', None)\n"
+        "    return await asyncio.to_thread(sync)\n")
+    assert calls_made_on_the_event_loop(source) == ["check calls option_evidence on the event loop (line 2)"]
+
+
+async def test_the_diagnostics_run_on_a_worker_thread_when_the_checks_call_them(cn, monkeypatch, tmp_path, capsys):
+    """Behaviour, not just text: each one is entered from a thread other than the event loop's."""
+    pytest.importorskip("PIL")
+    main = threading.main_thread()
+    seen: dict[str, threading.Thread] = {}
+
+    def spy(name, result):
+        def run(*args, **kwargs):
+            seen[name] = threading.current_thread()
+            return result
+        return run
+
+    monkeypatch.setattr(cn, "option_evidence", spy("option_evidence", []))
+    textedit = TextEdit(where="icloud")
+    assert await cn.guarded("x", cn.textedit_dropdown(surface_for({"TextEdit": (303, textedit.app)}, "TextEdit")))
+
+    monkeypatch.setattr(cn, "locate_text", spy("locate_text", ["l"]))
+    monkeypatch.setattr(cn, "text_structure", spy("text_structure", ["t"]))
+    calculator = Calculator(display_as="number")
+    cn.read_clipboard = lambda: "12"
+    calculator.press = lambda key: None
+    await cn.calculator_click(surface_for({"Calculator": (101, calculator.app)}, "Calculator", ClickingInput(calculator)))
+
+    monkeypatch.setattr(cn, "drag_evidence", spy("drag_evidence", "evidence"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    finder = Finder(tmp_path)
+    await cn.finder_drag(finder_surface(finder, finder_input(finder, accepts=False)))
+
+    assert set(seen) == {"option_evidence", "locate_text", "text_structure", "drag_evidence"}
+    assert all(thread is not main for thread in seen.values()), {k: v.name for k, v in seen.items()}
 
 
 async def test_a_unique_qualified_desktop_is_chosen_without_asking(cn, capsys):

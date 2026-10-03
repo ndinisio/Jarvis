@@ -32,6 +32,12 @@ _POINT, _SIZE, _RECT, _RANGE, _ERROR = 1, 2, 3, 4, 5
 MESSAGING_TIMEOUT_S = 1.5
 
 
+#: Python values that can never be an accessibility element. They are never handed to CoreFoundation:
+#: PyObjC turns ``None`` into a NULL ``CFTypeRef``, and ``CFGetTypeID(NULL)`` is not an exception,
+#: it is a segmentation fault - which no ``try``/``except`` here or anywhere can catch.
+_PLAIN = (str, bytes, bool, int, float, tuple, dict)
+
+
 class MacAXBackend:
     def __init__(self) -> None:
         import ApplicationServices as AS
@@ -278,19 +284,56 @@ class MacAXBackend:
     def attribute_names(self, element: Any) -> list[str]:
         """Every attribute the element supports — for a validation run that must find where an app
         keeps something, not just look where the listing already does."""
+        if element is None:
+            return []
         try:
             error, names = self.AS.AXUIElementCopyAttributeNames(element, None)
         except Exception:
             return []
         return [str(n) for n in (names or [])] if error == 0 else []
 
-    def is_element(self, value: Any) -> bool:
+    def _cf_type(self, value: Any) -> int | None:
+        """The CoreFoundation type of *value*, or None - without asking CoreFoundation - when it is
+        nothing or a plain Python value (see ``_PLAIN``). The one place a value of unknown kind is
+        handed to ``CFGetTypeID``."""
+        if value is None or isinstance(value, _PLAIN):
+            return None
         try:
-            return bool(self.CF.CFGetTypeID(value) == self.AS.AXUIElementGetTypeID())
+            return int(self.CF.CFGetTypeID(value))
+        except Exception:
+            return None
+
+    def is_element(self, value: Any) -> bool:
+        """Whether *value* is an accessibility element (``AXUIElementRef``)."""
+        kind = self._cf_type(value)
+        if kind is None:
+            return False
+        try:
+            return kind == int(self.AS.AXUIElementGetTypeID())
         except Exception:
             return False
 
+    def linked_elements(self, value: Any) -> list[Any] | None:
+        """The accessibility elements *value* stands for: ``[value]`` if it is one, its items if it is
+        a (non-empty) array of them - PyObjC hands back an ``NSArray`` proxy, not a ``list`` - and None
+        for anything else, so a caller can tell "a word" from "a link to follow"."""
+        kind = self._cf_type(value)
+        if kind is None:
+            return None
+        try:
+            if kind == int(self.AS.AXUIElementGetTypeID()):
+                return [value]
+            if kind == int(self.CF.CFArrayGetTypeID()):
+                items = list(value)
+                if items and all(self.is_element(item) for item in items):
+                    return items
+        except Exception:
+            return None
+        return None
+
     def actions(self, element: Any) -> list[str]:
+        if element is None:
+            return []
         try:
             error, names = self.AS.AXUIElementCopyActionNames(element, None)
         except Exception:
@@ -298,12 +341,16 @@ class MacAXBackend:
         return [str(n) for n in (names or [])] if error == 0 else []
 
     def perform(self, element: Any, action: str) -> bool:
+        if element is None:
+            return False
         try:
             return self.AS.AXUIElementPerformAction(element, action) == 0
         except Exception:
             return False
 
     def set_attribute(self, element: Any, name: str, value: Any) -> bool:
+        if element is None:
+            return False
         try:
             return self.AS.AXUIElementSetAttributeValue(element, name, value) == 0
         except Exception:
@@ -311,12 +358,16 @@ class MacAXBackend:
 
     # -- element identity -----------------------------------------------------------------
     def key(self, element: Any) -> int:
+        if element is None:
+            return 0
         try:
             return int(self.CF.CFHash(element))
         except Exception:
             return id(element)
 
     def same(self, a: Any, b: Any) -> bool:
+        if a is None or b is None:
+            return a is b
         try:
             return bool(self.CF.CFEqual(a, b))
         except Exception:
