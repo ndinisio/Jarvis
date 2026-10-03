@@ -205,6 +205,110 @@ async def test_a_display_that_never_shows_the_sum_fails_and_dumps_the_raw_text_a
     assert "AXStaticText Description='Last Expression'<str>" in out
 
 
+class ProbeMac(FakeBackend):
+    """A backend that can say what attributes an element has and which values are elements, as the
+    real one can — for the search that finds where an app keeps a piece of text."""
+
+    def attribute_names(self, element):
+        return [*element.attrs, "AXChildren"]
+
+    def is_element(self, value):
+        return isinstance(value, El)
+
+
+def _locate(cn, *children, snap_text="12", **window_extra):
+    window = El("AXWindow", "Calculator", actions=(), frame=(0, 0, 300, 400), children=list(children),
+                **window_extra)
+    app = El("AXApplication", "Calculator", actions=(), AXWindows=[window], AXFocusedWindow=window)
+    backend = ProbeMac({"Calculator": (101, app)}, front="Calculator")
+    from jarvis.surfaces.native import ax
+
+    return cn.locate_text(backend, 101, snap_text, ax.snapshot(backend, window)), backend
+
+
+def test_the_search_finds_a_value_the_listing_shows_and_says_so(cn):
+    lines, _ = _locate(cn, El("AXStaticText", description="Edit field", value=12, actions=(), frame=(10, 10, 100, 30)))
+    assert "read_window lists it" in lines[0]
+    assert any("AXValue<int>='12' on AXStaticText description='Edit field'" in line and line.endswith("— listed")
+               for line in lines), lines
+
+
+def test_a_value_held_in_another_attribute_is_found_and_the_rule_that_misses_it_named(cn):
+    lines, _ = _locate(cn, El("AXStaticText", description="Edit field", value="", actions=(), frame=(10, 10, 100, 30),
+                              AXValueDescription="12"))
+    assert "does not list it" in lines[0]
+    assert any("AXValueDescription<str>='12'" in line
+               and "it is in AXValueDescription, and the listing reads a static text's AXValue" in line
+               for line in lines), lines
+
+
+def test_a_value_on_a_role_the_listing_does_not_represent_is_named_as_such(cn):
+    lines, _ = _locate(cn, El("AXGenericElement", value="12", actions=(), frame=(10, 10, 100, 30)))
+    assert any("AXGenericElement is a role the listing does not represent" in line for line in lines), lines
+
+
+def test_an_element_reached_only_through_contents_is_found_and_flagged(cn):
+    hidden = El("AXStaticText", value="12", actions=(), frame=(10, 10, 100, 30))
+    lines, _ = _locate(cn, El("AXScrollArea", actions=(), frame=(0, 0, 200, 200), AXContents=[hidden]))
+    assert any("reached only through AXContents, which the traversal does not follow" in line for line in lines), lines
+
+
+def test_a_value_with_no_area_or_inside_a_skipped_container_is_explained(cn):
+    lines, _ = _locate(cn, El("AXStaticText", value="12", actions=(), frame=(10, 10, 0, 0)),
+                       El("AXScrollBar", actions=(), frame=(0, 0, 20, 200), children=[
+                           El("AXStaticText", value="12", actions=(), frame=(1, 1, 10, 10))]))
+    text = "\n".join(lines)
+    assert "its frame has no area, so it is skipped as hidden" in text
+    assert "it is inside a container the listing skips" in text
+
+
+def test_when_the_app_exposes_the_value_nowhere_the_search_says_only_the_screenshot_has_it(cn):
+    lines, _ = _locate(cn, El("AXStaticText", description="Edit field", value="", actions=(), frame=(10, 10, 100, 30)))
+    assert "is in no attribute of anything reachable from the window" in lines[1]
+    assert "only the screenshot has it" in lines[1]
+
+
+def test_the_search_stays_inside_the_window_and_does_not_climb_to_its_parent(cn):
+    """AXParent leads up to the application and from there to every other window and the menu bar."""
+    stray = El("AXMenuItem", "12", actions=())
+    app = El("AXApplication", "Calculator", actions=(), AXMenuBar=stray)
+    window = El("AXWindow", "Calculator", actions=(), frame=(0, 0, 300, 400), children=[
+        El("AXStaticText", value="0", actions=(), frame=(10, 10, 100, 30))], AXParent=app)
+    app.attrs["AXWindows"] = [window]
+    app.attrs["AXFocusedWindow"] = window
+    backend = ProbeMac({"Calculator": (101, app)}, front="Calculator")
+    from jarvis.surfaces.native import ax
+
+    lines = cn.locate_text(backend, 101, "12", ax.snapshot(backend, window))
+    assert lines[0].startswith("searched 2 elements") and "is in no attribute" in lines[1]
+
+
+def test_the_search_stops_at_its_budget_and_visits_each_element_once(cn):
+    shared = El("AXStaticText", value="x", actions=(), frame=(1, 1, 5, 5))
+    many = [El("AXGroup", actions=(), frame=(0, 0, 10, 10), children=[shared], AXContents=[shared])
+            for _ in range(30)]
+    window = El("AXWindow", "W", actions=(), frame=(0, 0, 300, 400), children=many)
+    app = El("AXApplication", "W", actions=(), AXWindows=[window], AXFocusedWindow=window)
+    backend = ProbeMac({"W": (1, app)}, front="W")
+    from jarvis.surfaces.native import ax
+
+    snap = ax.snapshot(backend, window)
+    assert cn.locate_text(backend, 1, "zzz", snap)[0].startswith("searched 32 elements")
+    assert cn.locate_text(backend, 1, "zzz", snap, budget=5)[0].startswith("searched 5 elements")
+
+
+async def test_a_failing_calculator_read_prints_the_search_before_the_raw_dump(cn, capsys, monkeypatch):
+    calculator = Calculator(display_as="number")
+    surface = surface_for({"Calculator": (101, calculator.app)}, "Calculator", ClickingInput(calculator))
+    cn.read_clipboard = lambda: "12"
+    calculator.press = lambda key: None
+    assert await cn.calculator_click(surface) is False
+    out = capsys.readouterr().out
+    assert out.index("searched ") < out.index("AXStaticText Description='Edit field'<str> Value=0<int>")
+    assert "“12” is in no attribute of anything reachable from the window" in out, \
+        "the plain fake backend can't list attributes, so the default set is searched"
+
+
 async def test_a_calculator_that_was_already_open_is_left_open(cn, calc, monkeypatch):
     _, surface = calc
     monkeypatch.setattr(cn, "is_running", lambda app: True)
@@ -270,15 +374,37 @@ class TextEdit:
     """TextEdit with a File menu whose items are logged, and a Save sheet
     (Where pop-up, Cancel) that appears when File ▸ Save… is chosen."""
 
-    def __init__(self, *, desktop: bool = True, new: bool = True):
+    #: The "Where:" menu as a Mac listed it: names inside invisible bidi isolates, qualified iCloud
+    #: folders, greyed-out headings, and "Desktop — iCloud" under two of them.
+    ICLOUD = [("iCloud Library", False), ("\u2068Desktop\u2069 — iCloud", True), ("iCloud Drive", True),
+              ("\u2068TextEdit\u2069 — iCloud", True), ("Locations", False), ("Macintosh HD", True),
+              ("iCloud Drive", True), ("ndinisio", True), ("Favourites", False),
+              ("\u2068Desktop\u2069 — iCloud", True), ("\u2068Documents\u2069 — iCloud", True),
+              ("Downloads", True)]
+
+    def __init__(self, *, desktop: bool = True, new: bool = True, where: str = "simple",
+                 menu: list[tuple[str, bool]] | None = None):
         self.log: list[str] = []
         self.chosen = ""
         self.popup_value = "Documents"
-        documents, desktop_item = El("AXMenuItem", "Documents"), El("AXMenuItem", "Desktop")
-        documents.on_perform = lambda _a: self._choose("Documents")
-        desktop_item.on_perform = lambda _a: self._choose("Desktop")
-        self.popup = El("AXPopUpButton", "Where", value="Documents", frame=(120, 300, 200, 22),
-                        children=[El("AXMenu", actions=(), children=[documents, *([desktop_item] if desktop else [])])])
+        self.pressed: list[str] = []
+        if where == "icloud":
+            titles = [(t, e) for t, e in (menu or self.ICLOUD) if desktop or "Desktop" not in t]
+            entries = []
+            for number, (title, enabled) in enumerate(titles, 1):
+                item = El("AXMenuItem", title, enabled=enabled)
+                item.on_perform = lambda _a, n=number, t=title: (self.pressed.append(f"{n}:{t}"), self._choose(t))
+                entries.append(item)
+            self.popup = El("AXPopUpButton", "Where:", value="\u2068TextEdit\u2069 — iCloud",
+                            frame=(120, 300, 200, 22))
+            menu = El("AXMenu", actions=("AXCancel",), children=entries)
+            self.popup.on_perform = lambda _a: self.popup.children.append(menu) if not self.popup.children else None
+        else:
+            documents, desktop_item = El("AXMenuItem", "Documents"), El("AXMenuItem", "Desktop")
+            documents.on_perform = lambda _a: self._choose("Documents")
+            desktop_item.on_perform = lambda _a: self._choose("Desktop")
+            self.popup = El("AXPopUpButton", "Where", value="Documents", frame=(120, 300, 200, 22),
+                            children=[El("AXMenu", actions=(), children=[documents, *([desktop_item] if desktop else [])])])
         cancel = El("AXButton", "Cancel", frame=(300, 380, 80, 24))
         cancel.on_perform = lambda _a: self._cancel()
         self.sheet = El("AXSheet", actions=(), frame=(60, 200, 480, 220), children=[
@@ -317,6 +443,29 @@ async def test_the_save_sheets_popup_is_set_to_desktop_then_cancelled_and_closed
     assert textedit.popup.attrs["AXValue"] == "Desktop"
     assert textedit.log == ["New", "Save…", "Cancel", "Close"], "nothing saved, one document closed"
     assert ("quit", "TextEdit") in cn.calls
+
+
+async def test_a_desktop_listed_twice_is_refused_then_chosen_by_number_and_the_popup_must_say_desktop(cn, capsys):
+    """The Where: pop-up on a Mac with iCloud Desktop: "Desktop — iCloud" under two headings."""
+    textedit = TextEdit(where="icloud")
+    surface = surface_for({"TextEdit": (303, textedit.app)}, "TextEdit")
+    assert await cn.guarded("x", cn.textedit_dropdown(surface)) is True
+    out = capsys.readouterr().out
+    assert "✓ an option the menu lists twice is refused, not guessed" in out
+    assert "1. “Desktop — iCloud” (under “iCloud Library”); 2. “Desktop — iCloud” (under “Favourites”)" in out
+    assert "✓ the pop-up now says Desktop" in out and "✗" not in out
+    assert textedit.pressed == ["2:\u2068Desktop\u2069 — iCloud"], "exactly one item was pressed: the first match"
+    assert textedit.log == ["New", "Save…", "Cancel", "Close"]
+
+
+async def test_a_unique_qualified_desktop_is_chosen_without_asking(cn, capsys):
+    only_one = [entry for index, entry in enumerate(TextEdit.ICLOUD) if index != 9]   # the second Desktop is gone
+    textedit = TextEdit(where="icloud", menu=only_one)
+    surface = surface_for({"TextEdit": (303, textedit.app)}, "TextEdit")
+    assert await cn.guarded("x", cn.textedit_dropdown(surface)) is True
+    out = capsys.readouterr().out
+    assert "refused" not in out and "✓ the pop-up now says Desktop" in out
+    assert textedit.pressed == ["2:\u2068Desktop\u2069 — iCloud"]
 
 
 async def test_a_popup_without_the_option_lists_the_options_it_has_and_still_cleans_up(cn, capsys):
@@ -517,6 +666,34 @@ def test_a_gesture_without_the_pauses_is_not_taken_either(home):
     assert (finder.base / "drag-me.txt").exists(), "no time to begin the drag, no time over the target"
 
 
+async def test_a_move_that_lands_a_moment_after_the_drop_is_a_pass_and_one_that_never_does_is_not(cn, home, monkeypatch):
+    finder = Finder(home)
+    surface = finder_surface(finder, finder_input(finder, accepts=False))
+    polls = []
+
+    async def slow(seconds):
+        if surface.last_drag is not None:
+            polls.append(seconds)
+            if len(polls) == 6:
+                (finder.base / "drag-me.txt").rename(finder.base / "target" / "drag-me.txt")
+
+    monkeypatch.setattr(cn, "pause", slow)
+    assert await cn.guarded("x", cn.finder_drag(surface)) is True
+    assert len(polls) == 6, "it stopped looking as soon as the postcondition held"
+
+    again = Finder(home)
+    never = finder_surface(again, finder_input(again, accepts=False))
+    polls.clear()
+
+    async def nothing(seconds):
+        if never.last_drag is not None:
+            polls.append(seconds)
+
+    monkeypatch.setattr(cn, "pause", nothing)
+    assert await cn.guarded("x", cn.finder_drag(never)) is False
+    assert len(polls) == 16, "...and the wait is bounded: four seconds of quarter-second looks"
+
+
 async def test_a_drag_that_moved_nothing_is_a_failure_that_says_where_it_pressed_and_what_was_there(cn, home, capsys):
     finder = Finder(home)
     surface = finder_surface(finder, finder_input(finder, accepts=False))          # Finder ignores the drop
@@ -526,7 +703,8 @@ async def test_a_drag_that_moved_nothing_is_a_failure_that_says_where_it_pressed
     assert "Dragged “drag-me.txt · --” onto “target · --”" in out, \
         "rows are named as the listing names them, by the text inside — not the empty “” of before"
     assert "on disk: ['drag-me.txt', 'target']" in out
-    assert "drag-me.txt is still at the top of the folder; target/drag-me.txt does not exist" in out
+    assert f"{finder.base / 'drag-me.txt'} still exists; {finder.base / 'target' / 'drag-me.txt'} does not exist" in out
+    assert "afterwards the file's row is not selected, the folder's row is not selected" in out
     assert "pressed at (30, 111) on its icon in the row at (20, 100, 400×22)" in out
     assert "released at (30, 141) on its icon in the row at (20, 130, 400×22)" in out
     assert "under that point: AXImage ‹ AXCell ‹ AXRow ‹ AXOutline" in out

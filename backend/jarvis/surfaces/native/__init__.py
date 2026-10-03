@@ -6,6 +6,6 @@ numbers what's worth pointing at, and ``surface`` ties them together for the
 app tools. ``backend`` is the only module that touches PyObjC.
 """
 
-from .surface import PERMISSION_HINT, NativeError, NativeSurface
+from .surface import PERMISSION_HINT, AmbiguousOption, NativeError, NativeSurface
 
-__all__ = ["PERMISSION_HINT", "NativeError", "NativeSurface"]
+__all__ = ["PERMISSION_HINT", "AmbiguousOption", "NativeError", "NativeSurface"]

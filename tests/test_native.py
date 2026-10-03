@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 from jarvis.intelligence.operator import Budget, Operator
 from jarvis.security import consequence
-from jarvis.surfaces.native import PERMISSION_HINT, NativeError, NativeSurface
+from jarvis.surfaces.native import PERMISSION_HINT, AmbiguousOption, NativeError, NativeSurface
 from jarvis.surfaces.native import ax as axmod
 from jarvis.surfaces.native.input import Keystroke, NativeInput, resolve_key, text_chunks
 from jarvis.surfaces.native.marks import (
@@ -849,6 +849,22 @@ async def test_a_menu_that_fills_in_when_opened_is_opened(notes):
     assert parts["file"].performed == ["AXPress"] and parts["export"].performed == ["AXPress"]
 
 
+async def test_a_menu_path_takes_the_first_of_identical_titles_but_never_guesses_a_looser_fit(notes):
+    """Two open windows called "Untitled" sit side by side in the Window menu: the path has always
+    meant the first. A request that merely starts like two items ("Save" for "Save As…" and
+    "Save a Version") is still refused."""
+    surface, _, _, parts = notes
+    first, second = El("AXMenuItem", "Untitled"), El("AXMenuItem", "Untitled")
+    save_as, version = El("AXMenuItem", "Save As…"), El("AXMenuItem", "Save a Version")
+    menu = parts["file"].children[0]
+    menu.children = [first, second, save_as, version]
+    await surface.choose_menu(["File", "Untitled"])
+    assert first.performed == ["AXPress"] and second.performed == []
+    with pytest.raises(NativeError, match="There's no “Save” in File"):
+        await surface.choose_menu(["File", "Save"])
+    assert save_as.performed == [] and version.performed == []
+
+
 async def test_an_option_is_chosen_from_a_pop_up(notes):
     surface, _, _, parts = notes
     a4 = El("AXMenuItem", "A4")
@@ -860,6 +876,103 @@ async def test_an_option_is_chosen_from_a_pop_up(notes):
     assert a4.performed == ["AXPress"] and summary == "Chose “A4” in “Paper size”."
     with pytest.raises(NativeError, match="it has: Letter, A4"):
         await surface.choose_option(await _handle(surface, "Paper size"), "Legal")
+
+
+def _where_popup(parts) -> tuple[El, list[El], list[str]]:
+    """The "Where:" pop-up of a Mac's TextEdit Save sheet, as it listed itself: the names wrapped in
+    invisible bidi isolates, the iCloud folders qualified, headings greyed out, and both "iCloud Drive"
+    and "Desktop — iCloud" listed twice. Returns the pop-up, its items and the order they were pressed."""
+    fsi, pdi = "\u2068", "\u2069"
+    titles = [("iCloud Library", False), (f"{fsi}Desktop{pdi} — iCloud", True), ("iCloud Drive", True),
+              (f"{fsi}TextEdit{pdi} — iCloud", True), ("Locations", False), ("Macintosh HD", True),
+              ("iCloud Drive", True), ("ndinisio", True), ("Google Chrome", True), ("Favourites", False),
+              (f"{fsi}Desktop{pdi} — iCloud", True), (f"{fsi}Documents{pdi} — iCloud", True),
+              ("Projects", True), ("School", True), ("Downloads", True)]
+    pressed: list[str] = []
+    popup = El("AXPopUpButton", "Where:", value="TextEdit — iCloud", frame=(300, 530, 100, 20))
+    items = []
+    for index, (title, enabled) in enumerate(titles, 1):
+        item = El("AXMenuItem", title, enabled=enabled)
+        item.on_perform = lambda _a, n=index, t=title: (pressed.append(f"{n}:{t}"),
+                                                         popup.attrs.update({"AXValue": t}))
+        items.append(item)
+    menu = El("AXMenu", actions=("AXCancel",), children=items)
+    popup.on_perform = lambda action: popup.children.append(menu) if action == "AXPress" and not popup.children else None
+    parts["split"].children.append(popup)
+    return popup, items, pressed
+
+
+async def test_a_requested_name_finds_the_qualified_item_the_app_shows(notes):
+    surface, _, _, parts = notes
+    popup, items, pressed = _where_popup(parts)
+    summary = await surface.choose_option(await _handle(surface, "Where:"), "Documents")
+    assert pressed == ["12:\u2068Documents\u2069 — iCloud"] and items[11].performed == ["AXPress"]
+    assert summary == "Chose “Documents — iCloud” in “Where:”.", "the isolates are not in what is reported"
+    assert popup.attrs["AXValue"].endswith("— iCloud")
+
+
+async def test_a_name_two_items_carry_is_refused_with_a_way_to_say_which(notes):
+    surface, _, _, parts = notes
+    popup, items, pressed = _where_popup(parts)
+    with pytest.raises(AmbiguousOption) as raised:
+        await surface.choose_option(await _handle(surface, "Where:"), "Desktop")
+    error = raised.value
+    assert pressed == [], "nothing was chosen"
+    assert [c.index for c in error.candidates] == [2, 11]
+    assert "has 2 options that fit “Desktop”" in error.message
+    assert "1. “Desktop — iCloud” (under “iCloud Library”)" in error.message
+    assert "2. “Desktop — iCloud” (under “Favourites”)" in error.message
+    assert "occurrence" in error.message and "\u2068" not in error.message
+    assert error.detail.startswith("ambiguous")
+    menu = popup.children[0]
+    assert menu.performed == ["AXCancel"], "the pop-up the call opened was closed again"
+
+
+async def test_an_occurrence_chooses_the_nth_of_the_matches(notes):
+    surface, _, _, parts = notes
+    popup, items, pressed = _where_popup(parts)
+    handle = await _handle(surface, "Where:")
+    summary = await surface.choose_option(handle, "Desktop", occurrence=2)
+    assert pressed == ["11:\u2068Desktop\u2069 — iCloud"] and items[10].performed == ["AXPress"]
+    assert items[1].performed == []
+    assert summary == "Chose “Desktop — iCloud” (the 2nd of 2 that fit) in “Where:”."
+    again = await surface.choose_option(handle, "Desktop", occurrence=1)
+    assert items[1].performed == ["AXPress"] and "the 1st of 2" in again
+
+
+async def test_an_occurrence_beyond_the_matches_is_an_error_not_the_last_one(notes):
+    surface, _, _, parts = notes
+    popup, items, pressed = _where_popup(parts)
+    with pytest.raises(NativeError, match="only 2 option.*no number 3") as raised:
+        await surface.choose_option(await _handle(surface, "Where:"), "Desktop", occurrence=3)
+    assert not isinstance(raised.value, AmbiguousOption) and pressed == []
+
+
+async def test_identical_labels_without_a_qualifier_are_ambiguous_too(notes):
+    surface, _, _, parts = notes
+    popup, items, pressed = _where_popup(parts)
+    with pytest.raises(AmbiguousOption) as raised:
+        await surface.choose_option(await _handle(surface, "Where:"), "iCloud Drive")
+    assert [c.index for c in raised.value.candidates] == [3, 7]
+    assert "(under “iCloud Library”)" in raised.value.message and "(under “Locations”)" in raised.value.message
+
+
+async def test_a_plain_exact_name_and_an_unlisted_one(notes):
+    surface, _, _, parts = notes
+    popup, items, pressed = _where_popup(parts)
+    handle = await _handle(surface, "Where:")
+    assert await surface.choose_option(handle, "downloads") == "Chose “Downloads” in “Where:”."
+    with pytest.raises(NativeError, match="has no option “Pictures”.*Locations \\(greyed out\\)") as raised:
+        await surface.choose_option(handle, "Pictures")
+    assert "Desktop — iCloud" in raised.value.message and "\u2068" not in raised.value.message
+
+
+async def test_a_heading_is_greyed_out_not_chosen(notes):
+    surface, _, _, parts = notes
+    popup, items, pressed = _where_popup(parts)
+    with pytest.raises(NativeError, match="“Locations” is greyed out right now"):
+        await surface.choose_option(await _handle(surface, "Where:"), "Locations")
+    assert pressed == []
 
 
 async def test_dragging_between_plain_controls_goes_from_centre_to_centre(notes):
@@ -1132,6 +1245,45 @@ def test_after_a_drag_the_next_move_glides_from_where_it_ended():
     native.click(300, 0)
     glided = [x for _, kind, x, _ in line.log[mark:] if kind == "move"]
     assert glided[0] > 200 and glided[-1] == 300, "from the drop point, not back from where the drag began"
+
+
+class _FakeQuartz:
+    """Enough of Quartz to see which events QuartzPoster builds and what it sets on them."""
+
+    kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGEventMouseMoved, kCGEventLeftMouseDragged = 1, 2, 5, 6
+    kCGMouseButtonLeft, kCGMouseEventClickState, kCGHIDEventTap = 0, 1, 0
+
+    def __init__(self):
+        self.created, self.fields, self.posted = [], [], []
+
+    def CGPointMake(self, x, y):
+        return (x, y)
+
+    def CGEventCreateMouseEvent(self, source, kind, point, button):
+        event = {"kind": kind, "point": point, "button": button}
+        self.created.append(event)
+        return event
+
+    def CGEventSetIntegerValueField(self, event, field, value):
+        self.fields.append((event["kind"], field, value))
+
+    def CGEventPost(self, tap, event):
+        self.posted.append(event["kind"])
+
+
+def test_the_quartz_poster_builds_every_mouse_event_a_drag_needs():
+    from jarvis.surfaces.native.input import QuartzPoster
+
+    quartz = _FakeQuartz()
+    poster = QuartzPoster(quartz)
+    poster.mouse("move", 1, 2)
+    poster.mouse("down", 3, 4, "left", 1)
+    poster.mouse("drag", 5, 6)
+    poster.mouse("up", 7, 8, "left", 1)
+    assert quartz.posted == [5, 1, 6, 2]
+    assert [e["point"] for e in quartz.created] == [(1, 2), (3, 4), (5, 6), (7, 8)]
+    assert (6, 1, 1) in quartz.fields, "the dragged events carry the press's click count of 1"
+    assert not any(kind == 5 for kind, _, _ in quartz.fields), "a plain move carries none"
 
 
 def test_glide_points_end_exactly_on_the_target():
@@ -1425,6 +1577,20 @@ async def test_choose_option_reports_what_the_control_actually_shows_afterward(a
     result = await app.deps.registry.call("choose_option", {"handle": handle, "option": "a4"}, ctx)
     assert result.ok
     assert result.data["current_value"] == "A4"
+
+
+async def test_choose_option_asks_which_when_several_fit_and_takes_an_occurrence(app, mac, ctx):
+    surface, _, _, parts = mac
+    popup, items, pressed = _where_popup(parts)
+    handle = await _handle(surface, "Where:")
+    asked = await app.deps.registry.call("choose_option", {"handle": handle, "option": "Desktop"}, ctx)
+    assert not asked.ok and "has 2 options that fit “Desktop”" in asked.summary and pressed == []
+    chosen = await app.deps.registry.call(
+        "choose_option", {"handle": handle, "option": "Desktop", "occurrence": 2}, ctx)
+    assert chosen.ok and pressed == ["11:\u2068Desktop\u2069 — iCloud"]
+    assert chosen.data["current_value"] == "Desktop — iCloud", "read back without the invisible marks"
+    from jarvis.tools.native.tools import ChooseOptionTool
+    assert ChooseOptionTool.spec.parameters["properties"]["occurrence"]["minimum"] == 1
 
 
 async def test_mark_screen_respects_the_caption_config_flag_end_to_end(app, mac, ctx, fake_provider,

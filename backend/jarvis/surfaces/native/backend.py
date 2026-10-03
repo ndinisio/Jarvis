@@ -211,6 +211,21 @@ class MacAXBackend:
                 pass
         return {name: self.attribute(element, name) for name in names}
 
+    def attribute_names(self, element: Any) -> list[str]:
+        """Every attribute the element supports — for a validation run that must find where an app
+        keeps something, not just look where the listing already does."""
+        try:
+            error, names = self.AS.AXUIElementCopyAttributeNames(element, None)
+        except Exception:
+            return []
+        return [str(n) for n in (names or [])] if error == 0 else []
+
+    def is_element(self, value: Any) -> bool:
+        try:
+            return bool(self.CF.CFGetTypeID(value) == self.AS.AXUIElementGetTypeID())
+        except Exception:
+            return False
+
     def actions(self, element: Any) -> list[str]:
         try:
             error, names = self.AS.AXUIElementCopyActionNames(element, None)

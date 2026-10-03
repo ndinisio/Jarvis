@@ -26,7 +26,7 @@ from typing import Any
 
 from ...core.logging import get_logger
 from ...security import denylist
-from . import ax
+from . import ax, options
 from .ax import Control, Frame, WindowSnapshot
 from .input import PASTE_THRESHOLD, Clipboard, Keystroke, NativeInput, resolve_key
 from .marks import Mark, build_marks, draw_overlay, image_size, render_marks
@@ -71,6 +71,15 @@ class NativeError(Exception):
         self.message = message
         self.wrong_tool = wrong_tool
         self.detail = detail or message
+
+
+class AmbiguousOption(NativeError):
+    """More than one item fits the request, so none was chosen. ``candidates`` are the matches,
+    in menu order; ``occurrence`` on the next call says which."""
+
+    def __init__(self, message: str, candidates: list[options.Option]):
+        super().__init__(message, detail=f"ambiguous: {len(candidates)} options match")
+        self.candidates = candidates
 
 
 class NativeSurface:
@@ -350,31 +359,46 @@ class NativeSurface:
             self._guard(front[1])
         await asyncio.to_thread(self.input.press, stroke, repeat)
 
-    async def choose_option(self, handle: str, option: str) -> str:
-        return await asyncio.to_thread(self._choose_option, handle, option)
+    async def choose_option(self, handle: str, option: str, *, occurrence: int | None = None) -> str:
+        return await asyncio.to_thread(self._choose_option, handle, option, occurrence)
 
-    def _choose_option(self, handle: str, option: str) -> str:
+    def _choose_option(self, handle: str, option: str, occurrence: int | None = None) -> str:
         element, pid, attrs = self._resolve(handle)
         backend = self.backend
         name = ax.label_for(attrs) or "the menu"
-        items = self._menu_items(element)
+        items = self._menu_options(element)
         opened = False
         if not items:
             with self.watch(pid, MENU_OPENED) as wake:
                 backend.perform(element, "AXPress")
                 opened = True
                 self._poll(lambda: bool(self._menu_items(element)), timeout_s=1.5, wake=wake)
-            items = self._menu_items(element)
-        chosen = _match(items, option, backend)
-        if chosen is None:
+            items = self._menu_options(element)
+        found = options.resolve(items, option, occurrence=occurrence)
+        if found.option is None:
             self._dismiss(element, opened)
-            titles = [t for t in (_title(backend, i) for i in items) if t]
+            if found.ambiguous:
+                listing = "; ".join(options.describe(n, o) for n, o in enumerate(found.matches[:8], 1))
+                raise AmbiguousOption(
+                    f"“{name}” has {len(found.matches)} options that fit “{option}” — {listing}. "
+                    "Say which: choose_option again with occurrence set to its number, or give "
+                    "more of its name if they differ.", found.matches)
+            if found.out_of_range:
+                raise NativeError(f"“{name}” has only {len(found.matches)} option(s) that fit “{option}”, "
+                                  f"so there is no number {occurrence}.")
+            titles = [f"{o.title}{'' if o.enabled else ' (greyed out)'}" for o in items]
             raise NativeError(f"“{name}” has no option “{option}”"
-                              + (f" — it has: {', '.join(titles[:15])}." if titles else "."))
-        if not backend.perform(chosen, "AXPress"):
+                              + (f" — it has: {', '.join(titles[:25])}." if titles else "."))
+        chosen = found.option
+        if not chosen.enabled:
+            self._dismiss(element, opened)
+            raise NativeError(f"“{chosen.title}” is greyed out right now.")
+        if not backend.perform(chosen.element, "AXPress"):
             self._dismiss(element, opened)
             raise NativeError(f"I couldn't choose “{option}”.")
-        return f"Chose “{_title(backend, chosen)}” in “{name}”."
+        which = (f" (the {options.ordinal(found.matches.index(chosen) + 1)} of {len(found.matches)} that fit)"
+                 if len(found.matches) > 1 else "")
+        return f"Chose “{chosen.title}”{which} in “{name}”."
 
     async def choose_menu(self, path: list[str], app: str = "") -> str:
         return await asyncio.to_thread(self._choose_menu, path, app)
@@ -611,6 +635,20 @@ class NativeSurface:
                 items.append(child)
         return [i for i in items if _title(self.backend, i)]
 
+    def _menu_options(self, element: Any) -> list[options.Option]:
+        """The menu's titled items as options: in order, with whether each can be chosen and the
+        heading (the nearest greyed-out item) it sits under."""
+        backend = self.backend
+        found: list[options.Option] = []
+        heading = ""
+        for item in self._menu_items(element):
+            enabled = backend.attribute(item, "AXEnabled") is not False
+            title = _title(backend, item)
+            found.append(options.Option(item, title, enabled, len(found) + 1, heading))
+            if not enabled:
+                heading = title
+        return found
+
     def _dismiss(self, element: Any, opened: bool) -> None:
         if not opened or element is None:
             return
@@ -771,27 +809,13 @@ def _title(backend: Any, element: Any) -> str:
     return ""
 
 
-def _normal(text: str) -> str:
-    text = " ".join(text.lower().replace("…", "...").split())
-    return text.rstrip(".: ").strip()
-
-
 def _match(elements: list[Any], wanted: str, backend: Any) -> Any:
-    """The element titled *wanted*: exactly (ignoring case and a trailing
-    "…"), else the only one that starts with it, else the only one that
-    contains it."""
-    target = _normal(wanted)
-    if not target:
-        return None
-    titled = [(e, _normal(_title(backend, e))) for e in elements]
-    exact = [e for e, t in titled if t == target]
-    if exact:
-        return exact[0]
-    for test in (lambda t: t.startswith(target), lambda t: target in t):
-        hits = [e for e, t in titled if t and test(t)]
-        if len(hits) == 1:
-            return hits[0]
-    return None
+    """The menu-path item titled *wanted* (see :mod:`.options` for the rule). Several items with
+    the very same title resolve to the first — two open windows called "Untitled" in the Window
+    menu — but a looser fit that is not unique is refused."""
+    items = [options.Option(e, _title(backend, e), True, n) for n, e in enumerate(elements, 1)]
+    found = options.resolve(items, wanted, strict=False)
+    return found.option.element if found.option is not None else None
 
 
 def _is_dialog(backend: Any, window: Any) -> bool:
@@ -800,4 +824,4 @@ def _is_dialog(backend: Any, window: Any) -> bool:
             or bool(attrs.get("AXModal")))
 
 
-__all__ = ["PERMISSION_HINT", "Frame", "NativeError", "NativeSurface"]
+__all__ = ["PERMISSION_HINT", "AmbiguousOption", "Frame", "NativeError", "NativeSurface"]

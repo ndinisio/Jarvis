@@ -62,7 +62,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import native_validation as nv  # noqa: E402  (this folder; see its docstring)
-from jarvis.surfaces.native import NativeError, NativeSurface  # noqa: E402
+from jarvis.surfaces.native import AmbiguousOption, NativeError, NativeSurface  # noqa: E402
 from jarvis.surfaces.native.input import resolve_key  # noqa: E402
 from jarvis.surfaces.native.marks import MIN_CONFIDENCE, image_size, recognize_text, to_points  # noqa: E402
 from jarvis.surfaces.native.surface import ACTIVATED, MENU_OPENED  # noqa: E402
@@ -522,6 +522,104 @@ def text_structure(backend, pid: int, *, limit: int = 40, depth: int = 12) -> li
     return lines or ["no text-like element found in the front window"]
 
 
+#: Attributes that lead *out of* the part of the tree being searched (up, or to the focus), not into it.
+LINKS_NOT_FOLLOWED = {"AXParent", "AXTopLevelUIElement", "AXWindow", "AXFocusedUIElement", "AXFocusedWindow",
+                      "AXMainWindow", "AXFrontmostWindow"}
+DEFAULT_ATTRIBUTES = ("AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXValueDescription",
+                      "AXHelp", "AXIdentifier", "AXPlaceholderValue", "AXSelectedText", "AXChildren",
+                      "AXContents", "AXVisibleChildren", "AXPosition", "AXSize")
+
+
+def plain_text(value) -> str:
+    """A value as a person would read it: direction marks and spacing aside, a whole number as itself."""
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return " ".join(str(value).translate({ord(c): None for c in "\u200e\u200f\u202a\u202c\u2066\u2067\u2068\u2069"}).split())
+
+
+def locate_text(backend, pid: int, needle: str, snap, *, budget: int = 500) -> list[str]:
+    """Where in *pid*'s front window does the app keep *needle*? Every attribute of every element
+    reachable through any attribute that leads to other elements (children, contents, rows, …) is
+    searched, and each place it turns up is described with whether ``read_window`` listed it and,
+    if not, which rule left it out. The answer to "is it an attribute we ignore, an element the
+    traversal skips, or something the app never exposes?" — read off the real tree."""
+    from jarvis.surfaces.native import ax
+
+    window = backend.front_window(backend.application(pid))
+    if window is None:
+        return ["no front window"]
+    names_of = getattr(backend, "attribute_names", None)
+    is_element = getattr(backend, "is_element", lambda value: False)
+    queue = [(window, [], "the window", False)]
+    seen: list = []
+    found, visited, attributes = [], 0, 0
+    while queue and visited < budget:
+        element, path, via, under_skipped = queue.pop(0)
+        if any(backend.same(element, other) for other in seen):
+            continue
+        seen.append(element)
+        visited += 1
+        names = (names_of(element) if names_of else []) or list(DEFAULT_ATTRIBUTES)
+        values = backend.attributes(element, tuple(names))
+        attributes += len(values)
+        role = str(values.get("AXRole") or "?")
+        here = [*path, role]
+        position, size = values.get("AXPosition"), values.get("AXSize")
+        frame = ax.frame_of({"AXPosition": position, "AXSize": size})
+        skipped = under_skipped or role in ax.SKIP
+        for name, value in values.items():
+            if isinstance(value, (list, tuple)) and value and all(is_element(v) for v in value):
+                if name not in LINKS_NOT_FOLLOWED:
+                    queue.extend((v, here, name, skipped) for v in value)
+            elif is_element(value):
+                if name not in LINKS_NOT_FOLLOWED:
+                    queue.append((value, here, name, skipped))
+            elif isinstance(value, (str, int, float)) and not isinstance(value, bool) and needle in plain_text(value):
+                reasons = []
+                if role not in {"AXStaticText", "AXHeading"} and role not in ax.ACTIONABLE:
+                    reasons.append(f"{role} is a role the listing does not represent")
+                elif role in {"AXStaticText", "AXHeading"} and name != "AXValue":
+                    reasons.append(f"it is in {name}, and the listing reads a static text's AXValue")
+                if via != "AXChildren" and via != "the window":
+                    reasons.append(f"it is reached only through {via}, which the traversal does not follow")
+                if frame is not None and frame.empty:
+                    reasons.append("its frame has no area, so it is skipped as hidden")
+                if skipped:
+                    reasons.append("it is inside a container the listing skips")
+                described = f"{name}<{type(value).__name__}>={plain_text(value)[:40]!r}"
+                found.append((described, here, via, frame, reasons, values))
+    shown = shows(snap, needle)
+    lines = [f"searched {visited} elements ({attributes} attributes) for “{needle}”; read_window "
+             f"{'lists it' if shown else 'does not list it'}"]
+    if not found:
+        return lines + [f"“{needle}” is in no attribute of anything reachable from the window "
+                        "— the app is not exposing it to Accessibility (only the screenshot has it)"
+                        + ("" if visited < budget else f"; the search stopped at {budget} elements")]
+    for described, path, via, frame, reasons, values in found[:8]:
+        label = " ".join(f"{key[2:].lower()}={plain_text(values.get(key))[:30]!r}"
+                         for key in ("AXTitle", "AXDescription") if values.get(key))
+        geometry = (f"frame=({frame.x:.0f},{frame.y:.0f} {frame.w:.0f}x{frame.h:.0f})"
+                    if frame is not None else "no-frame")
+        verdict = "listed" if shown and not reasons else ("not listed: " + "; ".join(reasons or ["no rule explains it"]))
+        lines.append(f"{described} on {path[-1]}{(' ' + label) if label else ''} — {' › '.join(path)}, "
+                     f"via {via}, {geometry} — {verdict}")
+    return lines
+
+
+async def show_text_location(surface: NativeSurface, app: str, needle: str, snap) -> None:
+    try:
+        found = surface.backend.find_app(app)
+        if found is None:
+            print(f"      evidence: {app} is not running")
+            return
+        for line in await asyncio.to_thread(locate_text, surface.backend, found[0], needle, snap):
+            print("      evidence: " + line)
+    except Exception as exc:
+        print("      evidence: couldn't search the tree — " + describe_failure(exc))
+
+
 async def show_text_structure(surface: NativeSurface, app: str) -> None:
     try:
         found = surface.backend.find_app(app)
@@ -579,6 +677,7 @@ async def calculator_click(surface: NativeSurface) -> bool:
             + f"; controls: {names(snap.controls, 14)}")
     ok &= step("read_window shows the result", shown, seen)
     if not shown:
+        await show_text_location(surface, "Calculator", "12", snap)
         await show_text_structure(surface, "Calculator")
     return ok
 
@@ -681,7 +780,15 @@ async def textedit_dropdown(surface: NativeSurface) -> bool:
                     ", ".join(f'“{c.label}”' for c in popups) or "controls: " + names(snap.controls)):
             return False
         popup = next((c for c in popups if "where" in c.label.lower()), popups[0])
-        summary = await surface.choose_option(popup.handle, "Desktop")
+        try:
+            summary = await surface.choose_option(popup.handle, "Desktop")
+        except AmbiguousOption as exc:
+            # Where: lists "Desktop — iCloud" under both its iCloud and its Favourites headings. Two
+            # items nothing in the request tells apart must be refused, not guessed; the postcondition
+            # is unchanged — once one is named, the pop-up has to read Desktop.
+            step("an option the menu lists twice is refused, not guessed",
+                 len(exc.candidates) >= 2, exc.message)
+            summary = await surface.choose_option(popup.handle, "Desktop", occurrence=1)
         await pause(0.8)
         snap, _ = await surface.read("TextEdit")
         again = next((c for c in snap.controls if c.ax_role == "AXPopUpButton"
@@ -714,13 +821,23 @@ def under_pointer(backend, point: tuple[float, float]) -> str:
     return " ‹ ".join(chain)
 
 
+def selection_after(snap) -> str:
+    """Which of the two rows Finder shows selected: a press that took hold of the file selects it,
+    so "the file's row is selected" says the press landed on the file and the drop was what failed."""
+    parts = []
+    for name, word in (("drag-me.txt", "the file's row"), ("target", "the folder's row")):
+        rows = [c for c in snap.controls if c.ax_role == "AXRow" and c.label.lower().startswith(name)]
+        parts.append(f"{word} is " + ("not shown" if not rows else "selected" if rows[0].selected else "not selected"))
+    return ", ".join(parts)
+
+
 def drag_evidence(surface: NativeSurface, base: Path, source: Path, target: Path) -> str:
     """After a drag that moved nothing: where the files are, and where the pointer pressed and
     let go (and what was under it) — enough to tell a drop the app refused from a press that
     never took hold of the file."""
     parts = [f"on disk: {sorted(str(p.relative_to(base)) for p in base.rglob('*'))}",
-             f"{source.name} {'is still' if source.exists() else 'is no longer'} at the top of the folder; "
-             f"target/{source.name} {'exists' if (target / source.name).exists() else 'does not exist'}"]
+             f"{source} {'still exists' if source.exists() else 'is gone'}; "
+             f"{target / source.name} {'exists' if (target / source.name).exists() else 'does not exist'}"]
     drag = surface.last_drag
     if drag:
         for key, verb, frame_key in (("from", "pressed", "source"), ("to", "released", "target")):
@@ -757,12 +874,22 @@ async def finder_drag(surface: NativeSurface) -> bool:
                     "controls: " + names(snap.controls)):
             return False
         summary = await surface.drag(file.handle, folder.handle)
-        await pause(1.5)
-        with RUN.verifying():
-            moved = (target / "drag-me.txt").exists() and not source.exists()
-        return step("the file is inside the folder", moved,
-                    summary + ("" if moved else " " + await asyncio.to_thread(
-                        drag_evidence, surface, base, source, target)))
+        # The same postcondition, looked at until it holds or four seconds have passed: Finder (and an
+        # iCloud-backed Desktop) can take a moment to finish a move it has accepted.
+        moved = False
+        for _ in range(16):
+            await pause(0.25)
+            with RUN.verifying():
+                moved = (target / "drag-me.txt").exists() and not source.exists()
+            if moved:
+                break
+        detail = summary
+        if not moved:
+            detail += " " + await asyncio.to_thread(drag_evidence, surface, base, source, target)
+            with contextlib.suppress(NativeError):
+                after, _ = await surface.read("Finder")
+                detail += "; afterwards " + selection_after(after)
+        return step("the file is inside the folder", moved, detail)
     finally:
         with contextlib.suppress(NativeError):
             front, _ = await surface.read("Finder")
@@ -1332,6 +1459,7 @@ async def main() -> int:
         args.act = args.controls = args.stale = args.observe = True
         args.json = args.json or Path(f"native-validation-{datetime.now():%Y%m%d-%H%M%S}.json")
     args.repeat = max(1, args.repeat)
+    print(nv.format_revision(nv.revision(ROOT)))
     surface = NativeSurface()
     if not surface.available():
         print("The native extras aren't installed here: pip install -e '.[native]' (macOS only).")

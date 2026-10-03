@@ -39,6 +39,10 @@ PYTHONPATH=backend python -m evals.run_mac --tasks textedit-save-plain-text,find
 python scripts/check_native.py --all --repeat 5   # 7  everything, five times, with timings and the criteria table
 ```
 
+Every run starts with a line like `code: v8.53 (3f2a9c1)`. Send it with the output: it is how a
+result is matched to the code that produced it (`git pull` first if it is older than expected;
+`+ uncommitted changes` means the checkout has been edited).
+
 Run 1 first. If it fails, stop and send it back: everything after rests on it. After
 1–5 each pass once, run 7 for repeatability and timings. Only then think about
 turning anything on.

@@ -169,6 +169,9 @@ class ChooseOptionTool(_NativeTool):
         parameters={"type": "object", "properties": {
             "handle": _HANDLE,
             "option": {"type": "string", "description": "the option's text"},
+            "occurrence": {"type": "integer", "minimum": 1,
+                           "description": "only when the result says several options fit: which of "
+                                          "them, by the number it gave"},
         }, "required": ["handle", "option"]},
         risk=RiskLevel.MEDIUM,
         category="screen",
@@ -188,7 +191,10 @@ class ChooseOptionTool(_NativeTool):
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
-            summary = await self.native.choose_option(str(args["handle"]), str(args["option"]))
+            occurrence = args.get("occurrence")
+            summary = await self.native.choose_option(
+                str(args["handle"]), str(args["option"]),
+                occurrence=int(occurrence) if isinstance(occurrence, (int, float)) and occurrence >= 1 else None)
         except NativeError as exc:
             return _failure(exc)
         # A single-element re-read (not a full read_window) — cheap enough

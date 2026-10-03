@@ -195,7 +195,7 @@ class QuartzPoster:
         }
         buttons = {"left": getattr(q, "kCGMouseButtonLeft", 0), "right": getattr(q, "kCGMouseButtonRight", 1)}
         event = q.CGEventCreateMouseEvent(None, types[(kind, button)], q.CGPointMake(x, y), buttons[button])
-        if kind in {"down", "up"}:
+        if kind in {"down", "up", "drag"}:       # a drag carries the press's click count, as a real one does
             q.CGEventSetIntegerValueField(event, getattr(q, "kCGMouseEventClickState", 1), click_state)
         q.CGEventPost(q.kCGHIDEventTap, event)
 

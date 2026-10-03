@@ -236,3 +236,44 @@ def test_every_label_a_criterion_waits_for_is_one_the_checks_actually_report(nv)
     literals = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
     missing = [label for criterion in nv.CRITERIA for label in criterion.labels if label not in literals]
     assert not missing, f"nothing in check_native.py reports: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# which code produced a result
+# ---------------------------------------------------------------------------
+class _Git:
+    def __init__(self, answers):
+        self.answers, self.calls = answers, []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append(command)
+        key = " ".join(command[3:])
+        out = self.answers.get(key)
+        return type("Done", (), {"stdout": (out or "") + "\n", "returncode": 0 if out is not None else 1})()
+
+
+def test_the_revision_names_the_commit_its_version_and_whether_it_was_edited(nv):
+    git = _Git({"rev-parse --short HEAD": "25b67bc", "log -1 --format=%s": "v8.52",
+                "status --porcelain --untracked-files=no": ""})
+    found = nv.revision("/repo", git)
+    assert found == {"commit": "25b67bc", "title": "v8.52", "dirty": False}
+    assert nv.format_revision(found) == "code: v8.52 (25b67bc)"
+    assert all(call[:3] == ["git", "-C", "/repo"] for call in git.calls)
+    edited = nv.revision("/repo", _Git({"rev-parse --short HEAD": "25b67bc", "log -1 --format=%s": "v8.52",
+                                         "status --porcelain --untracked-files=no": " M scripts/check_native.py"}))
+    assert edited["dirty"] and nv.format_revision(edited).endswith("+ uncommitted changes")
+
+
+def test_without_git_the_revision_says_so_instead_of_failing(nv):
+    def broken(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    found = nv.revision("/nowhere", broken)
+    assert found == {"commit": "", "title": "", "dirty": False}
+    assert "not a git checkout" in nv.format_revision(found)
+    assert nv.revision("/nowhere", _Git({}))["commit"] == "", "a non-zero exit is no commit"
+
+
+def test_the_report_carries_the_revision(nv):
+    report = nv.build_report(nv.Recorder(), argv=[], repeat=1, ok=True)
+    assert set(report["environment"]["revision"]) == {"commit", "title", "dirty"}

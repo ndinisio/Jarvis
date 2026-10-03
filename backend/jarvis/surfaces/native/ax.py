@@ -596,10 +596,15 @@ def shown_text(value: Any) -> str:
     return _text(value)
 
 
+#: Direction marks, embeddings and isolates: how an app keeps a name in the right order inside a
+#: sentence of another script ("⁨Desktop⁩ — iCloud"). Invisible, and in the way of every comparison.
+_BIDI = {ord(c): None for c in "\u200e\u200f\u061c\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"}
+
+
 def _text(value: Any) -> str:
     if value is None or isinstance(value, bool):
         return ""
     if isinstance(value, (int, float)):
         return ""
-    text = " ".join(str(value).split())
+    text = " ".join(str(value).translate(_BIDI).split())
     return text

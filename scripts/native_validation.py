@@ -29,6 +29,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 PHASES = ("observation", "locator", "action", "refresh", "verification", "settle")
@@ -237,8 +238,8 @@ CRITERIA = (
                "a button renamed in place is not pressed",
                "the same name in another window is not pressed")),
     Criterion("Controls", "Calculator, TextEdit and Finder checks pass",
-              ("pressing the buttons worked the sum", "clicking the mark pressed the button",
-               "the file is inside the folder")),
+              ("pressing the buttons worked the sum", "read_window shows the result",
+               "clicking the mark pressed the button", "the file is inside the folder")),
     Criterion("Save sheet", "the real TextEdit save flow works",
               ("the Save sheet lists a pop-up button", "the pop-up now says Desktop",
                "the save sheet appeared, listed first", "discarding closed the document without saving")),
@@ -321,6 +322,28 @@ def format_criteria(rows: list[tuple[str, str, str, str]]) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 # the report
 # ---------------------------------------------------------------------------------------------
+def revision(root: Path | str, run: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
+    """Which code produced a pasted result: the checkout's commit, its title (the ledger version,
+    "v8.52") and whether it has uncommitted changes. All empty when this isn't a git checkout."""
+    def git(*args: str) -> str:
+        try:
+            done = run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=5)
+        except Exception:
+            return ""
+        return done.stdout.strip() if getattr(done, "returncode", 1) == 0 else ""
+
+    commit = git("rev-parse", "--short", "HEAD")
+    return {"commit": commit, "title": git("log", "-1", "--format=%s") if commit else "",
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")) if commit else False}
+
+
+def format_revision(found: dict[str, Any]) -> str:
+    if not found.get("commit"):
+        return "code: not a git checkout (no version to report)"
+    return (f"code: {found['title'] or '?'} ({found['commit']})"
+            + (" + uncommitted changes" if found.get("dirty") else ""))
+
+
 def environment(run: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
     """Where this pass ran: enough to tell one machine's numbers from another's."""
     chip = ""
@@ -328,7 +351,8 @@ def environment(run: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
         chip = run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True,
                    timeout=5).stdout.strip()
     return {"macos": platform.mac_ver()[0], "machine": platform.machine(), "chip": chip,
-            "python": sys.version.split()[0], "platform": platform.platform()}
+            "python": sys.version.split()[0], "platform": platform.platform(),
+            "revision": revision(Path(__file__).resolve().parent.parent)}
 
 
 def build_report(recorder: Recorder, *, argv: list[str], repeat: int, ok: bool) -> dict[str, Any]:
